@@ -118,9 +118,28 @@ function WIDGET_API.GetName(self) return self._name end
 function WIDGET_API.GetParent(self) return self._parent end
 function WIDGET_API.SetParent(self, p) self._parent = p end
 function WIDGET_API.GetObjectType(self) return self._kind end
-function WIDGET_API.Show(self) self._shown = true end
-function WIDGET_API.Hide(self) self._shown = false end
-function WIDGET_API.SetShown(self, on) self._shown = on and true or false end
+-- w2/history sim extension (additive): the real client fires OnShow/OnHide
+-- script handlers on a genuine visibility TRANSITION (not on redundant calls);
+-- badge clear-on-show rides that fact, so the sim models it.
+function WIDGET_API.Show(self)
+    local was = self._shown
+    self._shown = true
+    if not was then
+        local fn = self._scripts and self._scripts.OnShow
+        if fn then fn(self) end
+    end
+end
+function WIDGET_API.Hide(self)
+    local was = self._shown
+    self._shown = false
+    if was then
+        local fn = self._scripts and self._scripts.OnHide
+        if fn then fn(self) end
+    end
+end
+function WIDGET_API.SetShown(self, on)
+    if on then self:Show() else self:Hide() end
+end
 function WIDGET_API.IsShown(self) return self._shown end
 function WIDGET_API.IsVisible(self) return self._shown end
 function WIDGET_API.SetAlpha(self, a) self._alpha = a end

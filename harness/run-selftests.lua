@@ -289,6 +289,11 @@ assert(loadfile(H("corestub.lua")), "corestub.lua failed to compile")()
 -- enables it itself (phase 1) and leaves it enabled.
 ----------------------------------------------------------------------
 _G.DaseekiChatDB = { modules = { skin = false } }
+-- w2/history suites: history + badges also start DISABLED, so the inertness
+-- gate below pins THEIR disabled-is-inert contract against the same login;
+-- each suite enables its own module (the skin pattern) and leaves it enabled.
+_G.DaseekiChatDB.modules.history = false
+_G.DaseekiChatDB.modules.badges  = false
 
 ----------------------------------------------------------------------
 -- ns namespace + suite-registration sentinel (Bags precedent: intercept the
@@ -380,8 +385,30 @@ do
     ck(Sim.CallCount("SetFading") == 0, "no chat frame's fading was touched")
     ck(ns.EventHandlerCount() == 4,
         "only core's 4 lifecycle events are registered (got " .. ns.EventHandlerCount() .. ")")
-    ck(#ns.ModuleOrder == 1 and ns.ModuleOrder[1] == "skin",
-        "exactly one module (skin) is registered in Wave 1")
+    -- w2/history suites: Wave 2 fills modules in place (toc order), so the pin
+    -- is the KNOWN SET, not "exactly skin". Sibling agents append their module
+    -- names to KNOWN_MODULES as they land.
+    local KNOWN_MODULES = { history = true, badges = true, skin = true }
+    local unknown = {}
+    for _, name in ipairs(ns.ModuleOrder) do
+        if not KNOWN_MODULES[name] then unknown[#unknown + 1] = name end
+    end
+    ck(#unknown == 0, "only known modules are registered (unknown: "
+        .. table.concat(unknown, ",") .. ")")
+    local haveSkin = false
+    for _, name in ipairs(ns.ModuleOrder) do
+        if name == "skin" then haveSkin = true end
+    end
+    ck(haveSkin, "skin is registered")
+    -- w2/history suites: disabled history/badges are behaviorally absent too.
+    ck(ns.History and ns.History.active == false, "history is inactive")
+    ck(ns.History and next(ns.History.hookedFrames) == nil,
+        "history wrapped no AddMessage while disabled")
+    ck(ns.Badges and ns.Badges.active == false, "badges is inactive")
+    ck(ns.Badges and next(ns.Badges.hookedFrames) == nil,
+        "badges wrapped no AddMessage while disabled")
+    ck(ns.Badges and ns.Badges.globalHooked == false,
+        "badges installed no hooksecurefunc while disabled")
     local styledAny = false
     for i = 1, 10 do
         local f = Sim.Frame(i)
@@ -583,7 +610,9 @@ realprint("")
 local PLACEHOLDER_KEYS = {
     Config = "config.lua", Reconcile = "reconcile.lua", Channels = "channels.lua",
     Decor = "decor.lua", Stamps = "stamps.lua", Names = "names.lua",
-    Urls = "urls.lua", History = "history.lua", Badges = "badges.lua",
+    Urls = "urls.lua",
+    -- w2/history suites: History and Badges are REAL modules now (their own
+    -- suites cover them); they left the placeholder roster.
     Nexus = "nexus.lua",
 }
 
@@ -613,7 +642,10 @@ end)
 -- never registers reads as ALL PASS to a runner that only iterates what
 -- registered).
 ----------------------------------------------------------------------
-local EXPECTED_SUITES = { "core", "skin", "placeholders" }
+local EXPECTED_SUITES = { "core", "skin", "placeholders",
+    -- w2/history suites
+    "history", "badges",
+}
 
 realprint("=== expected-suite roster (" .. #EXPECTED_SUITES .. " suites) ===")
 local rosterPass, gotCount = true, 0
