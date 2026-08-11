@@ -169,6 +169,15 @@ function WIDGET_API.HookScript(self, k, fn)
     local prev = self._scripts[k]
     self._scripts[k] = prev and function(...) prev(...); fn(...) end or fn
 end
+-- skin-v2 sim extension (additive): the attribute bag the client's edit box
+-- keeps its sticky chat state in (chatType / channelTarget / tellTarget).
+function WIDGET_API.SetAttribute(self, k, v)
+    self._attrs = self._attrs or {}
+    self._attrs[k] = v
+end
+function WIDGET_API.GetAttribute(self, k)
+    return self._attrs and self._attrs[k] or nil
+end
 function WIDGET_API.SetFrameLevel(self, l) self._frameLevel = l end
 function WIDGET_API.GetFrameLevel(self) return self._frameLevel or 1 end
 function WIDGET_API.SetFrameStrata(self, s) self._strata = s end
@@ -252,7 +261,9 @@ function WIDGET_API.EnableMouseWheel(self) end
 function WIDGET_API.SetFading(self, on) record("SetFading") self._fading = on and true or false end
 function WIDGET_API.SetTimeVisible(self, secs) record("SetTimeVisible") self._timeVisible = secs end
 function WIDGET_API.SetMaxLines(self, n) self._maxLines = n end
-function WIDGET_API.ScrollToBottom(self) end
+-- skin-v2 sim extension (additive): RECORDED, so a test can pin that a button
+-- really invoked the client's own scroll verb and nothing else.
+function WIDGET_API.ScrollToBottom(self) record("ScrollToBottom") end
 function WIDGET_API.ScrollUp(self) end
 function WIDGET_API.ScrollDown(self) end
 function WIDGET_API.AtBottom(self) return true end
@@ -418,6 +429,12 @@ local function makeChatFrame(id)
     local eb = newWidget("EditBox", name .. "EditBox", f)
     eb:SetPoint("TOPLEFT", f, "BOTTOMLEFT", 0, -6)
     eb:SetPoint("TOPRIGHT", f, "BOTTOMRIGHT", 0, -6)
+    -- skin-v2 sim extension (additive): the sticky-channel HEADER FontString.
+    -- Modeled in BOTH client shapes (the `header` field the client's own code
+    -- reaches for, and the $parentHeader global the template names) so an addon
+    -- that defends either shape is exercised honestly.
+    eb.header = newWidget("FontString", name .. "EditBoxHeader", eb)
+    eb:SetAttribute("chatType", "SAY")
     for _, suffix in ipairs({ "Left", "Mid", "Right", "FocusLeft", "FocusMid", "FocusRight" }) do
         newWidget("Texture", name .. "EditBox" .. suffix, eb)
     end
@@ -799,6 +816,43 @@ end
 _G.GetChatTypeIndex = function(chatType)
     record("GetChatTypeIndex")
     return 1
+end
+-- skin-v2 sim extension (additive): the client's own color accessor (catalog
+-- 11509). Reads the SAME live table ChangeChatColor writes, so anything that
+-- caches an answer stops tracking the player's settings and the suite sees it.
+_G.GetMessageTypeColor = function(chatType)
+    record("GetMessageTypeColor")
+    local info = _G.ChatTypeInfo[chatType]
+    if not info then return end
+    return info.r, info.g, info.b
+end
+
+-- skin-v2 sim extension (additive): the edit box's sticky-channel header beat.
+-- ChatEdit_UpdateHeader is what the client calls after every sticky change,
+-- tab-cycle and /channel switch; addons post-hook it to restyle the prefix.
+_G.ChatEdit_GetActiveChatType = function(editBox)
+    record("ChatEdit_GetActiveChatType")
+    return editBox and editBox:GetAttribute("chatType")
+end
+_G.ChatEdit_GetChannelTarget = function(editBox)
+    record("ChatEdit_GetChannelTarget")
+    return editBox and editBox:GetAttribute("channelTarget")
+end
+_G.ChatEdit_UpdateHeader = function(editBox)
+    record("ChatEdit_UpdateHeader")
+    if not editBox then return end
+    local header = editBox.header
+    if not header then return end
+    local chatType = editBox:GetAttribute("chatType") or "SAY"
+    local text, info = chatType .. ":", _G.ChatTypeInfo[chatType]
+    if chatType == "CHANNEL" then
+        local num = editBox:GetAttribute("channelTarget")
+        local ch = num and Sim.serverChannels[num]
+        text = ("%s. %s:"):format(tostring(num or "?"), ch and ch.name or "?")
+        info = _G.ChatTypeInfo["CHANNEL" .. tostring(num)] or _G.ChatTypeInfo.CHANNEL
+    end
+    header:SetText(text)
+    if info then header:SetTextColor(info.r, info.g, info.b) end
 end
 
 -- CVars: hostile defaults on purpose (see header).
