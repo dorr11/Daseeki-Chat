@@ -294,6 +294,13 @@ _G.DaseekiChatDB = { modules = { skin = false } }
 -- each suite enables its own module (the skin pattern) and leaves it enabled.
 _G.DaseekiChatDB.modules.history = false
 _G.DaseekiChatDB.modules.badges  = false
+-- w2/pipeline suites: the pipeline modules also start disabled so the
+-- inertness gate pins them against a full login; each suite enables its
+-- own module (the skin precedent).
+_G.DaseekiChatDB.modules.decor  = false
+_G.DaseekiChatDB.modules.stamps = false
+_G.DaseekiChatDB.modules.names  = false
+_G.DaseekiChatDB.modules.urls   = false
 
 ----------------------------------------------------------------------
 -- ns namespace + suite-registration sentinel (Bags precedent: intercept the
@@ -385,21 +392,24 @@ do
     ck(Sim.CallCount("SetFading") == 0, "no chat frame's fading was touched")
     ck(ns.EventHandlerCount() == 4,
         "only core's 4 lifecycle events are registered (got " .. ns.EventHandlerCount() .. ")")
-    -- w2/history suites: Wave 2 fills modules in place (toc order), so the pin
-    -- is the KNOWN SET, not "exactly skin". Sibling agents append their module
-    -- names to KNOWN_MODULES as they land.
-    local KNOWN_MODULES = { history = true, badges = true, skin = true }
-    local unknown = {}
+    -- Every registered module must be in KNOWN_MODULES AND flagged disabled
+    -- in the SavedVariables preset above, or this gate is hollow. Wave agents
+    -- append their names inside their own marked block; the count derives
+    -- from the set so the blocks union-merge mechanically.
+    local KNOWN_MODULES = { skin = true }
+    -- w2/history suites: history + badges registered in Wave 2
+    KNOWN_MODULES.history, KNOWN_MODULES.badges = true, true
+    -- w2/pipeline suites: pipeline modules registered in Wave 2
+    KNOWN_MODULES.decor, KNOWN_MODULES.stamps, KNOWN_MODULES.names, KNOWN_MODULES.urls =
+        true, true, true, true
+    -- end w2/pipeline suites
+    local knownCount = 0
+    for _ in pairs(KNOWN_MODULES) do knownCount = knownCount + 1 end
+    ck(#ns.ModuleOrder == knownCount,
+        "exactly " .. knownCount .. " known modules are registered (got " .. #ns.ModuleOrder .. ")")
     for _, name in ipairs(ns.ModuleOrder) do
-        if not KNOWN_MODULES[name] then unknown[#unknown + 1] = name end
+        ck(KNOWN_MODULES[name], "module '" .. name .. "' is in KNOWN_MODULES")
     end
-    ck(#unknown == 0, "only known modules are registered (unknown: "
-        .. table.concat(unknown, ",") .. ")")
-    local haveSkin = false
-    for _, name in ipairs(ns.ModuleOrder) do
-        if name == "skin" then haveSkin = true end
-    end
-    ck(haveSkin, "skin is registered")
     -- w2/history suites: disabled history/badges are behaviorally absent too.
     ck(ns.History and ns.History.active == false, "history is inactive")
     ck(ns.History and next(ns.History.hookedFrames) == nil,
@@ -409,6 +419,21 @@ do
         "badges wrapped no AddMessage while disabled")
     ck(ns.Badges and ns.Badges.globalHooked == false,
         "badges installed no hooksecurefunc while disabled")
+    -- w2/pipeline suites: disabled-is-inert pins for the pipeline modules
+    -- (the skin pattern: a module that never enabled has touched NOTHING).
+    ck(ns.Decor and ns.Decor.active == false, "decor is inactive")
+    ck(ns.Decor and ns.Decor.SeamCount() == 0, "decor installed ZERO AddMessage seams")
+    ck(ns.Decor and ns.Decor.hooked == false, "decor installed no temp-window hook")
+    ck(ns.Stamps and ns.Stamps.active == false, "stamps is inactive")
+    ck(ns.Names and ns.Names.active == false, "names is inactive")
+    ck(ns.Names and next(ns.Names.cache) == nil, "names cached nothing while disabled")
+    ck(_G.GetCVar("chatClassColorOverride") == "1",
+        "the hostile chatClassColorOverride default is UNTOUCHED while names is disabled")
+    ck(_G.GetCVar("showTimestamps") == "none",
+        "the showTimestamps CVar is untouched while stamps is disabled")
+    ck(ns.Urls and ns.Urls.active == false, "urls is inactive")
+    ck(ns.Urls and ns.Urls.hookedItemRef == false, "urls left SetItemRef untouched")
+    -- end w2/pipeline suites
     local styledAny = false
     for i = 1, 10 do
         local f = Sim.Frame(i)
@@ -609,10 +634,11 @@ realprint("")
 ----------------------------------------------------------------------
 local PLACEHOLDER_KEYS = {
     Config = "config.lua", Reconcile = "reconcile.lua", Channels = "channels.lua",
-    Decor = "decor.lua", Stamps = "stamps.lua", Names = "names.lua",
-    Urls = "urls.lua",
     -- w2/history suites: History and Badges are REAL modules now (their own
     -- suites cover them); they left the placeholder roster.
+    -- w2/pipeline suites: Decor/Stamps/Names/Urls graduated from placeholders
+    -- (decor.lua, stamps.lua, names.lua, urls.lua are real; their own suites
+    -- pin their behavior).
     Nexus = "nexus.lua",
 }
 
@@ -645,6 +671,8 @@ end)
 local EXPECTED_SUITES = { "core", "skin", "placeholders",
     -- w2/history suites
     "history", "badges",
+    -- w2/pipeline suites
+    "decor", "stamps", "names", "urls",
 }
 
 realprint("=== expected-suite roster (" .. #EXPECTED_SUITES .. " suites) ===")
