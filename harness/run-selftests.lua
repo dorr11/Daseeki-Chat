@@ -287,6 +287,8 @@ assert(loadfile(H("corestub.lua")), "corestub.lua failed to compile")()
 -- SavedVariables preset: skin starts DISABLED so the inertness gate below can
 -- pin "disabled module = zero hooks" against a full login. The skin suite
 -- enables it itself (phase 1) and leaves it enabled.
+-- Wave-2 agents append their lifecycle modules here (each marked): every
+-- feature module starts DISABLED for the gate; its own suite enables it.
 ----------------------------------------------------------------------
 _G.DaseekiChatDB = { modules = { skin = false } }
 -- w2/history suites: history + badges also start DISABLED, so the inertness
@@ -301,6 +303,9 @@ _G.DaseekiChatDB.modules.decor  = false
 _G.DaseekiChatDB.modules.stamps = false
 _G.DaseekiChatDB.modules.names  = false
 _G.DaseekiChatDB.modules.urls   = false
+-- w2/reconciler suites: reconcile + channels start disabled for the same gate
+_G.DaseekiChatDB.modules.reconcile = false
+_G.DaseekiChatDB.modules.channels = false
 
 ----------------------------------------------------------------------
 -- ns namespace + suite-registration sentinel (Bags precedent: intercept the
@@ -403,6 +408,10 @@ do
     KNOWN_MODULES.decor, KNOWN_MODULES.stamps, KNOWN_MODULES.names, KNOWN_MODULES.urls =
         true, true, true, true
     -- end w2/pipeline suites
+    -- w2/reconciler suites: reconcile + channels registered in Wave 2
+    KNOWN_MODULES.reconcile = true
+    KNOWN_MODULES.channels = true
+    -- end w2/reconciler suites
     local knownCount = 0
     for _ in pairs(KNOWN_MODULES) do knownCount = knownCount + 1 end
     ck(#ns.ModuleOrder == knownCount,
@@ -434,6 +443,14 @@ do
     ck(ns.Urls and ns.Urls.active == false, "urls is inactive")
     ck(ns.Urls and ns.Urls.hookedItemRef == false, "urls left SetItemRef untouched")
     -- end w2/pipeline suites
+    -- w2/reconciler suites: disabled-is-inert pins for reconcile + channels
+    -- (the __active flag is the module runtime's own record of enablement).
+    for _, name in ipairs({ "reconcile", "channels" }) do
+        local m = ns.Modules and ns.Modules[name]
+        ck(m and not m.__active,
+            "module '" .. name .. "' is inert at the gate (disabled login)")
+    end
+    -- end w2/reconciler suites
     local styledAny = false
     for i = 1, 10 do
         local f = Sim.Frame(i)
@@ -633,13 +650,9 @@ realprint("")
 -- placeholder is an empty module table with no events, no hooks, no suites.
 ----------------------------------------------------------------------
 local PLACEHOLDER_KEYS = {
-    Config = "config.lua", Reconcile = "reconcile.lua", Channels = "channels.lua",
-    -- w2/history suites: History and Badges are REAL modules now (their own
-    -- suites cover them); they left the placeholder roster.
-    -- w2/pipeline suites: Decor/Stamps/Names/Urls graduated from placeholders
-    -- (decor.lua, stamps.lua, names.lua, urls.lua are real; their own suites
-    -- pin their behavior).
-    Nexus = "nexus.lua",
+    -- EMPTY as of Wave 2 complete: every design-doc file is REAL now, each
+    -- covered by its own suite. The roster (and this suite) stays as the
+    -- mechanism for any future file added placeholder-first.
 }
 
 ns:RegisterSelfTest("placeholders", function(verbose)
@@ -792,6 +805,8 @@ local EXPECTED_SUITES = { "core", "skin", "placeholders",
     "history", "badges",
     -- w2/pipeline suites
     "decor", "stamps", "names", "urls",
+    -- w2/reconciler suites
+    "config", "reconcile", "channels", "nexus",
     -- w2/integration: the merged-world leg (all Wave-2 modules at once)
     "integration",
 }
