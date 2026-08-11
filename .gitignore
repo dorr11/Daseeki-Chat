@@ -1,0 +1,4 @@
+# Nothing generated lives in-tree yet; keep OS noise out.
+Thumbs.db
+Desktop.ini
+*.swp

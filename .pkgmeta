@@ -1,0 +1,20 @@
+# package-as is the addon's identity: it names the SavedVariables file
+# (WTF/.../SavedVariables/Daseeki-Chat.lua) and is what the client matches the
+# .toc against. Do not rename it after first release.
+package-as: Daseeki-Chat
+license-output: LICENSE
+
+# CurseForge project relations (BigWigsMods/packager reads these as project
+# SLUGS). Core is required — Chat cannot draw without the DaseekiUI theme/font
+# system — so the site must install Core alongside Chat (the Bags N1 lesson).
+required-dependencies:
+  - daseeki-core
+
+ignore:
+  - README.md
+  - CHANGELOG.md
+  - .github
+  # Developer tooling: never shipped to users. harness/ carries the headless
+  # self-test runner and the unkind chat simulator (Bags precedent).
+  - harness
+  - dev
