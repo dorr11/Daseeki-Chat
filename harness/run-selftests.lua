@@ -664,6 +664,125 @@ ns:RegisterSelfTest("placeholders", function(verbose)
 end)
 
 ----------------------------------------------------------------------
+-- Harness-registered suite: INTEGRATION — the "it all runs at once" reality
+-- no per-branch suite ever saw. Every Wave-2 module merged so far (decor,
+-- stamps, names, urls, history, badges) is enabled TOGETHER, then one message
+-- flows, a cross-session restore happens, and badges count — pinning that the
+-- stacked AddMessage wraps (decor seam + history shadow + badges delivery),
+-- the post-add observers and the restore path do not corrupt each other under
+-- the merged enable permutation:
+--   * protection holds under full decoration load (item link byte-intact);
+--   * exactly ONE stamp per stored line (no double-processing across wraps);
+--   * history captures the line; restore backfills via PushFront ONLY (zero
+--     AddMessage re-entry), the divider sits strictly before live content;
+--   * restored lines never badge (they bypass the delivery seam); a live line
+--     after the restore badges exactly once.
+-- Runs last (after every module suite), against the world exactly as the
+-- suites left it — which IS the point.
+----------------------------------------------------------------------
+
+ns:RegisterSelfTest("integration", function(verbose)
+    local fails = {}
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Sim = _G.__DaseekiChatSim
+    local ok, err = pcall(function()
+        local cf1  = _G.ChatFrame1
+        local dock = _G.GeneralDockManager
+
+        -- All Wave-2-so-far modules up together (explicit, not inherited:
+        -- stamps' own suite deliberately leaves itself disabled for skin).
+        for _, name in ipairs({ "decor", "stamps", "names", "urls", "history", "badges" }) do
+            ns.SetModuleEnabled(name, true)
+        end
+        ck(ns.Decor.active and ns.Stamps.active and ns.Names.active
+            and ns.Urls.active and ns.History.active and ns.Badges.active,
+            "all six Wave-2 modules are active together")
+
+        -- ── Leg 1: one message through the full stack. ───────────────────────
+        _G.FCF_SelectDockFrame(_G.ChatFrame2)   -- window 1 docked-unselected: badgeable
+        ns.Badges.Clear(cf1)
+        Sim.ResetCalls()
+        local itemLink = Sim.MakeItemLink()
+        Sim.SendChat{ event = "CHAT_MSG_SAY",
+            text = "all-hands " .. itemLink .. " at www.example.com",
+            sender = "Puu-Whitemane", guid = "Player-1-00000001" }
+        HTIMER.advance(0)
+        local stored = cf1.historyBuffer:GetEntryAtIndex(1)
+        local msg = stored and stored.message or ""
+        ck(msg:find(itemLink, 1, true) ~= nil,
+            "leg 1: the item link is byte-intact under the FULL decoration stack")
+        ck(msg:find("|Haddon:dchaturl:www.example.com|h", 1, true) ~= nil,
+            "leg 1: the URL linkified beside it")
+        ck(msg:find("|Hplayer:Puu%-Whitemane") ~= nil,
+            "leg 1: the sender's click payload is intact")
+        local _, stampN = msg:gsub("%[%d%d:%d%d%]", "")
+        ck(stampN == 1, "leg 1: exactly ONE stamp on the stored line (got " .. stampN .. ")")
+        ck(ns.Badges.counts[cf1] == 1, "leg 1: the unseen window badged exactly once")
+        local ring = ns.History.rings[1]
+        ck(ring and #ring > 0 and ring[#ring].m:find("all-hands", 1, true) ~= nil,
+            "leg 1: history captured the line at the delivery seam")
+
+        -- ── Leg 2: cross-session restore with everything still enabled. ─────
+        _G.FCF_SelectDockFrame(cf1)             -- clear the badge before the hop
+        Sim.Logout()                            -- snapshot beat
+        Sim.NewSession()
+        _G.FCF_SelectDockFrame(_G.ChatFrame2)   -- window 1 unseen again: a restore
+        ns.Badges.Clear(cf1)                    -- that (wrongly) re-delivered WOULD badge
+        Sim.ResetCalls()
+        Sim.EnterWorld(true, false)
+        HTIMER.flush()
+        ck(Sim.CallCount("AddMessage") == 0,
+            "leg 2: restore re-entered NO AddMessage wrap (PushFront only, whole stack live)")
+        ck(cf1:GetNumMessages() > 0, "leg 2: window 1 was backfilled")
+        local divAt, divCount = nil, 0
+        for i = 1, #cf1.historyBuffer.list do
+            local e = cf1.historyBuffer.list[i]
+            if e.daseekiDivider then divCount = divCount + 1 divAt = i end
+        end
+        ck(divCount == 1, "leg 2: exactly one divider (got " .. divCount .. ")")
+        ck(divAt == cf1:GetNumMessages(),
+            "leg 2: with no live traffic yet, the divider is the newest entry")
+        local allRestored, doubleStamped = true, false
+        for i = 1, #cf1.historyBuffer.list do
+            local e = cf1.historyBuffer.list[i]
+            if not e.daseekiRestored then allRestored = false end
+            local _, n = tostring(e.message):gsub("%[%d%d:%d%d%]", "")
+            if n > 1 then doubleStamped = true end
+        end
+        ck(allRestored, "leg 2: every backfilled entry is marked daseekiRestored")
+        ck(not doubleStamped, "leg 2: no restored line wears more than one stamp")
+        ck(ns.Badges.counts[cf1] == 0,
+            "leg 2: restored lines badge NOTHING (they bypass the delivery seam)")
+
+        -- ── Leg 3: live traffic after the restore, full stack still up. ──────
+        Sim.SendChat{ event = "CHAT_MSG_SAY", text = "back-live",
+            sender = "Choco", guid = "Player-1-00000002" }
+        HTIMER.advance(0)
+        local total = cf1:GetNumMessages()
+        local newest = cf1.historyBuffer:GetEntryAtIndex(1)
+        ck(newest and not newest.daseekiRestored
+            and tostring(newest.message):find("back-live", 1, true) ~= nil,
+            "leg 3: live content lands after the divider (newest entry is live)")
+        ck(divAt < total, "leg 3: the divider sits strictly before the live line")
+        local _, liveStamps = tostring(newest and newest.message):gsub("%[%d%d:%d%d%]", "")
+        ck(liveStamps == 1, "leg 3: the live line wears exactly one stamp")
+        ck(ns.Badges.counts[cf1] == 1,
+            "leg 3: the live line badged exactly once (restored lines contributed zero)")
+
+        -- Tidy: focused window back, stamps back to the state its own suite
+        -- left (disabled), timers drained, counters clean.
+        _G.FCF_SelectDockFrame(cf1)
+        ns.SetModuleEnabled("stamps", false)
+        HTIMER.flush()
+        Sim.ResetCalls()
+    end)
+    if not ok then fails[#fails + 1] = "error: " .. tostring(err) end
+    for _, f in ipairs(fails) do ns:Print("  FAIL integration :: " .. f) end
+    if #fails == 0 and verbose then ns:Print("  PASS integration") end
+    return #fails == 0
+end)
+
+----------------------------------------------------------------------
 -- Expected-suite roster (the softer silent-green catch: a file that loads but
 -- never registers reads as ALL PASS to a runner that only iterates what
 -- registered).
@@ -673,6 +792,8 @@ local EXPECTED_SUITES = { "core", "skin", "placeholders",
     "history", "badges",
     -- w2/pipeline suites
     "decor", "stamps", "names", "urls",
+    -- w2/integration: the merged-world leg (all Wave-2 modules at once)
+    "integration",
 }
 
 realprint("=== expected-suite roster (" .. #EXPECTED_SUITES .. " suites) ===")

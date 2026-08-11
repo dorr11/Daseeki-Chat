@@ -590,10 +590,31 @@ local function testLive(fails, verbose)
     end
     ck(divCount == 1, "phase 5: zone-ins and repeat beats never double-restore")
 
-    local liveLine = Sim.SendChat{ event = "CHAT_MSG_SAY", text = "post-restore",
-                                   sender = "Choco", guid = "Player-1-00000002" }
-    ck(cf1:GetMessageInfo(cf1:GetNumMessages()) == liveLine,
-        "phase 5: live content lands AFTER the divider")
+    -- Sibling pipeline modules (decor's seam + names/urls decorators) are
+    -- legitimately live in the merged world and may restyle a line before the
+    -- client stores it, so byte-equality with the sim's raw formatted line
+    -- encoded a single-module assumption. The pin keeps everything it proved:
+    -- the live line is the NEWEST stored entry (so it sits after the divider
+    -- and after every restored line), it is live content (not a restored
+    -- artifact), and its substance — the message text and the sender's click
+    -- payload — survived whatever decoration ran.
+    Sim.SendChat{ event = "CHAT_MSG_SAY", text = "post-restore",
+                  sender = "Choco", guid = "Player-1-00000002" }
+    local liveTotal  = cf1:GetNumMessages()
+    local liveStored = cf1:GetMessageInfo(liveTotal)
+    ck(liveStored ~= nil
+        and liveStored:find("post-restore", 1, true) ~= nil
+        and liveStored:find("|Hplayer:Choco", 1, true) ~= nil,
+        "phase 5: the live line is the newest stored entry, substance intact")
+    local liveEntry = cf1.historyBuffer:GetEntryAtIndex(1)
+    ck(liveEntry and not liveEntry.daseekiRestored,
+        "phase 5: live content lands AFTER the divider (newest entry is live, not restored)")
+    local divAt5
+    for i = 1, #cf1.historyBuffer.list do
+        if cf1.historyBuffer.list[i].daseekiDivider then divAt5 = i end
+    end
+    ck(divAt5 ~= nil and divAt5 < liveTotal,
+        "phase 5: the divider sits strictly before the live line")
     ck(#History.rings[1] == ring1Count + 1,
         "phase 5: the ring re-seeded from the snapshot and keeps growing (multi-hop persistence)")
 

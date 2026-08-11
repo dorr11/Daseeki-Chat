@@ -373,10 +373,17 @@ local function testLive(fails, verbose)
     local dock = _G.GeneralDockManager
 
     -- ── Phase 0: INERTNESS (harness logged in with badges disabled). ─────────
+    -- Sibling suites legitimately leave THEIR modules enabled (default-on
+    -- discipline: names holds chat-event subscriptions right now), so the pin
+    -- is BADGES' OWN subscriptions, measured as a delta against the world the
+    -- predecessors left — never the world's total. The whole-world zero is
+    -- already pinned by the harness inertness gate before any suite runs.
     ck(Badges.active == false, "phase 0: inactive after disabled login")
     ck(next(Badges.hookedFrames) == nil, "phase 0: zero wrappers while disabled (the pin)")
     ck(Badges.globalHooked == false, "phase 0: zero hooksecurefunc installs while disabled")
-    ck(ns.EventHandlerCount("CHAT_MSG_WHISPER") == 0, "phase 0: zero event subscriptions while disabled")
+    ck(Badges.eventHandlers == nil,
+        "phase 0: badges built no event handlers while disabled (it holds zero subscriptions)")
+    local whisperBase = ns.EventHandlerCount("CHAT_MSG_WHISPER")
 
     -- ── Phase 1: enable; the focused tab never counts. ───────────────────────
     ns.SetModuleEnabled("badges", true)
@@ -385,6 +392,8 @@ local function testLive(fails, verbose)
     for _ in pairs(Badges.hookedFrames) do wrapped = wrapped + 1 end
     ck(wrapped == (_G.NUM_CHAT_WINDOWS or 10), "phase 1: all ten windows rigged")
     ck(Badges.globalHooked == true, "phase 1: focus + temp-window hooks installed")
+    ck(ns.EventHandlerCount("CHAT_MSG_WHISPER") == whisperBase + 1,
+        "phase 1: enabling added exactly ONE whisper subscription (badges' own delta)")
     ck(Badges.counts[cf1] == 0, "phase 1: counts start as REAL zeros, not nil (Class 5)")
 
     _G.FCF_SelectDockFrame(cf1)
@@ -503,9 +512,11 @@ local function testLive(fails, verbose)
     Badges.Clear(temp)
 
     -- ── Phase 10: disable is inert; re-enable never double-counts. ───────────
+    -- Same delta discipline as phase 0: siblings' subscriptions are theirs to
+    -- hold; ours must return the count to the pre-enable baseline exactly.
     ns.SetModuleEnabled("badges", false)
-    ck(ns.EventHandlerCount("CHAT_MSG_WHISPER") == 0,
-        "phase 10: event subscriptions given back on disable")
+    ck(ns.EventHandlerCount("CHAT_MSG_WHISPER") == whisperBase,
+        "phase 10: event subscriptions given back on disable (count back to the pre-enable baseline)")
     _G.FCF_SelectDockFrame(cf3)
     cf1:AddMessage("while disabled", 1, 1, 1)
     ck(Badges.counts[cf1] == 0, "phase 10: a disabled module counts nothing")
