@@ -69,6 +69,41 @@
 --      right-clicking the resting edit bar's channel prefix. OFF is the
 --      client's own column back, side-flipping and all.
 --
+-- SKIN V3 — THE ONE BOX (unifiedChassis, ON; the owner's approved mockup):
+--
+--   9. ONE UNIFIED CHASSIS per window group. A single suite-token backdrop
+--      spans the tab strip, the message area and the entry bar. There is NO
+--      second background anywhere inside it: the entry bar's own panel is put
+--      away, the tab strip/rail is a bare anchor frame, and the only internal
+--      marks are HAIRLINES in the border token. Fading is forced OFF inside
+--      the box (the config's fading knob goes inert, with the settings page
+--      saying so out loud — no half states).
+--      A DOCKED window's box belongs to the DOCK: the dock's primary frame
+--      hosts one chassis and one strip carrying every docked window's tab.
+--      An undocked window is its own group and hosts its own.
+--  10. TAB PLACEMENT (config.skin.tabPlacement: "top" | "left" | "right",
+--      SYNCED — it is layout, so it rides the mesh with the rest of the chat
+--      config). TOP is a strip inside the box's top edge and the active tab
+--      FUSES with the message surface: the hairline that separates strip from
+--      messages is drawn in two pieces that stop at the active tab's edges, so
+--      the surface runs continuously through it — the mockup's fused tab,
+--      expressed with hairlines instead of a second fill. LEFT/RIGHT is a slim
+--      vertical rail inside that edge, its inner hairline continuous, and the
+--      active tab marked by a colored EDGE BAR on the rail's inner side.
+--      The client's OWN tab buttons are re-anchored into the strip/rail — they
+--      are never replaced — so click, drag-to-undock and the tab's right-click
+--      menu stay exactly the client's. The dock manager re-lays them on its own
+--      beats; we take the last word in-call, the button column's posture.
+--  11. PER-TAB COLOR (config.windows[id].tabColor, SYNCED, optional). The
+--      resolution chain is EXPLICIT > DERIVED > accent/muted token. A spec is
+--      "token:<core token>" or "chat:<CHAT_TYPE>", so both families stay live:
+--      a token follows the theme, a chat type follows the player's own chat
+--      colors. A spec this build does not understand falls through to the
+--      derivation rather than painting a wrong color.
+--  12. THE ICON RAIL COEXISTS by taking the OPPOSITE edge: with tabs on the
+--      left the icon rail moves to the window's right, otherwise it keeps the
+--      left. It clears the chassis' own inset on whichever side it lands.
+--
 -- Everything visual reads Daseeki-Core theme tokens at render (DaseekiUI.Color/
 -- Token / FLAT_BACKDROP / UI.Skin / UI.fonts / UI.FontFile) — ZERO hardcoded
 -- colors anywhere in this file; alpha/measure constants only. The one family
@@ -104,6 +139,8 @@ local Skin = {
     -- skin v2.3 state (the column is DISABLED, not just hidden — owner ask)
     columnDisables     = 0,   -- windows whose column subtree lost the mouse
     columnEventsDropped = 0,  -- widgets we called UnregisterAllEvents on
+    -- skin v3 state (the one box)
+    _chassisDepth      = 0,   -- chassis re-evaluation re-entrancy latch (Class 9)
 }
 ns.Skin = Skin
 
@@ -127,6 +164,16 @@ local RAIL_GAP    = 2      -- gap between the rail and the window
 local RAIL_IDLE   = 0.35   -- rail alpha until hovered
 local EB_IDLE     = 0.55   -- persistent edit box alpha while unfocused (placeholder)
 local EB_ACTIVE   = 1.0    -- …and while it holds focus
+-- skin v3 (the one box). Measures only; every color is still a token.
+local STRIP_H       = 22   -- top tab strip band inside the chassis
+local TABRAIL_W     = 112  -- side tab rail band (the mockup's 112px)
+local TAB_GAP       = 2    -- gap between two tabs in the strip/rail
+local TAB_PAD       = 6    -- strip/rail padding around the tab run
+local TAB_ROW_H     = 20   -- one tab's height on a rail
+local SEAM_W        = 1    -- internal hairline thickness
+local SEAM_ALPHA    = 0.55 -- …at the divider's own subtle measure
+local EDGEBAR_W     = 2    -- active-tab edge bar on a rail
+local EDGEBAR_INSET = 5    -- its inset from the tab's top/bottom edges
 
 -- Skin v2 config fields, declared ADDITIVELY from this module (the badges.lua
 -- precedent) so core.lua's DEFAULTS block stays this module's business only.
@@ -144,11 +191,44 @@ ns.DEFAULTS.skin.unclampWindows      = true   -- drags may reach the screen edge
 -- skin v2.2: the client's chat BUTTON COLUMN is down by default (the reference
 -- look replaces it; OFF gives the client's own column back, side-flip and all).
 ns.DEFAULTS.skin.hideButtonColumn    = true   -- hide the chat button column
+-- skin v3: THE ONE BOX. Local gate (the LOOK is per-account taste; the tab
+-- PLACEMENT inside it is layout and lives in the synced config). OFF is skin
+-- v2 byte for byte, fading included.
+ns.DEFAULTS.skin.unifiedChassis      = true   -- one backdrop: strip + text + entry
 
 local function UIKit() return _G.DaseekiUI end
 
 local function cfg()
     return (ns.db and ns.db.skin) or ns.DEFAULTS.skin
+end
+
+----------------------------------------------------------------------
+-- SKIN V3 READS. Two questions everything below asks: is the box on, and
+-- where do the tabs live. The placement comes from the SYNCED config through
+-- its own seam (Config.TabPlacement), runtime-defended like every peer read —
+-- a config that cannot answer leaves us on "top", which is the client's own
+-- arrangement and therefore the safe answer.
+----------------------------------------------------------------------
+
+function Skin.Unified()
+    return (cfg().unifiedChassis ~= false) and true or false
+end
+
+function Skin.TabPlacement()
+    local C = ns.Config
+    if C and type(C.TabPlacement) == "function" then
+        local ok, v = pcall(C.TabPlacement)
+        if ok and (v == "top" or v == "left" or v == "right") then return v end
+    end
+    return "top"
+end
+
+-- Is the tab strip a vertical RAIL right now? (The one branch half this file
+-- takes, asked once so it cannot be spelled two different ways.)
+function Skin.TabsOnRail()
+    if not Skin.Unified() then return false end
+    local p = Skin.TabPlacement()
+    return p == "left" or p == "right"
 end
 
 ----------------------------------------------------------------------
@@ -343,12 +423,65 @@ function Skin.WindowRouting(id)
     return nil, nil
 end
 
+----------------------------------------------------------------------
+-- PER-TAB COLOR (skin v3 feature 11) — the EXPLICIT head of the chain.
+--
+-- A tab colour is stored as a SPEC STRING in the synced config, and this file
+-- owns the vocabulary:
+--   "token:<name>"  a Daseeki-Core theme token — follows a theme change;
+--   "chat:<TYPE>"   one of the CLIENT's own chat colors — follows the
+--                   player's own chat colour settings, live.
+-- Both families are LIVE reads, never frozen values: the config stores which
+-- colour, never what colour, so nothing here can rot into a stale hex.
+--
+-- A spec this build does not understand answers NOTHING and the caller falls
+-- through to the derivation — a newer build's vocabulary must never paint a
+-- wrong colour here. Returns r, g, b, family.
+----------------------------------------------------------------------
+
+function Skin.ResolveTabColor(spec)
+    if type(spec) ~= "string" then return nil end
+    local kind, value = spec:match("^(%a+):(.+)$")
+    if not kind then return nil end
+    if kind == "token" then
+        local UI = UIKit()
+        if not (UI and type(UI.Color) == "function") then return nil end
+        local ok, r, g, b = pcall(UI.Color, value)
+        if ok and type(r) == "number" and type(g) == "number" and type(b) == "number" then
+            return r, g, b, "token"
+        end
+        return nil
+    elseif kind == "chat" then
+        local r, g, b = Skin.TypeColor(value:upper())
+        if r then return r, g, b, "chat" end
+    end
+    return nil
+end
+
+-- The spec the config holds for a window, through the config's own seam.
+function Skin.TabColorSpec(id)
+    if id == nil then return nil end
+    local C = ns.Config
+    if not (C and type(C.TabColor) == "function") then return nil end
+    local ok, spec = pcall(C.TabColor, id)
+    if ok and type(spec) == "string" and spec ~= "" then return spec end
+    return nil
+end
+
 -- One tab's ink at full strength, plus where it came from. A temporary window
 -- (a whisper pop-out) carries its own routing on the frame, which is the only
 -- routing it will ever have. Returns r, g, b, source.
+--
+-- THE RESOLUTION CHAIN (skin v3): EXPLICIT per-tab colour first, then the
+-- derivation from the window's dominant channel, then the caller's accent/
+-- muted token fallback. The explicit choice is the PLAYER's and outranks the
+-- channelTabs feature gate entirely: turning the derivation off must not
+-- silently discard a colour somebody picked by hand.
 function Skin.TabInk(frame, id)
     local UI = UIKit()
     if not UI then return nil end
+    local r, g, b, fam = Skin.ResolveTabColor(Skin.TabColorSpec(id))
+    if r then return r, g, b, "explicit:" .. tostring(fam) end
     if not cfg().channelTabs then return nil end
     if isCombatLog(frame, id) then
         local r, g, b = UI.Color("muted")
@@ -441,12 +574,24 @@ end
 -- Fading. Config-driven; both knobs live in db.skin.
 ----------------------------------------------------------------------
 
+-- Is text fading actually in force? Inside the ONE BOX it never is: the design
+-- the owner approved has no fading at all, and a box that is always there with
+-- text that comes and goes is exactly the half state that rule exists to
+-- refuse. The stored knob is NOT rewritten — turning the box off gives the
+-- player's own setting straight back — the settings page just says out loud
+-- that it is inert meanwhile.
+function Skin.FadingEffective()
+    if Skin.Unified() then return false end
+    return cfg().fading and true or false
+end
+
 function Skin.ApplyFading(frame)
     local c = cfg()
+    local on = Skin.FadingEffective()
     if type(frame.SetFading) == "function" then
-        pcall(frame.SetFading, frame, c.fading and true or false)
+        pcall(frame.SetFading, frame, on)
     end
-    if c.fading and type(frame.SetTimeVisible) == "function" then
+    if on and type(frame.SetTimeVisible) == "function" then
         pcall(frame.SetTimeVisible, frame, tonumber(c.fadeTime) or 100)
     end
 end
@@ -500,17 +645,51 @@ end
 ----------------------------------------------------------------------
 -- Backdrop: one flat token-colored panel behind each window (Core's
 -- FLAT_BACKDROP shape; UI.Skin keeps it re-coloring on every theme change).
+--
+-- SKIN V3: this same frame becomes THE CHASSIS. In the unified box it no
+-- longer hugs the message area — it grows out over the tab strip (or rail) and
+-- the entry bar, so one backdrop is the whole box. There is never a second
+-- one: a docked window that is not its group's host hides its own, and the
+-- entry bar's panel goes away too (see styleEditBox).
 ----------------------------------------------------------------------
+
+-- The extra each side of the client's message area the box takes, in the
+-- window's own units. PURE-ish (it reads config only) so the geometry the
+-- suite pins is the geometry the renderer uses. Returns left, right, top,
+-- bottom.
+function Skin.ChassisInsets()
+    local l, r, t, b = PAD, PAD, PAD, PAD
+    if not Skin.Unified() then return l, r, t, b end
+    local placement = Skin.TabPlacement()
+    if placement == "left" then l = l + TABRAIL_W
+    elseif placement == "right" then r = r + TABRAIL_W
+    else t = t + STRIP_H end
+    -- The entry bar is part of the box, on whichever edge it is configured to.
+    if (cfg().editBox or "BOTTOM"):upper() == "TOP" then
+        t = t + EB_GAP + EB_HEIGHT
+    else
+        b = b + EB_GAP + EB_HEIGHT
+    end
+    return l, r, t, b
+end
+
+local function anchorChassis(bd, frame)
+    if type(bd.ClearAllPoints) ~= "function" then return end
+    local l, r, t, b = Skin.ChassisInsets()
+    pcall(bd.ClearAllPoints, bd)
+    bd:SetPoint("TOPLEFT", frame, "TOPLEFT", -l, t)
+    bd:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", r, -b)
+end
 
 local function ensureBackdrop(frame, rec)
     local UI = UIKit()
-    if not UI or rec.backdrop then
-        if rec.backdrop then rec.backdrop:Show() end
+    if not UI then return end
+    if rec.backdrop then
+        rec.backdrop:Show()
+        anchorChassis(rec.backdrop, frame)
         return
     end
     local bd = _G.CreateFrame("Frame", nil, frame, "BackdropTemplate")
-    bd:SetPoint("TOPLEFT", frame, "TOPLEFT", -PAD, PAD)
-    bd:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", PAD, -PAD)
     if bd.SetFrameLevel and frame.GetFrameLevel then
         local okL, lvl = pcall(frame.GetFrameLevel, frame)
         pcall(bd.SetFrameLevel, bd, math.max(0, (okL and lvl or 1) - 1))
@@ -525,6 +704,7 @@ local function ensureBackdrop(frame, rec)
         end
     end)
     rec.backdrop = bd
+    anchorChassis(bd, frame)
 end
 
 ----------------------------------------------------------------------
@@ -565,9 +745,13 @@ local function ensureUnderline(tab, rec)
     tex:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", -UL_INSET, UL_Y)
     if type(tex.SetHeight) == "function" then tex:SetHeight(UL_HEIGHT) end
     UI.Skin(tex, function(self)
-        if type(self.SetColorTexture) == "function" then
-            self:SetColorTexture(UI.Color("accent"))
-        end
+        if type(self.SetColorTexture) ~= "function" then return end
+        -- skin v3: the underline wears the TAB's own colour (the mockup's
+        -- --tabc), with the accent token as its own fallback — so a theme
+        -- change still moves an unresolved tab's mark.
+        local mc = rec.markColor
+        if mc then self:SetColorTexture(mc[1], mc[2], mc[3])
+        else self:SetColorTexture(UI.Color("accent")) end
     end)
     tex:Hide()
     rec.underline = tex
@@ -632,38 +816,37 @@ function Skin.UpdateTabColors()
     if not UI then return end
     local sel = selectedDockFrame()
     local dim = Skin.DimFactor()
-    local channelTabs = cfg().channelTabs and true or false
     for _, frame in ipairs(Skin.order) do
         local tab, text = tabText(frame)
         local rec = Skin.styled[frame]
         if tab and text then
             Skin.ApplyTabLabel(frame, rec, text)
             local isSel = (frame == sel)
-            local r, g, b, source
-            if channelTabs then
-                r, g, b, source = Skin.TabInk(frame, rec and rec.id)
-            end
+            -- The chain lives in TabInk (explicit > derived); the channelTabs
+            -- gate is inside it, because an EXPLICIT colour outranks that gate.
+            local r, g, b, source = Skin.TabInk(frame, rec and rec.id)
+            local mr, mg, mb            -- the MARK colour: always full strength
             if r then
-                -- Active: full strength. Inactive: the SAME channel ink, dimmed
-                -- through the token-derived factor (never a second color).
+                mr, mg, mb = r, g, b
+                -- Active: full strength. Inactive: the SAME ink, dimmed through
+                -- the token-derived factor (never a second color).
                 if not isSel then r, g, b = r * dim, g * dim, b * dim end
             else
                 r, g, b = UI.Color(isSel and "accent" or "muted")
+                mr, mg, mb = UI.Color("accent")
                 source = "token"
             end
-            if rec then rec.inkSource = source end
+            if rec then
+                rec.inkSource = source
+                rec.markColor = { mr, mg, mb }
+            end
             if type(text.SetTextColor) == "function" then
                 text:SetTextColor(r, g, b)
             end
             if type(tab.SetAlpha) == "function" then
                 tab:SetAlpha(isSel and 1 or TAB_DIM)
             end
-            if rec then
-                local ul = channelTabs and ensureUnderline(tab, rec) or rec.underline
-                if ul then
-                    if channelTabs and isSel then ul:Show() else ul:Hide() end
-                end
-            end
+            Skin.UpdateTabMarks(frame, rec, tab, isSel)
         end
     end
 end
@@ -885,6 +1068,27 @@ local function styleEditBox(frame, rec)
 
     -- Flat themed panel behind the input (control-surface tokens: this is an
     -- input, so it steps up from the window's panel ground).
+    --
+    -- SKIN V3: inside the ONE BOX there is no such panel. The entry bar shares
+    -- the chassis' surface and is separated from the message text by a HAIRLINE
+    -- and nothing else — a second background here is the exact thing the
+    -- approved design forbids. An existing panel is put away, not destroyed, so
+    -- turning the box off brings it straight back.
+    if Skin.Unified() then
+        if rec.ebSkin then rec.ebSkin:Hide() end
+        if type(eb.SetFontObject) == "function" then
+            pcall(eb.SetFontObject, eb, UI.fonts.body)
+        end
+        if type(eb.SetTextInsets) == "function" then
+            pcall(eb.SetTextInsets, eb, 8, 8, 0, 0)
+        end
+        local hdr = rec.ebHeader or editBoxHeader(eb)
+        rec.ebHeader = hdr
+        if hdr and type(hdr.SetFontObject) == "function" then
+            pcall(hdr.SetFontObject, hdr, UI.fonts.small)
+        end
+        return
+    end
     if not rec.ebSkin then
         local bg = _G.CreateFrame("Frame", nil, eb, "BackdropTemplate")
         bg:SetPoint("TOPLEFT", eb, "TOPLEFT", 0, 0)
@@ -1880,19 +2084,38 @@ local function railButton(rail, glyph, onClick)
     return btn
 end
 
--- Where the rail's right edge sits, off the window's left edge: past the pad,
--- the gap, and whatever the client's button column still costs on that side.
+-- THE NON-COLLISION RULE (skin v3, pinned): the icon rail takes the edge
+-- OPPOSITE the tab rail. Tabs on the left put the icon rail on the window's
+-- right; every other placement (top, or tabs on the right) leaves it on the
+-- left, which is where it has always been. One rule, no stacking, no case
+-- where the two strips want the same pixels.
+function Skin.RailSide()
+    if Skin.TabsOnRail() and Skin.TabPlacement() == "left" then return "right" end
+    return "left"
+end
+
+-- How far off that edge the rail sits: past the CHASSIS' own inset on that
+-- side, the gap, and whatever the client's button column still costs there.
 local function railOffset(frame)
-    local left = Skin.ColumnFootprint(frame)
-    return -(PAD + RAIL_GAP + (left or 0))
+    local colL, colR = Skin.ColumnFootprint(frame)
+    local cl, cr = Skin.ChassisInsets()
+    if Skin.RailSide() == "right" then
+        return (cr + RAIL_GAP + (colR or 0))
+    end
+    return -(cl + RAIL_GAP + (colL or 0))
 end
 
 local function anchorRail(rail, frame)
     if type(rail.ClearAllPoints) ~= "function" then return end
     local dx = railOffset(frame)
     pcall(rail.ClearAllPoints, rail)
-    rail:SetPoint("TOPRIGHT", frame, "TOPLEFT", dx, PAD)
-    rail:SetPoint("BOTTOMRIGHT", frame, "BOTTOMLEFT", dx, -PAD)
+    if Skin.RailSide() == "right" then
+        rail:SetPoint("TOPLEFT", frame, "TOPRIGHT", dx, PAD)
+        rail:SetPoint("BOTTOMLEFT", frame, "BOTTOMRIGHT", dx, -PAD)
+    else
+        rail:SetPoint("TOPRIGHT", frame, "TOPLEFT", dx, PAD)
+        rail:SetPoint("BOTTOMRIGHT", frame, "BOTTOMLEFT", dx, -PAD)
+    end
 end
 
 local function ensureRail(frame, rec)
@@ -1944,6 +2167,498 @@ local function ensureRail(frame, rec)
 end
 
 ----------------------------------------------------------------------
+-- THE ONE BOX (skin v3 features 9-12).
+--
+-- WHY THE CLIENT'S OWN TABS ARE RE-ANCHORED, NOT REPLACED. The two honest
+-- shapes were: overlay our own buttons that call FCF_SelectDockFrame, or keep
+-- the client's tab buttons and move them. The client's tab carries more verbs
+-- than selection — OnDragStart tears the window out of the dock
+-- (FCF_Tab_OnDragStart), the right-click menu is the client's own tab dropdown
+-- (rename, lock, close, font size), and the dock manager tracks the tab
+-- object itself. An overlay would have to hide the real tabs (whose geometry
+-- the dock manager keeps rewriting anyway) and would silently drop
+-- drag-to-undock and that whole menu. So: the skin already restyles these
+-- exact buttons (font, ink, alpha, underline) and v3 extends that same
+-- machinery with placement. Every click and drag semantic stays the client's,
+-- byte for byte, and a disable puts every tab back where it was.
+--
+-- THE DOCK MANAGER GETS THE SECOND-TO-LAST WORD, we get the last: it re-lays
+-- the tab row on its own beats (FCF_DockUpdate), so we re-anchor in-call from
+-- a post-hook — the same posture the button column and the persistent edit box
+-- take. Nothing is fought; the client's decision simply happens first.
+--
+-- ONE BACKDROP: rec.backdrop IS the chassis (see ensureBackdrop). A docked
+-- window that is not its group's host hides its own, the entry bar's panel is
+-- put away in unified mode, and the strip/rail is a BARE frame. The only
+-- internal marks are hairlines in the border token.
+----------------------------------------------------------------------
+
+-- Which frame carries this window's box. A docked window's box belongs to the
+-- DOCK, so the dock's primary hosts it — the same question MoveTarget already
+-- answers for a drag, asked through the same seam so the two can never
+-- disagree about what "this window's group" means.
+function Skin.ChassisHost(frame, id)
+    local host = Skin.MoveTarget(frame, id)
+    return host or frame
+end
+
+-- Every window whose tab belongs in `host`'s strip, in the DOCK's own order
+-- (Class 8: a strip anything iterates must be deterministic).
+function Skin.GroupMembers(host)
+    local out = {}
+    local dock = _G.GeneralDockManager
+    local primary = (type(dock) == "table" and type(dock.primary) == "table")
+        and dock.primary or _G.DEFAULT_CHAT_FRAME
+    if host == primary and type(dock) == "table" and type(dock.DOCKED_CHAT_FRAMES) == "table" then
+        local list = dock.DOCKED_CHAT_FRAMES
+        for i = 1, #list do
+            local f = list[i]
+            if type(f) == "table" and Skin.styled[f] then out[#out + 1] = f end
+        end
+    end
+    if #out == 0 then out[1] = host end
+    return out
+end
+
+-- A window the player has CLOSED has no box. Its chassis is a child of a
+-- hidden frame in-game and would be invisible anyway; saying so out loud keeps
+-- "how many boxes are there" an answerable question instead of a count of
+-- every frame this module has ever dressed.
+local function frameLive(frame)
+    if type(frame) ~= "table" then return false end
+    if type(frame.IsShown) == "function" then
+        local ok, shown = pcall(frame.IsShown, frame)
+        if ok and not shown then return false end
+    end
+    return true
+end
+
+-- The styled windows that HOST a box, deduplicated, in style order.
+function Skin.ChassisHosts()
+    local out, seen = {}, {}
+    for _, frame in ipairs(Skin.order) do
+        if frameLive(frame) then
+            local rec = Skin.styled[frame]
+            local host = Skin.ChassisHost(frame, rec and rec.id)
+            if type(host) == "table" and Skin.styled[host] and not seen[host]
+               and frameLive(host) then
+                seen[host] = true
+                out[#out + 1] = host
+            end
+        end
+    end
+    return out
+end
+
+local function activeMember(members)
+    local sel = selectedDockFrame()
+    for _, f in ipairs(members) do
+        if f == sel then return f end
+    end
+    if #members == 1 then return members[1] end   -- its own box, its own tab
+    return nil
+end
+
+----------------------------------------------------------------------
+-- The strip / rail: a BARE frame (no backdrop — the chassis is the only
+-- background in the box) occupying one band of the chassis.
+----------------------------------------------------------------------
+
+local function ensureStrip(host, rec)
+    if rec.strip then return rec.strip end
+    if type(_G.CreateFrame) ~= "function" or not rec.backdrop then return nil end
+    local strip = _G.CreateFrame("Frame", nil, rec.backdrop)
+    if strip.SetFrameLevel and host.GetFrameLevel then
+        local okL, lvl = pcall(host.GetFrameLevel, host)
+        pcall(strip.SetFrameLevel, strip, (okL and lvl or 1))
+    end
+    rec.strip = strip
+    return strip
+end
+
+local function anchorStrip(strip, rec)
+    local bd = rec.backdrop
+    if not bd or type(strip.ClearAllPoints) ~= "function" then return end
+    local placement = Skin.TabPlacement()
+    local entryTop = (cfg().editBox or "BOTTOM"):upper() == "TOP"
+    pcall(strip.ClearAllPoints, strip)
+    if placement == "left" then
+        -- The rail is the chassis' whole left band: it runs beside the message
+        -- text AND the entry bar, exactly as the mockup's variant does.
+        strip:SetPoint("TOPLEFT", bd, "TOPLEFT", 0, 0)
+        strip:SetPoint("BOTTOMLEFT", bd, "BOTTOMLEFT", 0, 0)
+        if type(strip.SetWidth) == "function" then strip:SetWidth(TABRAIL_W) end
+    elseif placement == "right" then
+        strip:SetPoint("TOPRIGHT", bd, "TOPRIGHT", 0, 0)
+        strip:SetPoint("BOTTOMRIGHT", bd, "BOTTOMRIGHT", 0, 0)
+        if type(strip.SetWidth) == "function" then strip:SetWidth(TABRAIL_W) end
+    else
+        -- The top band — below the entry bar when the entry bar is the one on
+        -- top, so the two never sit on the same pixels.
+        local dy = entryTop and -(EB_GAP + EB_HEIGHT) or 0
+        strip:SetPoint("TOPLEFT", bd, "TOPLEFT", 0, dy)
+        strip:SetPoint("TOPRIGHT", bd, "TOPRIGHT", 0, dy)
+        if type(strip.SetHeight) == "function" then strip:SetHeight(STRIP_H) end
+    end
+end
+
+----------------------------------------------------------------------
+-- The internal hairlines. Border-token, at the divider's own subtle alpha —
+-- the ONLY separation inside the box.
+--
+-- THE FUSED ACTIVE TAB (top placement): the seam between the strip and the
+-- message surface is drawn as TWO pieces that stop at the active tab's edges,
+-- so the surface runs continuously through it. That is the mockup's "the
+-- active tab fuses with the message surface", expressed with hairlines instead
+-- of the second background the design contract forbids.
+-- On a RAIL the seam is continuous and the active tab is marked by its edge
+-- bar instead (again, the mockup).
+----------------------------------------------------------------------
+
+local function ensureSeam(rec, key)
+    if rec[key] then return rec[key] end
+    local UI, bd = UIKit(), rec.backdrop
+    if not (UI and bd and type(bd.CreateTexture) == "function") then return nil end
+    local tex = bd:CreateTexture(nil, "OVERLAY")
+    UI.Skin(tex, function(self)
+        if type(self.SetColorTexture) == "function" then
+            self:SetColorTexture(UI.Color("border", SEAM_ALPHA))
+        end
+    end)
+    tex:Hide()
+    rec[key] = tex
+    return tex
+end
+
+local function layoutSeams(host, rec, activeTab)
+    local strip = rec.strip
+    local seamA, seamB = ensureSeam(rec, "tabSeamA"), ensureSeam(rec, "tabSeamB")
+    local entry = ensureSeam(rec, "entrySeam")
+    if not (seamA and seamB and entry and strip) then return end
+    local placement = Skin.TabPlacement()
+    local entryTop = (cfg().editBox or "BOTTOM"):upper() == "TOP"
+
+    -- The entry bar's hairline, across the message area's own width.
+    entry:ClearAllPoints()
+    if type(entry.SetHeight) == "function" then entry:SetHeight(SEAM_W) end
+    if entryTop then
+        entry:SetPoint("BOTTOMLEFT", host, "TOPLEFT", 0, EB_GAP / 2)
+        entry:SetPoint("BOTTOMRIGHT", host, "TOPRIGHT", 0, EB_GAP / 2)
+    else
+        entry:SetPoint("TOPLEFT", host, "BOTTOMLEFT", 0, -EB_GAP / 2)
+        entry:SetPoint("TOPRIGHT", host, "BOTTOMRIGHT", 0, -EB_GAP / 2)
+    end
+    entry:Show()
+
+    seamA:ClearAllPoints()
+    seamB:ClearAllPoints()
+    if placement == "left" or placement == "right" then
+        -- Continuous, on the rail's INNER side.
+        if type(seamA.SetWidth) == "function" then seamA:SetWidth(SEAM_W) end
+        local edge = (placement == "left") and "RIGHT" or "LEFT"
+        seamA:SetPoint("TOP" .. edge, strip, "TOP" .. edge, 0, 0)
+        seamA:SetPoint("BOTTOM" .. edge, strip, "BOTTOM" .. edge, 0, 0)
+        seamA:Show()
+        seamB:Hide()
+        return
+    end
+    if type(seamA.SetHeight) == "function" then seamA:SetHeight(SEAM_W) end
+    if type(seamB.SetHeight) == "function" then seamB:SetHeight(SEAM_W) end
+    if activeTab then
+        -- BROKEN at the active tab: the fused-tab relationship.
+        seamA:SetPoint("BOTTOMLEFT", strip, "BOTTOMLEFT", 0, 0)
+        seamA:SetPoint("BOTTOMRIGHT", activeTab, "BOTTOMLEFT", 0, 0)
+        seamB:SetPoint("BOTTOMLEFT", activeTab, "BOTTOMRIGHT", 0, 0)
+        seamB:SetPoint("BOTTOMRIGHT", strip, "BOTTOMRIGHT", 0, 0)
+        seamA:Show()
+        seamB:Show()
+    else
+        seamA:SetPoint("BOTTOMLEFT", strip, "BOTTOMLEFT", 0, 0)
+        seamA:SetPoint("BOTTOMRIGHT", strip, "BOTTOMRIGHT", 0, 0)
+        seamA:Show()
+        seamB:Hide()
+    end
+end
+
+----------------------------------------------------------------------
+-- The active-tab EDGE BAR (rails). Its top-placement twin is the underline
+-- that already exists; both wear the tab's own colour.
+----------------------------------------------------------------------
+
+function Skin.EnsureEdgeBar(tab, rec)
+    if rec.edgebar then return rec.edgebar end
+    local UI = UIKit()
+    if not (UI and type(tab.CreateTexture) == "function") then return nil end
+    local tex = tab:CreateTexture(nil, "OVERLAY")
+    if type(tex.SetWidth) == "function" then tex:SetWidth(EDGEBAR_W) end
+    UI.Skin(tex, function(self)
+        if type(self.SetColorTexture) ~= "function" then return end
+        local mc = rec.markColor
+        if mc then self:SetColorTexture(mc[1], mc[2], mc[3])
+        else self:SetColorTexture(UI.Color("accent")) end
+    end)
+    tex:Hide()
+    rec.edgebar = tex
+    return tex
+end
+
+local function anchorEdgeBar(bar, tab)
+    if type(bar.ClearAllPoints) ~= "function" then return end
+    -- The INNER side of the rail: the edge that faces the message text.
+    local inner = (Skin.TabPlacement() == "left") and "RIGHT" or "LEFT"
+    pcall(bar.ClearAllPoints, bar)
+    bar:SetPoint("TOP" .. inner, tab, "TOP" .. inner, 0, -EDGEBAR_INSET)
+    bar:SetPoint("BOTTOM" .. inner, tab, "BOTTOM" .. inner, 0, EDGEBAR_INSET)
+end
+
+-- The active mark shows when the tab ink feature is on, OR whenever the box is
+-- on: a one-box layout with no marked tab would have nothing saying which
+-- window you are looking at.
+local function marksOn()
+    return (cfg().channelTabs or Skin.Unified()) and true or false
+end
+
+function Skin.UpdateTabMarks(frame, rec, tab, isSel)
+    if not (rec and tab) then return end
+    local on   = marksOn()
+    local rail = Skin.TabsOnRail()
+    local ul = (on and not rail) and ensureUnderline(tab, rec) or rec.underline
+    local bar = (on and rail) and Skin.EnsureEdgeBar(tab, rec) or rec.edgebar
+    local mc = rec.markColor
+    if ul then
+        if mc and type(ul.SetColorTexture) == "function" then
+            ul:SetColorTexture(mc[1], mc[2], mc[3])
+        end
+        if on and isSel and not rail then ul:Show() else ul:Hide() end
+    end
+    if bar then
+        if mc and type(bar.SetColorTexture) == "function" then
+            bar:SetColorTexture(mc[1], mc[2], mc[3])
+        end
+        if on and isSel and rail then anchorEdgeBar(bar, tab); bar:Show() else bar:Hide() end
+    end
+end
+
+----------------------------------------------------------------------
+-- LAYOUT: the client's own tab buttons, re-anchored into the strip or rail.
+-- Their original points, size and justification are remembered on the first
+-- move, so a disable — or turning the box off — hands every tab back exactly
+-- as the client had it.
+----------------------------------------------------------------------
+
+local function rememberTab(rec, tab, text)
+    if rec.tabPoints ~= nil then return end
+    rec.tabPoints  = savePoints(tab) or false
+    rec.tabSize    = { widgetNum(tab, "GetWidth"), widgetNum(tab, "GetHeight") }
+    if text and type(text.GetJustifyH) == "function" then
+        local ok, j = pcall(text.GetJustifyH, text)
+        rec.tabJustify = (ok and type(j) == "string") and j or false
+    end
+end
+
+local function restoreTab(frame, rec)
+    local tab, text = tabText(frame)
+    if not tab or rec.tabPoints == nil then return end
+    if rec.tabPoints then restorePoints(tab, rec.tabPoints) end
+    if rec.tabSize then
+        if rec.tabSize[1] and type(tab.SetWidth) == "function" then
+            pcall(tab.SetWidth, tab, rec.tabSize[1])
+        end
+        if rec.tabSize[2] and type(tab.SetHeight) == "function" then
+            pcall(tab.SetHeight, tab, rec.tabSize[2])
+        end
+    end
+    if text and rec.tabJustify and type(text.SetJustifyH) == "function" then
+        pcall(text.SetJustifyH, text, rec.tabJustify)
+    end
+    rec.tabPoints, rec.tabSize, rec.tabJustify = nil, nil, nil
+    rec.tabLaid = nil
+end
+
+function Skin.LayoutTabs()
+    if not Skin.active then return 0 end
+    local placement = Skin.TabPlacement()
+    local rail = Skin.TabsOnRail()
+    local moved = 0
+    for _, host in ipairs(Skin.ChassisHosts()) do
+        local hrec = Skin.styled[host]
+        local strip = hrec and hrec.strip
+        if strip then
+            local members = Skin.GroupMembers(host)
+            local prev
+            for _, frame in ipairs(members) do
+                local rec = Skin.styled[frame]
+                local tab, text = tabText(frame)
+                if rec and tab then
+                    rememberTab(rec, tab, text)
+                    pcall(tab.ClearAllPoints, tab)
+                    if rail then
+                        if type(tab.SetWidth) == "function" then
+                            pcall(tab.SetWidth, tab, TABRAIL_W - 2 * TAB_PAD)
+                        end
+                        if type(tab.SetHeight) == "function" then
+                            pcall(tab.SetHeight, tab, TAB_ROW_H)
+                        end
+                        if prev then
+                            tab:SetPoint("TOPLEFT", prev, "BOTTOMLEFT", 0, -TAB_GAP)
+                        else
+                            tab:SetPoint("TOPLEFT", strip, "TOPLEFT", TAB_PAD, -TAB_PAD)
+                        end
+                        if text and type(text.SetJustifyH) == "function" then
+                            pcall(text.SetJustifyH, text, "LEFT")
+                        end
+                    else
+                        -- The client sizes a top tab to its own text; hand the
+                        -- remembered size back before letting it do so again,
+                        -- so a rail's forced row shape never survives the
+                        -- switch back to the top.
+                        if rec.tabSize and type(tab.SetWidth) == "function" and rec.tabSize[1] then
+                            pcall(tab.SetWidth, tab, rec.tabSize[1])
+                        end
+                        if rec.tabSize and type(tab.SetHeight) == "function" and rec.tabSize[2] then
+                            pcall(tab.SetHeight, tab, rec.tabSize[2])
+                        end
+                        if prev then
+                            tab:SetPoint("BOTTOMLEFT", prev, "BOTTOMRIGHT", TAB_GAP, 0)
+                        else
+                            tab:SetPoint("BOTTOMLEFT", strip, "BOTTOMLEFT", TAB_PAD, 0)
+                        end
+                        if text and type(text.SetJustifyH) == "function" then
+                            pcall(text.SetJustifyH, text, "CENTER")
+                        end
+                    end
+                    rec.tabLaid = placement    -- which shape this tab is wearing
+                    prev = tab
+                    moved = moved + 1
+                end
+            end
+            local active = activeMember(members)
+            local activeTab = active and (select(1, tabText(active))) or nil
+            layoutSeams(host, hrec, activeTab)
+        end
+    end
+    -- The badge anchors to the tab, and the tab just moved. Telling its OWNER
+    -- through its own public beat is the same courtesy options.lua pays every
+    -- module it writes a field for — badges is never reached into from here.
+    local B = ns.Badges
+    if B and type(B.Relayout) == "function" then pcall(B.Relayout) end
+    return moved
+end
+
+----------------------------------------------------------------------
+-- THE COPY AFFORDANCE, in the box. Its Wave-1 corner (the window's top right,
+-- out in the backdrop's pad) is INSIDE the tab strip once the box exists — so
+-- in unified mode it parks at the strip's far end instead, which is the one
+-- stretch of the strip the tabs never reach. Outside the box it keeps the
+-- corner it has always had.
+----------------------------------------------------------------------
+
+function Skin.CopyButtonAnchor()
+    if not Skin.Unified() then return "corner" end
+    return Skin.TabsOnRail() and "railFoot" or "stripEnd"
+end
+
+local function anchorCopyButton(frame, rec)
+    local btn = rec.copyBtn
+    if not btn or type(btn.ClearAllPoints) ~= "function" then return nil end
+    local where = Skin.CopyButtonAnchor()
+    local strip
+    if where ~= "corner" then
+        local host = Skin.ChassisHost(frame, rec.id)
+        local hrec = host and Skin.styled[host]
+        strip = hrec and hrec.strip
+    end
+    if not strip then where = "corner" end
+    pcall(btn.ClearAllPoints, btn)
+    if where == "railFoot" then
+        btn:SetPoint("BOTTOMRIGHT", strip, "BOTTOMRIGHT", -TAB_PAD, TAB_PAD)
+    elseif where == "stripEnd" then
+        btn:SetPoint("RIGHT", strip, "RIGHT", -TAB_PAD, 0)
+    else
+        btn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", PAD, PAD)
+    end
+    rec.copyAnchor = where
+    return where
+end
+
+----------------------------------------------------------------------
+-- THE BOX, per beat: anchor every chassis, place its strip and hairlines, and
+-- make sure no window is wearing a SECOND background. Cheap and idempotent.
+----------------------------------------------------------------------
+
+function Skin.UpdateChassis()
+    if not Skin.active then return 0 end
+    -- Class 9: this runs from a post-hook on the client's OWN dock-layout beat,
+    -- so it is armed against re-entry the same way the button column is. A
+    -- SetPoint cannot call FCF_DockUpdate today; the latch is what keeps that
+    -- from becoming a spin if a future client makes it so.
+    if Skin._chassisDepth > 0 then return 0 end
+    Skin._chassisDepth = Skin._chassisDepth + 1
+    local ok, res = pcall(Skin.__UpdateChassis)
+    Skin._chassisDepth = Skin._chassisDepth - 1
+    if not ok then
+        if ns.RouteError then ns.RouteError(res) end
+        return 0
+    end
+    return res or 0
+end
+
+function Skin.__UpdateChassis()
+    local unified = Skin.Unified()
+    local hosts, isHost = Skin.ChassisHosts(), {}
+    for _, h in ipairs(hosts) do isHost[h] = true end
+    local n = 0
+    for _, frame in ipairs(Skin.order) do
+        local rec = Skin.styled[frame]
+        if rec and rec.backdrop then
+            anchorChassis(rec.backdrop, frame)
+            if unified and not frameLive(frame) then
+                rec.backdrop:Hide()          -- a closed window has no box
+            elseif unified and not isHost[frame] then
+                -- A docked window shares its group's box. A second backdrop
+                -- behind it is exactly the thing the design contract forbids.
+                rec.backdrop:Hide()
+            else
+                rec.backdrop:Show()
+                n = n + 1
+            end
+        end
+    end
+    for _, host in ipairs(hosts) do
+        local rec = Skin.styled[host]
+        if rec then
+            if unified then
+                local strip = ensureStrip(host, rec)
+                if strip then anchorStrip(strip, rec); strip:Show() end
+            elseif rec.strip then
+                rec.strip:Hide()
+                for _, key in ipairs({ "tabSeamA", "tabSeamB", "entrySeam" }) do
+                    if rec[key] then rec[key]:Hide() end
+                end
+            end
+        end
+    end
+    if unified then
+        Skin.LayoutTabs()
+    else
+        for _, frame in ipairs(Skin.order) do
+            local rec = Skin.styled[frame]
+            if rec and rec.tabPoints ~= nil then restoreTab(frame, rec) end
+        end
+        local B = ns.Badges
+        if B and type(B.Relayout) == "function" then pcall(B.Relayout) end
+    end
+    -- The copy affordance last: in the box it parks at the far end of the tab
+    -- strip (dead space there, and the only corner the strip does not want),
+    -- which is a placement that only exists once the strip has been laid out.
+    for _, frame in ipairs(Skin.order) do
+        local rec = Skin.styled[frame]
+        if rec and rec.copyBtn then anchorCopyButton(frame, rec) end
+    end
+    return n
+end
+
+----------------------------------------------------------------------
 -- Style / restore one window.
 ----------------------------------------------------------------------
 
@@ -1981,6 +2696,19 @@ function Skin.StyleWindow(frame, id)
     Skin.UpdateDivider(frame)
 end
 
+function Skin.StyleAll()
+    for id = 1, numWindows() do
+        local frame = _G["ChatFrame" .. id]
+        if frame and windowEligible(id) then
+            Skin.StyleWindow(frame, id)
+        end
+    end
+    -- The box is assembled AFTER every window is dressed: which frame hosts a
+    -- chassis depends on the whole dock, not on any one window.
+    Skin.UpdateChassis()
+    Skin.UpdateTabColors()
+end
+
 local function restoreWindow(frame, rec)
     restoreStock(frame, rec)
     -- Movability and the clamp rect go back to whatever the client had: with
@@ -2010,6 +2738,14 @@ local function restoreWindow(frame, rec)
     if rec.rail then rec.rail:Hide() end
     if rec.underline then rec.underline:Hide() end
     if rec.divider then rec.divider:Hide() end
+    -- skin v3: the box goes away, and every tab we moved goes back exactly
+    -- where the client had it (points, size and justification all remembered
+    -- on the first move).
+    if rec.strip then rec.strip:Hide() end
+    for _, key in ipairs({ "tabSeamA", "tabSeamB", "entrySeam", "edgebar" }) do
+        if rec[key] then rec[key]:Hide() end
+    end
+    restoreTab(frame, rec)
     restoreEditBox(frame, rec)
     if rec.origFont and type(frame.SetFont) == "function" then
         pcall(frame.SetFont, frame, rec.origFont[1], rec.origFont[2], rec.origFont[3])
@@ -2026,16 +2762,6 @@ local function restoreWindow(frame, rec)
         rec.tabLabel = nil
         rec.origTabText = nil
     end
-end
-
-function Skin.StyleAll()
-    for id = 1, numWindows() do
-        local frame = _G["ChatFrame" .. id]
-        if frame and windowEligible(id) then
-            Skin.StyleWindow(frame, id)
-        end
-    end
-    Skin.UpdateTabColors()
 end
 
 -- The v2 re-evaluation beat: everything whose answer can change without a
@@ -2055,8 +2781,15 @@ function Skin.Refresh()
             -- note), so the loosened insets are re-asserted on every cheap
             -- re-evaluation beat instead of once at style time.
             Skin.LoosenClamp(frame, rec)
+            -- The box's own fading rule is re-asserted on the cheap beat: the
+            -- client re-applies fading on its own window updates, and the
+            -- unified box must never come back with fading on behind it.
+            Skin.ApplyFading(frame)
         end
     end
+    -- The box before the inks: the strip has to exist and the tabs have to be
+    -- in it before the active mark can be placed on one of them.
+    Skin.UpdateChassis()
     -- NOT here: the persistent edit box. Refresh is the cheap re-evaluation
     -- beat (selection, recolor, CVar), and re-running the client's header pass
     -- on it would both cost a client call per beat and overwrite the ink this
@@ -2149,6 +2882,17 @@ local function installHooks()
     end
     if type(_G.FCF_UpdateButtonSide) == "function" then
         hook("FCF_UpdateButtonSide", function(chatFrame) reHide(chatFrame) end)
+    end
+    -- skin v3: the DOCK MANAGER re-lays the tab row on its own beat, and the
+    -- box's strip is where those tabs belong. Same posture as the column: the
+    -- client makes its layout decision, then we re-anchor synchronously inside
+    -- the same call, so there is no frame where a tab is back in the client's
+    -- row. With the box off this body does nothing at all.
+    if type(_G.FCF_DockUpdate) == "function" then
+        hook("FCF_DockUpdate", function()
+            if not Skin.active or not Skin.Unified() then return end
+            Skin.UpdateChassis()
+        end)
     end
 end
 
@@ -2260,16 +3004,30 @@ ns.RegisterDebugCommand("skin", "skin state: styled windows, config, tab inks", 
                 tostring(menuKind or "none"), Skin.menuOpens))
     ns:Print(("  tab dim factor %.3f (token-derived), stamps showing: %s, stamp sample '%s'")
         :format(Skin.DimFactor(), tostring(Skin.StampsShowing()), Skin.StampSample()))
+    local cl, cr, ctp, cb = Skin.ChassisInsets()
+    ns:Print(("  one box: unifiedChassis=%s tabs=%s (synced), icon rail on the %s edge")
+        :format(tostring(c.unifiedChassis), Skin.TabPlacement(), Skin.RailSide()))
+    ns:Print(("  chassis insets l/r/t/b = %d/%d/%d/%d, fading effective: %s (stored %s)")
+        :format(cl, cr, ctp, cb, tostring(Skin.FadingEffective()), tostring(c.fading)))
+    for _, host in ipairs(Skin.ChassisHosts()) do
+        local names = {}
+        for _, f in ipairs(Skin.GroupMembers(host)) do
+            names[#names + 1] = tostring(f.GetName and f:GetName() or "?")
+        end
+        ns:Print(("  box on %s: %s"):format(
+            tostring(host.GetName and host:GetName() or "?"), table.concat(names, ", ")))
+    end
     for _, frame in ipairs(Skin.order) do
         local rec = Skin.styled[frame]
         local entry, source = Skin.WindowRouting(rec and rec.id)
         local kind, value = Skin.DominantChannel(entry, isCombatLog(frame, rec and rec.id))
-        ns:Print(("  %s: ink=%s dominant=%s%s routing=%s"):format(
+        ns:Print(("  %s: ink=%s dominant=%s%s routing=%s tabColor=%s"):format(
             tostring(frame.GetName and frame:GetName() or "?"),
             tostring(rec and rec.inkSource or "-"),
             tostring(kind or "none"),
             value and (" " .. tostring(value)) or "",
-            tostring(source or "none")))
+            tostring(source or "none"),
+            tostring(Skin.TabColorSpec(rec and rec.id) or "-")))
     end
 end)
 
@@ -2368,6 +3126,13 @@ local function testCopyAndSkin(fails, verbose)
         if verbose then ns:Print("  skin: live checks skipped (no simulator)") end
         return
     end
+
+    -- skin v3: THIS suite is the v2 suite, and it stays that way. The ONE BOX
+    -- has its own suite below (V1..V9) that turns the gate on deliberately;
+    -- here the gate is parked OFF so every assertion below keeps meaning "the
+    -- v2 treatment", which is exactly what OFF has to go on meaning.
+    local savedUnified = ns.db.skin.unifiedChassis
+    ns.db.skin.unifiedChassis = false
 
     -- ── Phase 0: INERTNESS. The harness loaded us with skin disabled and drove
     -- a full login. Nothing may have been touched. ─────────────────────────────
@@ -2574,9 +3339,18 @@ local function testCopyAndSkin(fails, verbose)
     ck(near3(inkOf(cf5), CTI.GUILD.r, CTI.GUILD.g, CTI.GUILD.b),
         "phase 5: the ACTIVE tab wears the channel ink at full strength")
     local ul5 = Skin.styled[cf5].underline
-    ck(ul5 and ul5._shown == true, "phase 5: the active tab wears the accent underline")
-    ck(near3(ul5._color, UI.Color("accent")),
-        "phase 5: the underline is the ACCENT token (not a color)")
+    ck(ul5 and ul5._shown == true, "phase 5: the active tab wears an underline")
+    -- skin v3 moved this: the underline is the TAB's own colour (the approved
+    -- mockup's --tabc), so a guild tab is underlined in guild green. The ACCENT
+    -- token is still the fallback for a tab that resolved no colour at all —
+    -- pinned on the default window a few lines down.
+    ck(near3(ul5._color, CTI.GUILD.r, CTI.GUILD.g, CTI.GUILD.b),
+        "phase 5: the underline wears the TAB's own ink (the client's guild color)")
+    _G.FCF_SelectDockFrame(cf1)
+    local ulDefault = Skin.styled[cf1].underline
+    ck(ulDefault and ulDefault._shown == true and near3(ulDefault._color, UI.Color("accent")),
+        "phase 5: a tab with no colour of its own is underlined in the ACCENT token (the fallback)")
+    _G.FCF_SelectDockFrame(cf5)
     ck(near3(inkOf(cf1), UI.Color("muted")),
         "phase 5: the tab that lost selection falls to its inactive treatment")
     local ul1 = Skin.styled[cf1].underline
@@ -2812,6 +3586,7 @@ local function testCopyAndSkin(fails, verbose)
     _G.FCF_ResetChatWindows()
     for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do _G.FloatingChatFrame_Update(id) end
     if cfgStore then cfgStore.windows = savedCfgWindows end
+    ns.db.skin.unifiedChassis = savedUnified
     _G.FCF_SelectDockFrame(cf1)
     Skin.Refresh()
     Sim.ResetCalls()
@@ -2842,6 +3617,11 @@ local function testMoveAndEditBox(fails, verbose)
     -- and so this suite reads the same whichever way the column option ships.
     local savedColumn = ns.db.skin.hideButtonColumn
     ns.db.skin.hideButtonColumn = true
+    -- v3: the ONE BOX has its own suite; this one is about the drag, the clamp
+    -- and the edit box, so the gate is parked OFF and every geometry assertion
+    -- below keeps meaning what it meant.
+    local savedUnified = ns.db.skin.unifiedChassis
+    ns.db.skin.unifiedChassis = false
     Skin.Refresh()
 
     -- ── Phase M1: the rig exists, and an UNMODIFIED drag is never intercepted ─
@@ -3066,6 +3846,7 @@ local function testMoveAndEditBox(fails, verbose)
     -- ── OUT: back to the world the suites after us expect ───────────────────
     ns.SetModuleEnabled("skin", true)
     ns.db.skin.hideButtonColumn = savedColumn
+    ns.db.skin.unifiedChassis = savedUnified
     Skin.moveMode = false
     _G.FCF_ResetChatWindows()
     for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do _G.FloatingChatFrame_Update(id) end
@@ -3098,6 +3879,11 @@ local function testButtonColumn(fails, verbose)
         if fn then fn(frame) end
     end
     local savedAlt, savedLeft, savedBottom = Sim.altDown, cf1._left, cf1._bottom
+    -- v3: the ONE BOX has its own suite; the icon-rail offset assertions here
+    -- are about the COLUMN's footprint, so the gate is parked OFF.
+    local savedUnified = ns.db.skin.unifiedChassis
+    ns.db.skin.unifiedChassis = false
+    Skin.Refresh()
 
     -- ── Phase B1: THE MECHANICS — the column, both shapes, and its side ──────
     ck(ns.DEFAULTS.skin.hideButtonColumn == true,
@@ -3409,6 +4195,7 @@ local function testButtonColumn(fails, verbose)
     _G.ChatMenu:Hide()
     ns.db.skin.iconRail = false
     ns.db.skin.hideButtonColumn = true
+    ns.db.skin.unifiedChassis = savedUnified
     cf1._left, cf1._bottom = savedLeft, savedBottom
     _G.FCF_ResetChatWindows()
     for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do _G.FloatingChatFrame_Update(id) end
@@ -3419,6 +4206,410 @@ local function testButtonColumn(fails, verbose)
     _G.FCF_SelectDockFrame(cf1)
     Skin.Refresh()
     HT.flush()
+    Sim.ResetCalls()
+end
+
+-- skin v3: THE ONE BOX. The placement matrix in geometry, the single-backdrop
+-- rule, the fused active tab, the rail's edge bar, the colour chain, the badge
+-- following its tab, fading going inert, and the whole thing handing every tab
+-- back when it is turned off.
+local function testOneBox(fails, verbose)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Sim = _G.__DaseekiChatSim
+    local UI  = UIKit()
+    if not (Sim and UI) then
+        if verbose then ns:Print("  skin: one-box checks skipped (no simulator)") end
+        return
+    end
+    local C = ns.Config
+    if not C then return end
+
+    local function near3(got, r, g, b, tol)
+        tol = tol or 1e-6
+        return got and math.abs(got[1] - r) < tol and math.abs(got[2] - g) < tol
+            and math.abs(got[3] - b) < tol
+    end
+    -- A recorded SetPoint, by its own anchor name.
+    local function pointNamed(widget, anchor)
+        for _, p in ipairs((widget and widget._points) or {}) do
+            if p[1] == anchor then return p end
+        end
+        return nil
+    end
+
+    ns.SetModuleEnabled("skin", true)
+    local cfgStore = C.Get()
+    local savedWindows, savedRev, savedAt = cfgStore.windows, cfgStore.rev, cfgStore.at
+    local savedSkinCfg = cfgStore.skin
+    local savedUnified, savedFading = ns.db.skin.unifiedChassis, ns.db.skin.fading
+    local savedChannelTabs, savedRail = ns.db.skin.channelTabs, ns.db.skin.iconRail
+
+    -- The client's stock ten-window world, mirrored into the config, so the
+    -- routing the colour chain is judged on is the client's own.
+    _G.FCF_ResetChatWindows()
+    for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do _G.FloatingChatFrame_Update(id) end
+    cfgStore.windows = {}
+    for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do cfgStore.windows[id] = C.CaptureWindow(id) end
+    cfgStore.skin = { tabPlacement = "top" }
+    cfgStore.rev, cfgStore.at = 1, C.Now()
+    local cf1, cf2 = _G.ChatFrame1, _G.ChatFrame2
+    _G.FCF_SelectDockFrame(cf1)
+    ns.db.skin.unifiedChassis = true
+    ns.db.skin.channelTabs = true
+    Skin.StyleAll()
+
+    local rec1, rec2 = Skin.styled[cf1], Skin.styled[cf2]
+    local tab1, tab2 = _G.ChatFrame1Tab, _G.ChatFrame2Tab
+
+    -- ── Phase V1: THE GROUP. A docked window's box belongs to the DOCK. ───────
+    ck(Skin.ChassisHost(cf2, 2) == cf1,
+        "V1: a docked window's box is hosted by the dock's primary, not by itself")
+    local hostSet = {}
+    for _, h in ipairs(Skin.ChassisHosts()) do hostSet[h] = true end
+    ck(hostSet[cf1] == true and hostSet[cf2] == nil,
+        "V1: the docked pair is ONE box — the primary hosts it, the docked member does not")
+    local members = Skin.GroupMembers(cf1)
+    ck(#members == 2 and members[1] == cf1 and members[2] == cf2,
+        "V1: …carrying both docked windows' tabs, in the DOCK's own order")
+
+    -- An UNDOCKED window is its own group, and its own box.
+    _G.SetChatWindowShown(4, true)
+    _G.SetChatWindowDocked(4, false)
+    _G.FloatingChatFrame_Update(4)
+    Skin.StyleWindow(_G.ChatFrame4, 4)
+    Skin.UpdateChassis()
+    ck(Skin.ChassisHost(_G.ChatFrame4, 4) == _G.ChatFrame4,
+        "V1: an undocked window is its own group and hosts its own box")
+    ck(#Skin.GroupMembers(_G.ChatFrame4) == 1, "V1: …with only its own tab in it")
+    ck(Skin.styled[_G.ChatFrame4].backdrop._shown == true, "V1: …and its own backdrop")
+    _G.SetChatWindowShown(4, false)
+    _G.FloatingChatFrame_Update(4)
+    Skin.UpdateChassis()
+
+    -- ── Phase V2: ONE BACKDROP. No second background anywhere in the box. ─────
+    local shownInDock = 0
+    for _, frame in ipairs(Skin.GroupMembers(cf1)) do
+        local rec = Skin.styled[frame]
+        if rec and rec.backdrop and rec.backdrop._shown then shownInDock = shownInDock + 1 end
+    end
+    ck(rec1.backdrop._shown == true and rec2.backdrop._shown == false,
+        "V2: THE PIN — the group's host wears the only backdrop; the docked member's is put away")
+    ck(shownInDock == 1, "V2: exactly ONE backdrop is showing for the whole dock (got "
+        .. shownInDock .. ")")
+    ck(Skin.styled[_G.ChatFrame4].backdrop._shown == false,
+        "V2: …and a window the player has CLOSED has no box at all")
+    ck(rec1.ebSkin == nil or rec1.ebSkin._shown == false,
+        "V2: …and NO second background behind the entry bar")
+    ck(rec1.strip ~= nil and rec1.strip._backdrop == nil,
+        "V2: …and the tab strip is a BARE frame (it never got a backdrop of its own)")
+    ck(near3(rec1.backdrop._backdropColor, UI.Color("panel")),
+        "V2: the chassis is still the PANEL token (not a color)")
+    ck(near3(rec1.tabSeamA._color, UI.Color("border")) and rec1.tabSeamA._color[4] == SEAM_ALPHA,
+        "V2: the internal hairline is the BORDER token at the divider's own alpha")
+
+    -- ── Phase V3: TOP placement geometry. ────────────────────────────────────
+    ck(Skin.TabPlacement() == "top", "V3: the shipped placement is top")
+    local l, r, t, b = Skin.ChassisInsets()
+    ck(l == PAD and r == PAD and t == PAD + STRIP_H and b == PAD + EB_GAP + EB_HEIGHT,
+        "V3: the box grows over the strip above and the entry bar below")
+    local tl = pointNamed(rec1.backdrop, "TOPLEFT")
+    local br = pointNamed(rec1.backdrop, "BOTTOMRIGHT")
+    ck(tl and tl[2] == cf1 and tl[4] == -PAD and tl[5] == PAD + STRIP_H,
+        "V3: …and the chassis is anchored to exactly those insets")
+    ck(br and br[4] == PAD and br[5] == -(PAD + EB_GAP + EB_HEIGHT),
+        "V3: …on the entry-bar side too")
+    ck(rec1.strip._h == STRIP_H, "V3: the strip is the chassis' top band")
+    local sp = pointNamed(rec1.strip, "TOPLEFT")
+    ck(sp and sp[2] == rec1.backdrop, "V3: …anchored to the chassis itself")
+    local t1p = pointNamed(tab1, "BOTTOMLEFT")
+    ck(t1p and t1p[2] == rec1.strip and t1p[4] == TAB_PAD,
+        "V3: the first tab sits at the strip's left edge")
+    local t2p = pointNamed(tab2, "BOTTOMLEFT")
+    ck(t2p and t2p[2] == tab1 and t2p[3] == "BOTTOMRIGHT" and t2p[4] == TAB_GAP,
+        "V3: …and the next tab runs off it, left to right")
+
+    -- THE FUSED ACTIVE TAB: the strip/message hairline is drawn in two pieces
+    -- that STOP at the active tab's edges, so the surface runs through it. A
+    -- single unbroken hairline could not express this, and a second background
+    -- is forbidden — this is the mockup's relationship, in hairlines.
+    ck(rec1.tabSeamA._shown == true and rec1.tabSeamB._shown == true,
+        "V3: FUSED TAB — the seam is drawn in two pieces")
+    local aRight = pointNamed(rec1.tabSeamA, "BOTTOMRIGHT")
+    local bLeft  = pointNamed(rec1.tabSeamB, "BOTTOMLEFT")
+    ck(aRight and aRight[2] == tab1 and aRight[3] == "BOTTOMLEFT",
+        "V3: …the left piece stops at the ACTIVE tab's left edge")
+    ck(bLeft and bLeft[2] == tab1 and bLeft[3] == "BOTTOMRIGHT",
+        "V3: …and the right piece starts again at its right edge")
+    ck(rec1.underline and rec1.underline._shown == true,
+        "V3: the active tab wears its underline on top")
+    -- NEVER A FIGHT LOOP: an idle beat over a box that is already assembled
+    -- builds nothing and calls the client's own dock layout not at all.
+    Sim.ResetCalls()
+    for _ = 1, 5 do Skin.Refresh() end
+    ck(Sim.CallCount("CreateFrame") == 0,
+        "V3: five idle beats build NOTHING (the box is assembled once)")
+    ck(Sim.CallCount("FCF_DockUpdate") == 0,
+        "V3: …and never poke the client's own dock layout")
+    ck(Skin._chassisDepth == 0, "V3: the re-entrancy latch is back at rest")
+    -- The client's own dock beat is answered in-call, and does not spin.
+    _G.FCF_DockUpdate()
+    ck(Skin._chassisDepth == 0, "V3: …and a client dock update leaves it at rest too")
+    ck(pointNamed(tab1, "BOTTOMLEFT")[2] == rec1.strip,
+        "V3: THE LAST WORD — the dock re-laid the row and we put the tab back, in-call")
+    ck(rec1.edgebar == nil or rec1.edgebar._shown == false,
+        "V3: …and no edge bar (that is the rail's mark)")
+    ck(Skin.RailSide() == "left", "V3: the icon rail keeps the left edge under top tabs")
+    -- The copy affordance's Wave-1 corner is INSIDE the strip now, so it moves.
+    ck(Skin.CopyButtonAnchor() == "stripEnd" and rec1.copyAnchor == "stripEnd",
+        "V3: the copy button parks at the strip's far end instead of under a tab")
+    ck(pointNamed(rec1.copyBtn, "RIGHT") ~= nil and pointNamed(rec1.copyBtn, "TOPRIGHT") == nil,
+        "V3: …and its old corner anchor is gone, not stacked on top")
+
+    -- Selecting the other tab moves the break with it.
+    _G.FCF_SelectDockFrame(cf2)
+    aRight = pointNamed(rec1.tabSeamA, "BOTTOMRIGHT")
+    ck(aRight and aRight[2] == tab2,
+        "V3: the break follows the selection to the newly active tab")
+    _G.FCF_SelectDockFrame(cf1)
+
+    -- ── Phase V4: LEFT rail geometry. ────────────────────────────────────────
+    ck(C.SetTabPlacement("left") == true, "V4: the placement is a live config edit")
+    Skin.Refresh()
+    ck(Skin.TabPlacement() == "left" and Skin.TabsOnRail() == true, "V4: the tabs are on a rail")
+    l, r, t, b = Skin.ChassisInsets()
+    ck(l == PAD + TABRAIL_W and r == PAD and t == PAD,
+        "V4: the box grows out on the LEFT by the rail's width, and no longer above")
+    ck(rec1.strip._w == TABRAIL_W, "V4: the rail is that band")
+    local rp = pointNamed(rec1.strip, "TOPLEFT")
+    local rb = pointNamed(rec1.strip, "BOTTOMLEFT")
+    ck(rp and rp[2] == rec1.backdrop and rb and rb[2] == rec1.backdrop,
+        "V4: …running the chassis' whole height, beside the entry bar as well")
+    local rt1 = pointNamed(tab1, "TOPLEFT")
+    ck(rt1 and rt1[2] == rec1.strip and rt1[4] == TAB_PAD and rt1[5] == -TAB_PAD,
+        "V4: the first tab sits at the rail's top")
+    local rt2 = pointNamed(tab2, "TOPLEFT")
+    ck(rt2 and rt2[2] == tab1 and rt2[3] == "BOTTOMLEFT" and rt2[5] == -TAB_GAP,
+        "V4: …and the tabs STACK down it")
+    ck(tab1._w == TABRAIL_W - 2 * TAB_PAD and tab1._h == TAB_ROW_H,
+        "V4: a rail tab is a full-width row")
+    ck(_G.ChatFrame1TabText._justifyH == "LEFT", "V4: …with its label left-aligned in that row")
+
+    -- THE EDGE BAR replaces the underline, on the rail's INNER side.
+    ck(rec1.edgebar and rec1.edgebar._shown == true,
+        "V4: EDGE BAR — the active tab is marked by a bar, not an underline")
+    ck(rec1.underline._shown == false, "V4: …and the underline is put away")
+    local ebp = pointNamed(rec1.edgebar, "TOPRIGHT")
+    ck(ebp and ebp[2] == tab1 and ebp[3] == "TOPRIGHT",
+        "V4: …on the rail's INNER edge (the one facing the message text)")
+    ck(rec1.edgebar._w == EDGEBAR_W, "V4: …a hairline-thin bar")
+    ck(rec2.edgebar == nil or rec2.edgebar._shown == false,
+        "V4: only the active tab is marked")
+    -- The rail's own seam is CONTINUOUS here (the fusion is a top-tab idea).
+    ck(rec1.tabSeamA._shown == true and rec1.tabSeamB._shown == false,
+        "V4: the rail's inner hairline is continuous")
+    local rsA = pointNamed(rec1.tabSeamA, "TOPRIGHT")
+    ck(rsA and rsA[2] == rec1.strip, "V4: …drawn on the rail's inner edge")
+    -- THE NON-COLLISION RULE: the icon rail takes the opposite edge.
+    ck(Skin.RailSide() == "right",
+        "V4: THE PIN — with tabs on the left the ICON rail moves to the right edge")
+    ns.db.skin.iconRail = true
+    Skin.Refresh()
+    local iconRail = rec1.rail
+    local irp = pointNamed(iconRail, "TOPLEFT")
+    ck(irp and irp[3] == "TOPRIGHT" and irp[4] == PAD + RAIL_GAP,
+        "V4: …anchored off the window's right, clearing the chassis' own inset there")
+    ns.db.skin.iconRail = false
+    Skin.Refresh()
+
+    -- ── Phase V5: RIGHT rail — the mirror, and the icon rail stays put. ──────
+    ck(C.SetTabPlacement("right") == true, "V5: switched to the right")
+    Skin.Refresh()
+    l, r = Skin.ChassisInsets()
+    ck(l == PAD and r == PAD + TABRAIL_W, "V5: the box grows out on the RIGHT instead")
+    ck(pointNamed(rec1.strip, "TOPRIGHT") ~= nil, "V5: the rail is the chassis' right band")
+    local ebp5 = pointNamed(rec1.edgebar, "TOPLEFT")
+    ck(ebp5 and ebp5[3] == "TOPLEFT",
+        "V5: the edge bar moves to the tab's LEFT — still the side facing the text")
+    ck(pointNamed(rec1.tabSeamA, "TOPLEFT") ~= nil, "V5: …and so does the rail's hairline")
+    ck(Skin.RailSide() == "left",
+        "V5: with tabs on the right the icon rail keeps the left edge (no collision either way)")
+
+    -- ── Phase V6: LIVE SWITCH, round trip, no reload. ────────────────────────
+    ck(C.SetTabPlacement("top") == true, "V6: back to the top")
+    Skin.Refresh()
+    local back = pointNamed(tab1, "BOTTOMLEFT")
+    ck(back and back[2] == rec1.strip and back[4] == TAB_PAD,
+        "V6: THE ROUND TRIP — the tab is laid out exactly as it was the first time")
+    local size1 = Skin.styled[cf1].tabSize
+    ck(size1 and tab1._w == size1[1] and tab1._h == size1[2],
+        "V6: …and the rail's forced row shape was handed back, width and height")
+    ck(rec1.underline._shown == true and rec1.edgebar._shown == false,
+        "V6: …and the marks swapped back with it")
+    ck(C.SetTabPlacement("top") == false, "V6: re-setting the same placement is a NO-OP (no sync storm)")
+    ck(C.SetTabPlacement("sideways") == false, "V6: a placement this build does not know is refused")
+
+    -- ── Phase V7: THE COLOUR CHAIN — explicit > derived > accent. ────────────
+    -- Window 5 is given a real routing so the DERIVED leg has something to say.
+    local w5 = Sim.windows[5]
+    w5.shown, w5.docked = true, 5
+    w5.groups, w5.channels = { "GUILD" }, {}
+    cfgStore.windows[5] = C.CaptureWindow(5)
+    Skin.StyleAll()
+    local cf5 = _G.ChatFrame5
+    local CTI = _G.ChatTypeInfo
+    local dim = Skin.DimFactor()
+    local function inkOf(frame) return select(2, tabText(frame))._textColor end
+
+    ck(near3(inkOf(cf5), CTI.GUILD.r * dim, CTI.GUILD.g * dim, CTI.GUILD.b * dim),
+        "V7: DERIVED — with no explicit colour the tab still derives its channel's ink")
+    ck(Skin.styled[cf5].inkSource == "type", "V7: …and records that the derivation inked it")
+
+    ck(C.SetTabColor(5, "chat:WHISPER") == true, "V7: an explicit colour is a live config edit")
+    Skin.Refresh()
+    ck(near3(inkOf(cf5), CTI.WHISPER.r * dim, CTI.WHISPER.g * dim, CTI.WHISPER.b * dim),
+        "V7: EXPLICIT WINS — the guild window's tab now wears the chosen colour")
+    ck(Skin.styled[cf5].inkSource == "explicit:chat",
+        "V7: …and records WHICH rule inked it (got " .. tostring(Skin.styled[cf5].inkSource) .. ")")
+    -- It is a live CLIENT colour, not a frozen value: move whisper's colour and
+    -- the tab follows on the client's own beat.
+    _G.ChangeChatColor("WHISPER", 0.11, 0.62, 0.44)
+    ck(near3(inkOf(cf5), 0.11 * dim, 0.62 * dim, 0.44 * dim),
+        "V7: …and it FOLLOWS the client's colour table (the config stores which, never what)")
+    _G.ChangeChatColor("WHISPER", CTI.WHISPER.r, CTI.WHISPER.g, CTI.WHISPER.b)
+
+    -- An explicit colour outranks the channelTabs gate: turning the derivation
+    -- off must not discard a colour somebody picked by hand.
+    ns.db.skin.channelTabs = false
+    Skin.Refresh()
+    ck(near3(inkOf(cf5), CTI.WHISPER.r * dim, CTI.WHISPER.g * dim, CTI.WHISPER.b * dim),
+        "V7: an explicit colour survives channelTabs going off (it is not that feature's)")
+    ns.db.skin.channelTabs = true
+
+    -- A theme token is the other family, and it moves with the theme.
+    ck(C.SetTabColor(5, "token:danger") == true, "V7: a theme token is a colour choice too")
+    Skin.Refresh()
+    ck(near3(inkOf(cf5), select(1, UI.Color("danger")) * dim,
+             select(2, UI.Color("danger")) * dim, select(3, UI.Color("danger")) * dim),
+        "V7: …resolved from the TOKEN")
+    ck(Skin.styled[cf5].inkSource == "explicit:token", "V7: …and recorded as the token family")
+    if UI.__SetThemeEpoch then
+        UI.__SetThemeEpoch(3)
+        Skin.Refresh()
+        ck(near3(inkOf(cf5), select(1, UI.Color("danger")) * Skin.DimFactor(),
+                 select(2, UI.Color("danger")) * Skin.DimFactor(),
+                 select(3, UI.Color("danger")) * Skin.DimFactor()),
+            "V7: …and a theme change MOVES it (a frozen hex could not)")
+        UI.__SetThemeEpoch(1)
+        Skin.Refresh()
+    end
+
+    -- A spec this build does not understand falls THROUGH to the derivation
+    -- rather than painting a wrong colour.
+    cfgStore.windows[5].tabColor = "sparkle:rainbow"
+    Skin.Refresh()
+    ck(near3(inkOf(cf5), CTI.GUILD.r * dim, CTI.GUILD.g * dim, CTI.GUILD.b * dim),
+        "V7: an UNKNOWN spec falls through to the derivation (never a wrong colour)")
+
+    -- …and no colour at all, on a window with no derivable identity, is the
+    -- accent/muted token — the end of the chain, unchanged since Wave 1.
+    ck(C.SetTabColor(5, nil) == true, "V7: clearing the colour is a real edit")
+    cfgStore.windows[5].groups = { "GUILD", "PARTY" }      -- two identities: none
+    Skin.Refresh()
+    ck(near3(inkOf(cf5), UI.Color("muted")),
+        "V7: no explicit colour and no dominant channel = the MUTED token (the pinned fallback)")
+    ck(Skin.styled[cf5].inkSource == "token", "V7: …recorded as the token fallback")
+
+    -- THE CAPTURE-BACK PIN: a colour is config-only, and a wholesale capture of
+    -- the client (which knows nothing about it) must not delete it.
+    C.SetTabColor(5, "chat:GUILD")
+    local snap = C.CaptureClient()
+    ck(snap.windows[5].tabColor == nil, "V7: a client capture says NOTHING about a tab colour")
+    cfgStore.windows = C.MergeWindows(cfgStore.windows, snap.windows)
+    ck(cfgStore.windows[5].tabColor == "chat:GUILD",
+        "V7: THE PIN — a capture-back carries the colour across instead of deleting it")
+    C.SetTabColor(5, nil)
+
+    -- ── Phase V8: THE BADGE FOLLOWS ITS TAB. ─────────────────────────────────
+    local Badges = ns.Badges
+    if Badges then
+        local badgesWas = Badges.active
+        ns.SetModuleEnabled("badges", true)
+        local dock = _G.GeneralDockManager
+        dock.DOCKED_CHAT_FRAMES[#dock.DOCKED_CHAT_FRAMES + 1] = cf5
+        Skin.StyleAll()
+        _G.FCF_SelectDockFrame(cf1)               -- cf5 docked-unselected: badgeable
+        Badges.Clear(cf5)
+        cf5:AddMessage("unread while the tabs are on top", 1, 1, 1)
+        local bw = Badges.widgets[cf5]
+        local tab5 = _G.ChatFrame5Tab
+        ck(bw and bw.holder._shown == true, "V8: the badge renders in the box")
+        local pip = pointNamed(bw.holder, "LEFT")
+        ck(pip and pip[2] == tab5 and pip[3] == "RIGHT",
+            "V8: on TOP tabs it is a PIP just past the tab's right edge")
+        C.SetTabPlacement("left")
+        Skin.Refresh()
+        ck(Badges.Placement() == "rail", "V8: …and the badge reads skin's placement seam")
+        local row = pointNamed(bw.holder, "RIGHT")
+        ck(row and row[2] == tab5 and row[3] == "RIGHT" and row[4] < 0,
+            "V8: on a RAIL the count sits right-aligned INSIDE the tab's own row")
+        ck(pointNamed(bw.holder, "LEFT") == nil, "V8: …and the pip anchor is gone, not stacked")
+        -- The per-tab toggle the settings page now drives.
+        ns.db.badges.optOut[5] = true
+        Badges.UpdateBadge(cf5)
+        ck(bw.holder._shown == false, "V8: a window opted OUT shows no badge, on either placement")
+        ns.db.badges.optOut[5] = nil
+        Badges.UpdateBadge(cf5)
+        ck(bw.holder._shown == true, "V8: …and turning it back on brings the count straight back")
+        C.SetTabPlacement("top")
+        Skin.Refresh()
+        ck(pointNamed(bw.holder, "LEFT") ~= nil, "V8: switching back moves the badge back")
+        for i = #dock.DOCKED_CHAT_FRAMES, 1, -1 do
+            if dock.DOCKED_CHAT_FRAMES[i] == cf5 then table.remove(dock.DOCKED_CHAT_FRAMES, i) end
+        end
+        Badges.Clear(cf5)
+        if not badgesWas then ns.SetModuleEnabled("badges", false) end
+    end
+
+    -- ── Phase V9: FADING IS INERT IN THE BOX, and the store is untouched. ────
+    ns.db.skin.fading = true
+    Skin.Refresh()
+    ck(Skin.FadingEffective() == false,
+        "V9: with the box on, fading is OFF no matter what the knob says")
+    ck(cf1._fading == false, "V9: …and the client agrees")
+    ck(ns.db.skin.fading == true,
+        "V9: THE HONESTY PIN — the player's own setting is NOT rewritten, only ignored")
+    ns.db.skin.unifiedChassis = false
+    Skin.StyleAll()          -- the pane's own live-apply beat for the skin branch
+    ck(Skin.FadingEffective() == true and cf1._fading == true,
+        "V9: turning the box off hands the player's fading straight back")
+
+    -- ── Phase V9b: BOX OFF = v2, and every tab back where the client had it. ─
+    ck(rec1.strip._shown == false, "V9b: the strip is put away")
+    ck(rec1.tabSeamA._shown == false and rec1.entrySeam._shown == false,
+        "V9b: …and so are the hairlines")
+    ck(rec2.backdrop._shown == true, "V9b: every window wears its own backdrop again")
+    ck(rec1.ebSkin ~= nil and rec1.ebSkin._shown == true,
+        "V9b: …and the entry bar's own panel is back")
+    ck(#tab1._points == 0 and Skin.styled[cf1].tabPoints == nil,
+        "V9b: THE RESTORE — the client's tabs are back on the client's own anchors")
+    ck(rec1.copyAnchor == "corner" and pointNamed(rec1.copyBtn, "TOPRIGHT") ~= nil,
+        "V9b: …and the copy button is back in its Wave-1 corner")
+    local plainTL = pointNamed(rec1.backdrop, "TOPLEFT")
+    ck(plainTL and plainTL[5] == PAD, "V9b: …and the backdrop hugs the message area again")
+
+    -- ── OUT: back to the world the suites after us expect. ───────────────────
+    ns.db.skin.unifiedChassis = savedUnified
+    ns.db.skin.fading = savedFading
+    ns.db.skin.channelTabs = savedChannelTabs
+    ns.db.skin.iconRail = savedRail
+    cfgStore.windows, cfgStore.rev, cfgStore.at = savedWindows, savedRev, savedAt
+    cfgStore.skin = savedSkinCfg
+    _G.FCF_ResetChatWindows()
+    for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do _G.FloatingChatFrame_Update(id) end
+    _G.FCF_SelectDockFrame(cf1)
+    Skin.StyleAll()
+    local HT = _G.__DaseekiChatHarnessTimer
+    if HT then HT.flush() end
     Sim.ResetCalls()
 end
 
@@ -3434,6 +4625,8 @@ ns:RegisterSelfTest("skin", function(verbose)
     if not ok then fails[#fails + 1] = "move/editbox error: " .. tostring(err) end
     ok, err = pcall(testButtonColumn, fails, verbose)
     if not ok then fails[#fails + 1] = "button-column error: " .. tostring(err) end
+    ok, err = pcall(testOneBox, fails, verbose)
+    if not ok then fails[#fails + 1] = "one-box error: " .. tostring(err) end
     for _, f in ipairs(fails) do ns:Print("  FAIL skin :: " .. f) end
     if #fails == 0 and verbose then ns:Print("  PASS skin") end
     return #fails == 0

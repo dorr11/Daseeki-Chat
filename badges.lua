@@ -121,9 +121,67 @@ local function applyInk(frame, w)
     w.fs:SetTextColor(UI.Color(Badges.whisperFlag[frame] and "accent" or "muted"))
 end
 
+----------------------------------------------------------------------
+-- WHERE THE BADGE SITS (skin v3). The counter rides the tab, and skin.lua now
+-- puts the tab in one of three places, so the badge has to answer the same
+-- question. It is a READ of skin's public placement seam — one way, guarded,
+-- and defaulting to the client's own arrangement if skin is not loaded at all:
+--   TOP tabs   -> a PIP just past the tab's right edge (the shipped behavior);
+--   a RAIL     -> the count sits RIGHT-ALIGNED inside the tab's own row, which
+--                 is the only place it fits on a 112-unit strip.
+-- Skin owns the tab's text, ink and alpha; this module still touches nothing
+-- but its own widget.
+----------------------------------------------------------------------
+
+function Badges.Placement()
+    local S = ns.Skin
+    if S and type(S.TabsOnRail) == "function" then
+        local ok, rail = pcall(S.TabsOnRail)
+        if ok and rail then return "rail" end
+    end
+    return "top"
+end
+
+function Badges.AnchorWidget(w)
+    if not (w and w.holder and w.tab) then return nil end
+    local holder, tab = w.holder, w.tab
+    if type(holder.ClearAllPoints) ~= "function" then return nil end
+    local where = Badges.Placement()
+    if w.placement == where then return where end
+    pcall(holder.ClearAllPoints, holder)
+    if where == "rail" then
+        holder:SetPoint("RIGHT", tab, "RIGHT", -4, 0)
+        if w.fs and type(w.fs.SetJustifyH) == "function" then w.fs:SetJustifyH("RIGHT") end
+        if w.fs and type(w.fs.ClearAllPoints) == "function" then
+            w.fs:ClearAllPoints()
+            w.fs:SetPoint("RIGHT", holder, "RIGHT", 0, 0)
+        end
+    else
+        -- Off the tab text's end, never over it (skin owns the tab's own ink).
+        holder:SetPoint("LEFT", tab, "RIGHT", 1, 0)
+        if w.fs and type(w.fs.SetJustifyH) == "function" then w.fs:SetJustifyH("LEFT") end
+        if w.fs and type(w.fs.ClearAllPoints) == "function" then
+            w.fs:ClearAllPoints()
+            w.fs:SetPoint("LEFT", holder, "LEFT", 0, 0)
+        end
+    end
+    w.placement = where
+    return where
+end
+
+-- Re-place every badge. skin.lua calls this through the module's OWN public
+-- beat when it moves the tabs (the courtesy options.lua pays every module it
+-- writes a field for); nothing reaches inside this file from outside.
+function Badges.Relayout()
+    for _, w in pairs(Badges.widgets) do Badges.AnchorWidget(w) end
+end
+
 local function ensureWidget(frame)
     local w = Badges.widgets[frame]
-    if w then return w end
+    if w then
+        Badges.AnchorWidget(w)
+        return w
+    end
     local UI = _G.DaseekiUI
     if not (UI and _G.CreateFrame) then return nil end
     local name = frame.GetName and frame:GetName()
@@ -131,17 +189,15 @@ local function ensureWidget(frame)
     if not tab then return nil end
     local holder = _G.CreateFrame("Frame", nil, tab)
     holder:SetSize(26, 12)
-    -- Off the tab text's end, never over it (skin owns the tab's own ink).
-    holder:SetPoint("LEFT", tab, "RIGHT", 1, 0)
     local fs = holder:CreateFontString(nil, "OVERLAY")
     fs:SetFontObject(UI.fonts and UI.fonts.small or nil)
-    fs:SetPoint("LEFT", holder, "LEFT", 0, 0)
     if UI.Skin then
         UI.Skin(fs, function() applyInk(frame, Badges.widgets[frame]) end)
     end
     holder:Hide()
     w = { holder = holder, fs = fs, tab = tab }
     Badges.widgets[frame] = w
+    Badges.AnchorWidget(w)
     return w
 end
 

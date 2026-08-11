@@ -44,6 +44,7 @@ local Options = {
 ns.Options = Options
 
 local MAX_ALIAS_ROWS = 10    -- pooled alias editor rows (the flow builds once)
+local MAX_TAB_ROWS   = 10    -- one row per permanent chat window, same idiom
 
 ----------------------------------------------------------------------
 -- THE CONFIG BRANCHES this pane speaks about.
@@ -103,8 +104,23 @@ end
 -- re-apply, and a headless run has no frames at all).
 function Options.LiveApply(branch)
     local Skin = ns.Skin
+    if branch == "badges" then
+        -- The badge's own public re-place beat (its anchor follows the tab).
+        local B = ns.Badges
+        if not (B and B.active) then return false end
+        if B.Relayout then ns:SafeCall(B.Relayout) end
+        for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do
+            local f = _G["ChatFrame" .. id]
+            if f and B.UpdateBadge then ns:SafeCall(B.UpdateBadge, f) end
+        end
+        return true
+    elseif branch == "history" then
+        -- history.optOut is read at save/restore time; there is no standing
+        -- surface to re-apply, and pretending otherwise would be a lie.
+        return true
+    end
     if not (Skin and Skin.active) then return false end
-    if branch == "skin" then
+    if branch == "skin" or branch == "layout" then
         ns:SafeCall(Skin.StyleAll)
         return true
     elseif branch == "stamps" then
@@ -133,6 +149,9 @@ end
 --   module  — reads/writes ns.db.modules[<module>] through the core lifecycle;
 --             valid only for a module that is actually registered.
 --   alias   — the channel alias editor (config.aliases, its own seam).
+--   config  — a control over the SYNCED chat config (config.lua's own seams,
+--             not a db.<branch> field). Needs a `why` naming the seam, so
+--             "this one is not in a branch" is always a decision on record.
 --   runtime — session-scoped state that is deliberately NOT persisted; needs a
 --             `why` too, so "not in the store" is always a decision on record.
 --   action  — a button: no read, no write, an existing verb.
@@ -143,6 +162,7 @@ Options.BINDINGS = {
     { id = "appearance.channelTabs",         kind = "field",  branch = "skin",   key = "channelTabs" },
     { id = "appearance.stampDivider",        kind = "field",  branch = "skin",   key = "stampDivider" },
     { id = "appearance.editBoxChannelColor", kind = "field",  branch = "skin",   key = "editBoxChannelColor" },
+    { id = "appearance.unifiedChassis",      kind = "field",  branch = "skin",   key = "unifiedChassis" },
     { id = "appearance.iconRail",            kind = "field",  branch = "skin",   key = "iconRail" },
     { id = "appearance.hideButtonColumn",    kind = "field",  branch = "skin",   key = "hideButtonColumn" },
     { id = "appearance.copyButton",          kind = "field",  branch = "skin",   key = "copyButton" },
@@ -190,6 +210,22 @@ Options.BINDINGS = {
          .. "the command; there is no store key and there must not be one." },
     { id = "windows.reconcileNow", kind = "action" },
 
+    -- Tabs: the per-window row editor (skin v3). One row per chat window
+    -- carrying everything that is decided PER TAB, so the three per-window
+    -- opt-outs that used to have no control at all now have one.
+    { id = "tabs.placement", kind = "config",
+      why = "where the tabs sit is LAYOUT, so it rides the SYNCED chat config "
+         .. "(config.skin.tabPlacement) rather than the account-local db.skin branch - set it "
+         .. "once on any character and every character reconciles to it. Config.SetTabPlacement "
+         .. "is its seam, the same shape the alias editor uses." },
+    { id = "tabs.color", kind = "config",
+      why = "a tab's explicit colour is per-window LAYOUT and rides the synced config too "
+         .. "(config.windows[id].tabColor, beside that window's routing). Config.SetTabColor is "
+         .. "its seam; skin.lua owns what a spec string means." },
+    { id = "tabs.badge",   kind = "field", branch = "badges",  key = "optOut" },
+    { id = "tabs.stamp",   kind = "field", branch = "stamps",  key = "windows" },
+    { id = "tabs.history", kind = "field", branch = "history", key = "optOut" },
+
     -- Channel aliases
     { id = "aliases.keepNumber", kind = "alias" },
     { id = "aliases.rows",       kind = "alias" },
@@ -200,20 +236,18 @@ Options.BINDINGS = {
 -- HERE rather than in a design doc so it travels with the code, and pinned by
 -- the suite so an entry cannot rot into a lie.
 Options.UNBOUND = {
-    { field = "stamps.windows",
-      why = "per-window timestamp opt-out: a ten-window matrix, and the same shape as "
-         .. "history.optOut and badges.optOut. One shared per-window editor is its own "
-         .. "piece of work; /dchat debug stamps shows the state today." },
     { field = "stamps.colorToken",
       why = "a raw Daseeki-Core theme token name. Any dropdown here would be this file "
          .. "choosing which of Core's tokens are 'allowed', which is a decision Core owns. "
          .. "The Theme/Custom control covers the choice that matters." },
-    { field = "history.optOut",   why = "per-window opt-out; see stamps.windows." },
-    { field = "badges.optOut",    why = "per-window opt-out; see stamps.windows." },
     { field = "skin.fadeTime",    why = "bound (Appearance); listed only as the counter-example "
          .. "in the suite's own check that this list is not a dumping ground.",
       bound = true },
 }
+-- RESOLVED, and recorded so the debt cannot quietly come back: stamps.windows,
+-- history.optOut and badges.optOut were all listed here as "a ten-window
+-- matrix; one shared per-window editor is its own piece of work". That editor
+-- is the Tabs section below, and all three are bound to it now.
 
 ----------------------------------------------------------------------
 -- Small binding helpers used by the builders below. Every control the pane
@@ -317,6 +351,133 @@ local function statusHint(section, fn)
 end
 
 ----------------------------------------------------------------------
+-- THE PER-TAB ROW EDITOR's data (skin v3) — pure, and driven directly by the
+-- suite. One row per chat window carrying everything decided PER TAB:
+--   * its COLOR (synced config, Config.SetTabColor);
+--   * whether it BADGES, STAMPS and is KEPT across sessions — the three
+--     per-window opt-outs that had no control at all until this editor.
+--
+-- The three opt-outs do not share a polarity (badges/history store `true` for
+-- OFF; stamps stores `false` for OFF, absent for ON), so the shape below names
+-- each module's own table AND its own polarity rather than inventing a fourth
+-- convention this file would then have to keep in step. Nothing here is a
+-- second copy of a module's rule: it is a pointer at it.
+----------------------------------------------------------------------
+
+-- The colour palette the pane offers. Two families, both live in-game: a Core
+-- theme token follows the theme, a chat type follows the player's own chat
+-- colours. skin.lua owns what a spec means; this is the curated menu of them.
+Options.TAB_COLOR_CHOICES = {
+    { value = "",             text = "Automatic" },
+    { value = "token:accent", text = "Accent" },
+    { value = "token:text",   text = "Text" },
+    { value = "token:muted",  text = "Muted" },
+    { value = "token:danger", text = "Danger" },
+    { value = "chat:SAY",     text = "Say" },
+    { value = "chat:GUILD",   text = "Guild" },
+    { value = "chat:WHISPER", text = "Whisper" },
+    { value = "chat:PARTY",   text = "Party" },
+    { value = "chat:RAID",    text = "Raid" },
+    { value = "chat:CHANNEL", text = "Channel" },
+    { value = "chat:SYSTEM",  text = "System" },
+    { value = "chat:LOOT",    text = "Loot" },
+}
+
+Options.WINDOW_TOGGLES = {
+    { key = "badges",  branch = "badges",  store = "optOut",  offValue = true,  onValue = nil,
+      label = "Badge", tooltip = "Count unread lines on this window's tab." },
+    { key = "stamps",  branch = "stamps",  store = "windows", offValue = false, onValue = nil,
+      label = "Stamp", tooltip = "Timestamp the lines in this window." },
+    { key = "history", branch = "history", store = "optOut",  offValue = true,  onValue = nil,
+      label = "Keep",  tooltip = "Keep this window's lines across a logout or reload." },
+}
+
+function Options.WindowToggleGet(spec, id)
+    local t = Options.Branch(spec.branch)
+    local tbl = (type(t) == "table") and t[spec.store] or nil
+    if type(tbl) ~= "table" then return true end
+    return tbl[id] ~= spec.offValue          -- absent (and anything else) is ON
+end
+
+function Options.WindowToggleSet(spec, id, on)
+    local t = Options.Branch(spec.branch)
+    if type(t) ~= "table" then return false end
+    if type(t[spec.store]) ~= "table" then t[spec.store] = {} end
+    -- Written out rather than `on and X or Y`: the ON value is nil, which that
+    -- idiom silently turns into the OFF value (Class 5, the plain way).
+    if on then t[spec.store][id] = spec.onValue else t[spec.store][id] = spec.offValue end
+    Options.LiveApply(spec.branch)
+    return true
+end
+
+-- One row per permanent chat window. Deterministic by construction (the client
+-- numbers its windows), and the name is the client's own.
+function Options.TabRows()
+    local out = {}
+    local C = ns.Config
+    local gcwi = _G.GetChatWindowInfo
+    for id = 1, math.min(MAX_TAB_ROWS, _G.NUM_CHAT_WINDOWS or 10) do
+        local name
+        if type(gcwi) == "function" then
+            local ok, nm = pcall(gcwi, id)
+            if ok and type(nm) == "string" and nm ~= "" then name = nm end
+        end
+        out[#out + 1] = {
+            id    = id,
+            name  = name or ("Window " .. id),
+            color = (C and C.TabColor and C.TabColor(id)) or "",
+        }
+    end
+    return out
+end
+
+function Options.TabRowLabel(row)
+    if type(row) ~= "table" then return "" end
+    return ("%d. %s"):format(row.id, row.name)
+end
+
+-- The placement seam, through config.lua (never a direct store write).
+function Options.TabPlacement()
+    local C = ns.Config
+    return (C and C.TabPlacement and C.TabPlacement()) or "top"
+end
+
+function Options.SetTabPlacement(where)
+    local C = ns.Config
+    if not (C and C.SetTabPlacement) then return false end
+    local changed = C.SetTabPlacement(where)
+    if changed then Options.LiveApply("layout") end
+    return changed
+end
+
+function Options.SetTabColor(id, spec)
+    local C = ns.Config
+    if not (C and C.SetTabColor) then return false end
+    local changed = C.SetTabColor(id, spec)
+    if changed then Options.LiveApply("layout") end
+    return changed
+end
+
+-- The honest line about fading while the one-box layout is on.
+function Options.FadingStatus()
+    local Skin = ns.Skin
+    if Skin and Skin.Unified and Skin.Unified() then
+        return "Fading is OFF while the one-box layout is on - the box is always there, so the "
+            .. "text in it is too. Your setting below is remembered, not rewritten."
+    end
+    return "Chat text fades out after the hold time below."
+end
+
+function Options.TabPlacementStatus()
+    local n = 0
+    for _, row in ipairs(Options.TabRows()) do
+        if row.color ~= "" then n = n + 1 end
+    end
+    return ("Tabs on the %s - synced across the mesh. %d tab(s) carry a colour of their own.")
+        :format(Options.TabPlacement(), n)
+end
+
+----------------------------------------------------------------------
 -- THE ALIAS EDITOR's data (pure — the suite drives these directly).
 ----------------------------------------------------------------------
 
@@ -375,6 +536,13 @@ local function buildAppearance(flow)
     sec:Hint("How the chat windows are dressed. Every change applies live.")
 
     reg(sec:Checkbox({
+        label = "One box: tabs, text and input on a single surface",
+        tooltip = "Draw the whole chat window as one panel - the tab strip, the messages and "
+               .. "the input bar share it, separated by hairlines and nothing else. Off gives "
+               .. "the previous look back, including text fading.",
+        get = fieldGet("skin", "unifiedChassis"), set = boolSet("skin", "unifiedChassis"),
+    }))
+    reg(sec:Checkbox({
         label = "Channel-colored tabs",
         tooltip = "Ink each tab with the color of the channel that window is for. A window "
                .. "earns a color only when its routing collapses to exactly one identity.",
@@ -408,6 +576,11 @@ local function buildAppearance(flow)
         tooltip = "Era has no clipboard; the copy window pre-selects the text for Ctrl+C.",
         get = fieldGet("skin", "copyButton"), set = boolSet("skin", "copyButton"),
     }))
+    sec:AddSeparator()
+    -- INERT WITH A HINT, never a half state: the one-box layout has no fading
+    -- at all, and this line says so instead of leaving a control that looks
+    -- live and does nothing.
+    statusHint(sec, Options.FadingStatus)
     reg(sec:Checkbox({
         label = "Fade chat text when idle",
         get = fieldGet("skin", "fading"), set = boolSet("skin", "fading"),
@@ -417,6 +590,100 @@ local function buildAppearance(flow)
         format = intFmt,
         get = fieldGet("skin", "fadeTime"), set = intSet("skin", "fadeTime"),
     }))
+end
+
+----------------------------------------------------------------------
+-- THE TABS SECTION (skin v3): where the tabs live, and one row per window for
+-- everything decided per tab. This is the "shared per-window editor" three
+-- UNBOUND entries were waiting on.
+----------------------------------------------------------------------
+
+local function buildTabs(flow)
+    local sec = flow:AddSection("Tabs")
+    sec:Hint("Where the chat tabs sit, and what each one does. Placement and tab colours are "
+          .. "part of your shared chat configuration - set them once on any character and "
+          .. "every character gets them.")
+
+    local placeRow = sec:AddRow({ vAlign = "center" })
+    placeRow:Label("Tab position")
+    reg(placeRow:SegmentedChoice({
+        compact = true,
+        choices = { { value = "left",  text = "Left" },
+                    { value = "top",   text = "Top" },
+                    { value = "right", text = "Right" } },
+        get = function() return Options.TabPlacement() end,
+        set = function(v) Options.SetTabPlacement(v); Options._refresh() end,
+    }))
+    statusHint(sec, Options.TabPlacementStatus)
+    sec:Hint("Left and right put the tabs on a slim vertical rail, which reads better with "
+          .. "many tabs and leaves the full width for message text. Unread counts move with "
+          .. "them: a small pip beside a top tab, a right-aligned number in a rail row.")
+
+    sec:AddSeparator()
+    sec:Hint("Per window - colour, unread count, timestamps, and keeping its lines:")
+
+    -- A fixed pool of rows (the flow builds its blocks once), re-pointed at the
+    -- current windows on every refresh — the alias editor's own idiom.
+    Options._tabRows = {}
+    for i = 1, MAX_TAB_ROWS do
+        local row = sec:AddRow({ vAlign = "center" })
+        local label = row:Label("")
+        local color = row:Dropdown({
+            width = 130,
+            choices = Options.TAB_COLOR_CHOICES,
+            get = function()
+                local r = Options.TabRows()[i]
+                return r and r.color or ""
+            end,
+            set = function(v)
+                local r = Options.TabRows()[i]
+                if r then Options.SetTabColor(r.id, tostring(v or "")) end
+                Options._refresh()
+            end,
+        })
+        reg(color)
+        local toggles = {}
+        for _, spec in ipairs(Options.WINDOW_TOGGLES) do
+            local box = row:Checkbox({
+                label = spec.label, tooltip = spec.tooltip,
+                get = function()
+                    local r = Options.TabRows()[i]
+                    return r and Options.WindowToggleGet(spec, r.id) or false
+                end,
+                set = function(v)
+                    local r = Options.TabRows()[i]
+                    if r then Options.WindowToggleSet(spec, r.id, v and true or false) end
+                end,
+            })
+            reg(box)
+            toggles[spec.key] = box
+        end
+        Options._tabRows[i] = { label = label, color = color, toggles = toggles }
+    end
+    sec:Hint("\"Automatic\" gives a tab the colour of the channel it is for, and the accent "
+          .. "colour when that window carries more than one. A window you have never opened "
+          .. "still keeps whatever you set here.")
+end
+
+-- Re-point the pooled tab rows at the current windows (the section's refresh).
+function Options.RefreshTabRows()
+    local rows = Options.TabRows()
+    for i = 1, MAX_TAB_ROWS do
+        local ui = Options._tabRows and Options._tabRows[i]
+        if ui then
+            local r = rows[i]
+            local text = r and Options.TabRowLabel(r) or ""
+            if ui.label then
+                if type(ui.label.SetText) == "function" then ui.label:SetText(text)
+                elseif ui.label._text ~= nil then ui.label._text = text end
+            end
+            if ui.color and type(ui.color.Refresh) == "function" then ui.color.Refresh() end
+            for _, box in pairs(ui.toggles or {}) do
+                if type(box.Refresh) == "function" then box.Refresh() end
+            end
+        end
+    end
+    return #rows
 end
 
 local function buildTimestamps(flow)
@@ -711,6 +978,7 @@ function Options.Build(flow)
     refreshers = {}
     Options._statusLines = {}
     buildAppearance(flow)
+    buildTabs(flow)
     buildTimestamps(flow)
     buildNames(flow)
     buildUrls(flow)
@@ -749,6 +1017,7 @@ function Options.Register()
                 end,
                 refresh = function()
                     ns:SafeCall(Options.RefreshAliasRows)
+                    ns:SafeCall(Options.RefreshTabRows)
                     ns:SafeCall(refreshAll)
                 end,
             },
@@ -843,6 +1112,12 @@ function Options.CheckBindings(bindings)
             if type(b.why) ~= "string" or b.why == "" then
                 out[#out + 1] = id .. ": runtime binding without a documented reason"
             end
+        elseif b.kind == "config" then
+            -- The synced config's own seams. There is no branch shape to check
+            -- against, so what IS checked is that the choice was written down.
+            if type(b.why) ~= "string" or b.why == "" then
+                out[#out + 1] = id .. ": config binding without a documented seam"
+            end
         elseif b.kind == "alias" or b.kind == "action" then
             -- Their own seams (config.lua / an existing verb); nothing to bind.
         else
@@ -872,9 +1147,10 @@ local function testBindings(fails)
         { id = "bogus.module", kind = "module", module = "notamodule" },
         { id = "bogus.optional", kind = "field", branch = "skin", key = "alsoNotAField", optional = true },
         { id = "bogus.runtime", kind = "runtime" },
+        { id = "bogus.config",  kind = "config" },
         { id = "bogus.kind",   kind = "wat" },
     })
-    ck(#caught == 6, "the bind-check catches every bad shape (caught " .. #caught .. " of 6)")
+    ck(#caught == 7, "the bind-check catches every bad shape (caught " .. #caught .. " of 7)")
 
     -- Every kind that CAN be exercised is present (a pane of nothing but
     -- checkboxes would pass a bind-check and still be wrong).
@@ -883,7 +1159,23 @@ local function testBindings(fails)
     ck((kinds.field or 0) >= 20, "the pane binds the shipped config surface, not a sample")
     ck((kinds.module or 0) == 5, "each feature module's on/off is bound (got " .. tostring(kinds.module) .. ")")
     ck((kinds.alias or 0) >= 3, "the alias editor is bound")
+    ck((kinds.config or 0) == 2, "the two SYNCED layout controls are bound to config.lua's seams")
     ck((kinds.runtime or 0) == 1 and (kinds.action or 0) == 1, "the session lock + the reconcile verb are bound")
+
+    -- THE RESOLVED DEBT: three per-window opt-outs sat in UNBOUND waiting for
+    -- a shared editor. It exists now, so each of them must be BOUND and must
+    -- not still be listed as having no control.
+    for _, want in ipairs({ "badges.optOut", "stamps.windows", "history.optOut" }) do
+        local branch, key = want:match("^(%w+)%.(%w+)$")
+        local bound = false
+        for _, b in ipairs(Options.BINDINGS) do
+            if b.kind == "field" and b.branch == branch and b.key == key then bound = true end
+        end
+        ck(bound, "the per-window editor binds " .. want .. " (the UNBOUND debt is paid)")
+        for _, u in ipairs(Options.UNBOUND) do
+            ck(u.field ~= want, want .. " is no longer listed as having no control")
+        end
+    end
 
     -- The UNBOUND list is honest: every entry names a field that really exists
     -- and really has no control (the counter-example entry proves the check).
@@ -979,9 +1271,9 @@ local function testRegistrationAndPane(fails)
     local pane = UI.__BuildPane("chat", "settings")
     ck(type(pane) == "table", "the page builds")
     if type(pane) ~= "table" then return end
-    ck(#pane.sections == 8, "every section is present (got " .. #pane.sections .. ")")
+    ck(#pane.sections == 9, "every section is present (got " .. #pane.sections .. ")")
     local titles = table.concat(pane.sections, ",")
-    for _, want in ipairs({ "Appearance", "Timestamps", "Names", "Links", "History",
+    for _, want in ipairs({ "Appearance", "Tabs", "Timestamps", "Names", "Links", "History",
                             "Unread badges", "Windows", "Channel names" }) do
         ck(titles:find(want, 1, true) ~= nil, "section present: " .. want)
     end
@@ -1163,12 +1455,99 @@ local function testThreeSurfaces(fails)
     Sim.ResetCalls()
 end
 
+-- THE PER-TAB ROW EDITOR (skin v3): the rows it offers, the placement control,
+-- the colour choice, and the three per-window toggles — including the polarity
+-- trap, because they do NOT all store the same value for "off".
+local function testTabEditor(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local C = ns.Config
+    if not C then return end
+    local cfg = C.Get()
+    local savedSkin, savedWindows = cfg.skin, cfg.windows
+    local savedRev, savedAt = cfg.rev, cfg.at
+    cfg.skin, cfg.windows = {}, {}
+    cfg.rev, cfg.at = 1, C.Now()
+
+    -- ── The rows ─────────────────────────────────────────────────────────────
+    local rows = Options.TabRows()
+    ck(#rows == (_G.NUM_CHAT_WINDOWS or 10), "one row per chat window (got " .. #rows .. ")")
+    ck(rows[1].id == 1 and rows[1].name ~= "", "…each carrying the CLIENT's own window name")
+    ck(Options.TabRowLabel(rows[1]):find("1. ", 1, true) == 1,
+        "…and a numbered label (got '" .. Options.TabRowLabel(rows[1]) .. "')")
+    ck(rows[3].color == "", "a window with no colour of its own offers the empty choice")
+
+    -- ── Placement, through config.lua's seam ─────────────────────────────────
+    ck(Options.TabPlacement() == "top", "the placement control reads the synced default")
+    ck(Options.SetTabPlacement("right") == true, "…and writes through the config seam")
+    ck(C.TabPlacement() == "right", "…which is where it landed")
+    ck(Options.SetTabPlacement("right") == false, "an unchanged write is a no-op")
+    ck(Options.SetTabPlacement("upside-down") == false, "…and an unknown one is refused")
+    ck(Options.TabPlacementStatus():find("right", 1, true) ~= nil,
+        "the status line says where the tabs are")
+    Options.SetTabPlacement("top")
+
+    -- ── The colour choice ────────────────────────────────────────────────────
+    local sawAuto, sawToken, sawChat = false, false, false
+    for _, choice in ipairs(Options.TAB_COLOR_CHOICES) do
+        if choice.value == "" then sawAuto = true end
+        if choice.value:find("^token:") then sawToken = true end
+        if choice.value:find("^chat:") then sawChat = true end
+        ck(type(choice.text) == "string" and choice.text ~= "",
+            "every colour choice carries a readable name")
+    end
+    ck(sawAuto and sawToken and sawChat,
+        "the palette offers Automatic, theme tokens AND the client's own chat colours")
+    ck(Options.SetTabColor(3, "chat:GUILD") == true, "the row writes a colour")
+    ck(C.TabColor(3) == "chat:GUILD", "…through the config seam")
+    ck(Options.TabRows()[3].color == "chat:GUILD", "…and the row reads it back")
+    ck(Options.TabPlacementStatus():find("1 tab", 1, true) ~= nil,
+        "…and the status line counts it")
+    ck(Options.SetTabColor(3, "") == true and C.TabColor(3) == nil,
+        "choosing Automatic REMOVES the colour")
+
+    -- ── The three per-window toggles, and the polarity trap ──────────────────
+    ck(#Options.WINDOW_TOGGLES == 3, "the row carries all three per-window opt-outs")
+    for _, spec in ipairs(Options.WINDOW_TOGGLES) do
+        local branch = Options.Branch(spec.branch)
+        ck(type(branch) == "table", spec.key .. ": the module's own branch is reachable")
+        ck(Options.WindowToggleGet(spec, 6) == true,
+            spec.key .. ": an untouched window is ON (absent means on, in every one of them)")
+        Options.WindowToggleSet(spec, 6, false)
+        ck(Options.WindowToggleGet(spec, 6) == false, spec.key .. ": turning it off reads back")
+        -- THE TRAP: badges/history store `true` for off, stamps stores `false`.
+        -- A single convention here would have written the wrong value into one
+        -- of the three and quietly done nothing.
+        ck(branch[spec.store][6] == spec.offValue,
+            spec.key .. ": …as the value that MODULE's own rule reads (" ..
+            tostring(spec.offValue) .. ")")
+        Options.WindowToggleSet(spec, 6, true)
+        ck(branch[spec.store][6] == spec.onValue and Options.WindowToggleGet(spec, 6) == true,
+            spec.key .. ": and turning it back on clears the entry entirely")
+    end
+
+    -- The badge toggle is the one with a live surface; driving it must actually
+    -- reach the counter (this is the UNBOUND debt being paid, not just listed).
+    local B = ns.Badges
+    if B and B.active then
+        local cf3 = _G.ChatFrame3
+        local badgeSpec = Options.WINDOW_TOGGLES[1]
+        Options.WindowToggleSet(badgeSpec, 3, false)
+        ck(ns.db.badges.optOut[3] == true, "the pane's badge toggle reaches badges' own store")
+        Options.WindowToggleSet(badgeSpec, 3, true)
+        ck(ns.db.badges.optOut[3] == nil, "…and clears it again")
+    end
+
+    cfg.skin, cfg.windows = savedSkin, savedWindows
+    cfg.rev, cfg.at = savedRev, savedAt
+end
+
 function Options.RunSelfTests(verbose)
     local suites = {
         { name = "bindings (every control names a real field)", fn = testBindings },
         { name = "store access",            fn = testStoreAccess },
         { name = "registration + the pane", fn = testRegistrationAndPane },
         { name = "alias editor",            fn = testAliasEditor },
+        { name = "per-tab row editor",      fn = testTabEditor },
         { name = "aliases: one seam, three surfaces", fn = testThreeSurfaces },
     }
     local allPass = true

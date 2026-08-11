@@ -74,6 +74,7 @@ local CFG_DEFAULTS = {
     join    = {},     -- array of { number, name } pairs, sorted by number
     aliases = {},     -- [channel name, lowercased] = display alias (see below)
     aliasKeepNumber = false,   -- "[2. Trade]" instead of "[Trade]"
+    skin    = { tabPlacement = "top" },  -- LAYOUT that rides the mesh (see below)
 }
 
 function Config.Get()
@@ -429,16 +430,37 @@ end
 -- capture could not read (dark geometry) keeps the one the config already
 -- holds. An unreadable corner is an unknown, and an unknown must never delete
 -- a position the player (or a peer account) set (Class 4).
+-- Per-window fields the CONFIG owns OUTRIGHT: no client capture ever speaks
+-- about them, so a wholesale capture-back must carry them across rather than
+-- delete them. This is `npos`'s Class 4 rule generalized — an unknown must
+-- never become a deletion — and it is what keeps a per-tab colour alive
+-- through the very next window drag.
+local WINDOW_CONFIG_ONLY_FIELDS = { "tabColor" }
+Config.WINDOW_CONFIG_ONLY_FIELDS = WINDOW_CONFIG_ONLY_FIELDS
+
 local function mergeWindows(prev, snapWindows)
     local out = copyCfg(snapWindows or {})
     if type(prev) ~= "table" then return out end
     for id, w in pairs(out) do
-        if type(w) == "table" and w.npos == nil then
+        if type(w) == "table" then
             local old = prev[id]
-            if type(old) == "table" and type(old.npos) == "table" then
+            if w.npos == nil and type(old) == "table" and type(old.npos) == "table" then
                 w.npos = copyCfg(old.npos)
             end
+            if type(old) == "table" then
+                for _, f in ipairs(WINDOW_CONFIG_ONLY_FIELDS) do
+                    if w[f] == nil and old[f] ~= nil then
+                        w[f] = (type(old[f]) == "table") and copyCfg(old[f]) or old[f]
+                    end
+                end
+            end
         end
+    end
+    -- A window the config speaks about that the capture does not mention at all
+    -- (a config-only entry, e.g. a colour set for a window this character has
+    -- never opened) is KEPT whole for the same reason.
+    for id, old in pairs(prev) do
+        if out[id] == nil and type(old) == "table" then out[id] = copyCfg(old) end
     end
     return out
 end
@@ -571,7 +593,9 @@ function Config.Candidates()
             -- of the store, so a new section that is not listed is silently
             -- account-local forever. The suite pins all three sites.
             cfg   = { windows = c.windows, colors = c.colors, join = c.join,
-                      aliases = c.aliases, aliasKeepNumber = c.aliasKeepNumber },
+                      aliases = c.aliases, aliasKeepNumber = c.aliasKeepNumber,
+                      -- skin v3: the tab strip's PLACEMENT rides here too.
+                      skin = c.skin },
         }
     end
     local Nx = ns.Nexus
@@ -606,6 +630,7 @@ function Config.AdoptEffective()
     c.join    = copyCfg(cfg.join or {})
     c.aliases = copyCfg(cfg.aliases or {})
     c.aliasKeepNumber = cfg.aliasKeepNumber and true or false
+    c.skin    = copyCfg(cfg.skin or {})
     return true
 end
 
@@ -751,6 +776,101 @@ function Config.AliasLabel(number, name)
 end
 
 ----------------------------------------------------------------------
+-- SKIN LAYOUT (skin v3) — the tab strip's PLACEMENT and each window's
+-- explicit tab COLOUR.
+--
+-- WHY THEY LIVE HERE and not in the account-local db.skin branch: both are
+-- LAYOUT. "Where are my tabs" and "what colour is my Guild tab" are answers a
+-- player gives once, and a layout the mesh does not carry has to be re-chosen
+-- on every account — the exact thing this config exists to prevent. They ride
+-- the same LWW candidate as windows/colors/join/aliases and resolve through
+-- EffectiveCfg, so a peer account's newer choice shows here with no local
+-- write (receive never adopts).
+--
+-- THE WHITELIST, learned the hard way with aliases: Candidates, Snapshot and
+-- AdoptEffective each NAME the sections they carry. A section that is not
+-- named in all three is silently account-local forever. `skin` is named in
+-- all three above and `tabColor` rides inside `windows`, which already is —
+-- and mergeWindows keeps it alive through a capture-back (see
+-- WINDOW_CONFIG_ONLY_FIELDS). The suite pins every one of those sites.
+--
+-- OLD-READER TOLERANCE: a peer on a pre-v3 build reads the payload through
+-- the same copyCfg that keeps unknown keys, so `skin` simply rides along in
+-- its store untouched and un-rendered. Nothing about the wire changed shape.
+----------------------------------------------------------------------
+
+Config.TAB_PLACEMENTS = { "top", "left", "right" }
+
+function Config.IsTabPlacement(v)
+    for _, p in ipairs(Config.TAB_PLACEMENTS) do
+        if v == p then return true end
+    end
+    return false
+end
+
+-- The EFFECTIVE placement (cross-account winner first, local store second,
+-- "top" — the client's own arrangement — as the answer when nobody has said).
+function Config.TabPlacement()
+    local eff = Config.EffectiveCfg()
+    local s = (type(eff) == "table" and type(eff.skin) == "table") and eff.skin or nil
+    if s and Config.IsTabPlacement(s.tabPlacement) then return s.tabPlacement end
+    local c = Config.Get()
+    s = (c and type(c.skin) == "table") and c.skin or nil
+    if s and Config.IsTabPlacement(s.tabPlacement) then return s.tabPlacement end
+    return "top"
+end
+
+function Config.SetTabPlacement(where)
+    if not Config.IsTabPlacement(where) then return false end
+    if Config.TabPlacement() == where then return false end     -- no sync storm
+    Config.AdoptEffective()
+    local c = Config.Get()
+    if not c then return false end
+    if type(c.skin) ~= "table" then c.skin = {} end
+    c.skin.tabPlacement = where
+    Config.Bump()
+    return true
+end
+
+-- One window's EXPLICIT tab colour, as the SPEC STRING the renderer resolves
+-- ("token:accent", "chat:GUILD" — skin.lua owns that vocabulary; this file
+-- only stores and syncs it). nil means "no explicit choice", which is the
+-- renderer's instruction to derive the colour as it always has.
+function Config.TabColor(id)
+    id = tonumber(id)
+    if not id then return nil end
+    local function pick(cfg)
+        local w = (type(cfg) == "table" and type(cfg.windows) == "table") and cfg.windows[id] or nil
+        if type(w) ~= "table" then return nil, false end
+        local v = w.tabColor
+        if type(v) == "string" and v ~= "" then return v, true end
+        return nil, true                    -- this copy SPEAKS about the window
+    end
+    local v, spoke = pick(Config.EffectiveCfg())
+    if v then return v end
+    if spoke then return nil end            -- the winner says "no colour here"
+    v = pick(Config.Get())
+    return v
+end
+
+-- Set (or, with nil/"", REMOVE) one window's explicit tab colour.
+function Config.SetTabColor(id, spec)
+    id = tonumber(id)
+    if not id then return false end
+    if spec ~= nil and type(spec) ~= "string" then return false end
+    if spec == "" then spec = nil end
+    if Config.TabColor(id) == spec then return false end
+    Config.AdoptEffective()
+    local c = Config.Get()
+    if not c then return false end
+    if type(c.windows) ~= "table" then c.windows = {} end
+    if type(c.windows[id]) ~= "table" then c.windows[id] = {} end
+    c.windows[id].tabColor = spec
+    Config.Bump()
+    return true
+end
+
+----------------------------------------------------------------------
 -- The wire payload (delegates shape): { v, at, cfg }. nil until the config
 -- has EVER been adopted/edited — a fresh install must broadcast NOTHING
 -- (an empty rev-0 config could win nothing and would only be noise).
@@ -763,7 +883,8 @@ function Config.Snapshot()
         v   = Config.VER,
         at  = tonumber(c.at) or 0,
         cfg = copyCfg({ windows = c.windows, colors = c.colors, join = c.join,
-                        aliases = c.aliases, aliasKeepNumber = c.aliasKeepNumber }),
+                        aliases = c.aliases, aliasKeepNumber = c.aliasKeepNumber,
+                        skin = c.skin }),
     }
 end
 
@@ -1233,6 +1354,103 @@ local function testAliases(fails)
     c.rev, c.at = savedRev, savedAt
 end
 
+-- SKIN LAYOUT: the storage rules, and — the leg that would silently rot — THE
+-- WIRE. The candidate/snapshot/adopt assembly is a WHITELIST, so a section
+-- that is not named at all three sites never leaves the account. This suite
+-- visits all three for `skin`, and the per-window `tabColor` gets the extra
+-- pin its shape needs: a client capture knows nothing about it, so a
+-- capture-back must carry it across rather than delete it.
+local function testSkinLayout(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local c = Config.Get()
+    local savedSkin, savedWindows = c.skin, c.windows
+    local savedRev, savedAt = c.rev, c.at
+    c.skin, c.windows = {}, {}
+    c.rev, c.at = 1, Config.Now()
+
+    -- ── Placement: the vocabulary, the default, the no-op guard ──────────────
+    ck(Config.TabPlacement() == "top", "an unset placement is TOP (the client's own arrangement)")
+    ck(Config.IsTabPlacement("left") and Config.IsTabPlacement("right")
+        and Config.IsTabPlacement("top"), "three placements, and they are named")
+    ck(Config.IsTabPlacement("diagonal") == false, "…and nothing else is one")
+    ck(Config.SetTabPlacement("left") == true, "a placement edit lands")
+    ck(Config.TabPlacement() == "left", "…and reads back")
+    ck(Config.SetTabPlacement("left") == false, "re-setting the same placement is a NO-OP")
+    ck(Config.SetTabPlacement("sideways") == false, "an unknown placement is refused outright")
+    ck(Config.TabPlacement() == "left", "…and changes nothing")
+
+    -- ── Per-window colour: a spec string, stored and removable ───────────────
+    ck(Config.TabColor(3) == nil, "a window with no explicit colour answers nothing")
+    ck(Config.SetTabColor(3, "chat:GUILD") == true, "a colour edit lands")
+    ck(Config.TabColor(3) == "chat:GUILD", "…and reads back as the SPEC, never a resolved value")
+    ck(Config.SetTabColor(3, "chat:GUILD") == false, "re-setting the same colour is a NO-OP")
+    ck(Config.SetTabColor(3, "") == true and Config.TabColor(3) == nil,
+        "an emptied colour is the REMOVE verb")
+    ck(Config.SetTabColor(3, "token:accent") == true, "…and it can be set again")
+    ck(Config.SetTabColor("x", "token:accent") == false, "a non-window id is refused")
+    ck(Config.SetTabColor(3, 42) == false, "…and so is a colour that is not a spec string")
+
+    -- ── THE CAPTURE-BACK PIN: config-only fields survive a wholesale merge ───
+    local snapWindows = { [3] = { name = "W3", groups = {}, channels = {} } }
+    local merged = Config.MergeWindows(c.windows, snapWindows)
+    ck(merged[3].tabColor == "token:accent",
+        "THE PIN — a capture that says nothing about tabColor does not DELETE it")
+    ck(merged[3].name == "W3", "…while the client's own fields land wholesale, as ever")
+    local orphan = Config.MergeWindows({ [7] = { tabColor = "chat:RAID" } }, snapWindows)
+    ck(orphan[7] and orphan[7].tabColor == "chat:RAID",
+        "…and a config-only window entry survives a capture that has no entry for it")
+
+    -- ── THE WIRE, all three whitelist sites ──────────────────────────────────
+    local snap = Config.Snapshot()
+    ck(type(snap) == "table" and type(snap.cfg.skin) == "table",
+        "SITE 1: the wire payload carries the skin section")
+    ck(snap.cfg.skin.tabPlacement == "left", "…with the placement in it")
+    ck(snap.cfg.windows[3].tabColor == "token:accent",
+        "…and the per-window colour rides inside `windows`, which already travelled")
+    snap.cfg.skin.tabPlacement = "mutated"
+    ck(Config.TabPlacement() == "left", "the payload is a COPY, not a reference")
+
+    local mine
+    for _, cand in ipairs(Config.Candidates()) do
+        if cand.owner == Config.LocalOwnerKey() then mine = cand end
+    end
+    ck(mine and type(mine.cfg.skin) == "table" and mine.cfg.skin.tabPlacement == "left",
+        "SITE 2: the LWW candidate carries it too (an unlisted section is account-local forever)")
+
+    local Nx = ns.Nexus
+    local savedRemote = Nx and Nx.RemoteCandidates
+    if Nx then
+        Nx.RemoteCandidates = function()
+            return { { at = Config.Now() + 500, rev = 0, owner = "peer",
+                       cfg = { skin = { tabPlacement = "right" },
+                               windows = { [3] = { tabColor = "chat:WHISPER" } } } } }
+        end
+        ck(Config.TabPlacement() == "right",
+            "a peer's newer placement is the EFFECTIVE one (read-time resolution)")
+        ck(Config.TabColor(3) == "chat:WHISPER", "…and so is its per-tab colour")
+        ck(c.skin.tabPlacement == "left",
+            "…and the local store was NOT written (receive never adopts)")
+        -- An EDIT adopts the winner first, then publishes on top of it.
+        Config.SetTabPlacement("top")
+        ck(c.skin.tabPlacement == "top", "SITE 3: an edit lands on the local store")
+        ck(c.windows[3] and c.windows[3].tabColor == "chat:WHISPER",
+            "SITE 3: …and AdoptEffective pulled the peer's whole config in first")
+        Nx.RemoteCandidates = savedRemote
+    end
+
+    -- OLD-READER TOLERANCE: a payload from a build that never heard of `skin`
+    -- reconciles clean, and this build simply answers its default.
+    c.skin = nil
+    ck(Config.TabPlacement() == "top", "a config with no skin section at all is safe")
+    ck(type(Config.TabColor(3)) == "string",
+        "…and the per-window colours it does hold are untouched by that")
+    ck(Config.SetTabPlacement("right") == true and c.skin.tabPlacement == "right",
+        "…and the section is rebuilt on the next edit rather than erroring")
+
+    c.skin, c.windows = savedSkin, savedWindows
+    c.rev, c.at = savedRev, savedAt
+end
+
 ns:RegisterSelfTest("config", function(verbose)
     local suites = {
         { name = "deterministic serialization", fn = testSerialization },
@@ -1240,6 +1458,7 @@ ns:RegisterSelfTest("config", function(verbose)
         { name = "LWW + wire payload",          fn = testLWW },
         { name = "scale-normalized positions",  fn = testNormalizedPositions },
         { name = "channel aliases",             fn = testAliases },
+        { name = "skin layout: placement + per-tab colour", fn = testSkinLayout },
     }
     local allPass = true
     for _, suite in ipairs(suites) do
