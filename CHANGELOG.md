@@ -75,9 +75,10 @@ This entry accumulates until 1.0.0 ships. Foundation so far:
 - **A settings window.** Chat now has a page in the Daseeki settings window
   alongside the rest of the suite (`/dchat options`, or open the Daseeki window
   and pick Chat). Everything that was only reachable as a slash command is a
-  control now, in eight groups: Appearance (channel-colored tabs, the timestamp
-  divider, the colored edit-box prefix, the icon rail, the game's button column,
-  the copy button, text fading and its delay), Timestamps (on/off, four formats,
+  control now, in nine groups: Appearance (the one-box layout, channel-colored
+  tabs, the timestamp divider, the colored edit-box prefix, the icon rail, the
+  game's button column, the copy button, text fading and its delay), Tabs (where
+  the tabs sit, and a row per window), Timestamps (on/off, four formats,
   server time, what to do when the game's own timestamps are on, stamp color),
   Names (class coloring, brackets, remembering classes between sessions), Links
   (detection, brackets), History (on/off, lines kept, how old is too old),
@@ -108,6 +109,40 @@ This entry accumulates until 1.0.0 ships. Foundation so far:
   put back (the game gives no way to list what a frame was listening for), so
   the restore says so in one line and names `/reload` as the exact fix rather
   than pretending to be complete.
+- **One box: tabs, text and input on a single surface.** On by default. A chat
+  window is now drawn as one panel — the tab strip, the messages and the input
+  bar all share it, separated by thin lines and nothing else. There is no second
+  background anywhere in it: the input bar's own panel is gone, the tab strip has
+  none of its own, and a docked group of windows wears *one* box rather than one
+  per tab. Text fading is off inside the box, because a box that is always there
+  with text that comes and goes is the worst of both; your fading setting is
+  remembered rather than rewritten, and the settings page says so out loud.
+  Turning the option off gives the previous look back exactly, fading included.
+- **Choose where your tabs sit: top, left or right.** Top is a strip along the
+  box's upper edge, and the tab you are reading merges into the message surface —
+  the dividing line stops at its edges and picks up again on the other side — with
+  a colored underline beneath it. Left and right put the tabs on a slim vertical
+  rail inside that edge, which reads far better once you have several of them and
+  leaves the full width for message text; the tab you are reading is marked by a
+  colored bar on the rail's inner edge. The tabs are the game's own tab buttons,
+  moved rather than replaced, so clicking, dragging a window out of the dock and
+  right-clicking a tab all behave exactly as they always did. Unread counts move
+  with the tabs: a small pip beside a top tab, a right-aligned number inside a
+  rail row. The icon rail, if you use it, takes the opposite edge automatically.
+  Placement is part of your shared chat configuration — set it once on any
+  character and every character on every account lands there.
+- **A color per tab.** Any window's tab can be given a color of your own instead
+  of the one it derives: a suite theme color, or one of the game's own chat
+  colors. It is stored as *which* color, never as a fixed value, so a theme
+  change or a chat-color change still moves it. Leave it on Automatic and nothing
+  changes — the tab keeps deriving its channel's color as before. Tab colors ride
+  the shared configuration alongside that window's routing, and survive dragging
+  or resizing the window.
+- **A row per chat window in the settings page.** A new **Tabs** group carries
+  the tab position and, under it, one row for each of your ten chat windows:
+  its color, and whether that window counts unread lines, gets timestamps, and
+  keeps its lines across a logout. Those three per-window switches existed in the
+  configuration but had no control anywhere until now.
 - **`/dchat debug position`** prints everything that decides where a window
   lands: the scale chain, the screen's size in both units and pixels, the clamp
   state and margins, the game's saved position, the live position, and the saved
