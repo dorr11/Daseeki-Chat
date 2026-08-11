@@ -378,6 +378,11 @@ function WIDGET_API.SetScrollChild(self, child) self._scrollChild = child end
 -- GetEffectiveScale / StartMoving / StopMovingOrSizing), the sim supplies an
 -- unkind default so code that never loosens the clamp fails the flush pin.
 Sim.DEFAULT_CLAMP_INSETS = { 8, 8, 8, 8 }   -- left, right, top, bottom
+-- What the client REWRITES onto a window whenever it re-decides the button
+-- column's side (see FCF_SetButtonSide below). Same numbers as the default:
+-- the point is that they come BACK, not that they are different.
+Sim.STOCK_CLAMP_INSETS   = { 8, 8, 8, 8 }
+Sim.clampShoves          = 0                -- times the client shoved a frame back
 
 -- ── THE BUTTON COLUMN'S FOOTPRINT (w2/button-column sim extension) ───────────
 -- The chat button frame hangs OFF the window's edge, and its width is part of
@@ -500,6 +505,26 @@ function WIDGET_API.SetResizeBounds(self) end
 function WIDGET_API.SetHitRectInsets(self) end
 function WIDGET_API.EnableMouseWheel(self) end
 
+-- The clamp rect, resolved into the frame's OWN units: where the client will
+-- allow this frame's bottom-left corner to sit. One implementation, used by
+-- BOTH the drag path and the client's own enforcement beat, so the two can
+-- never disagree about what "on screen" means.
+local function clampBounds(frame)
+    local P = _G.UIParent
+    local ratio = P:GetEffectiveScale() / frame:GetEffectiveScale()
+    local pw, ph = P:GetWidth() * ratio, P:GetHeight() * ratio
+    local ins = insetsOf(frame)
+    -- The button column rides along with the window, so whatever it covers
+    -- has to fit on screen too: a shown column is a margin the drag cannot
+    -- spend, on top of the clamp's own.
+    local colL, colR = Sim.ColumnFootprint(frame)
+    local minL, maxL = ins[1] + colL, pw - (frame._w or 0) - ins[2] - colR
+    local minB, maxB = ins[4], ph - (frame._h or 0) - ins[3]
+    if maxL < minL then maxL = minL end
+    if maxB < minB then maxB = minB end
+    return minL, maxL, minB, maxB
+end
+
 -- Drag the frame's bottom-left corner to (left, bottom) IN THE FRAME'S OWN
 -- UNITS. Only works while the frame is actually moving (StartMoving), and the
 -- client's clamp decides where it is allowed to land. Returns the landed
@@ -508,23 +533,55 @@ function Sim.DragTo(frame, left, bottom)
     if type(frame) ~= "table" or not frame._moving then return nil end
     local l, b = tonumber(left) or 0, tonumber(bottom) or 0
     if frame:IsClampedToScreen() then
-        local P = _G.UIParent
-        local ratio = P:GetEffectiveScale() / frame:GetEffectiveScale()
-        local pw, ph = P:GetWidth() * ratio, P:GetHeight() * ratio
-        local ins = insetsOf(frame)
-        -- The button column rides along with the window, so whatever it covers
-        -- has to fit on screen too: a shown column is a margin the drag cannot
-        -- spend, on top of the clamp's own.
-        local colL, colR = Sim.ColumnFootprint(frame)
-        local minL, maxL = ins[1] + colL, pw - (frame._w or 0) - ins[2] - colR
-        local minB, maxB = ins[4], ph - (frame._h or 0) - ins[3]
-        if maxL < minL then maxL = minL end
-        if maxB < minB then maxB = minB end
+        local minL, maxL, minB, maxB = clampBounds(frame)
         if l < minL then l = minL elseif l > maxL then l = maxL end
         if b < minB then b = minB elseif b > maxB then b = maxB end
     end
     frame._left, frame._bottom = l, b
     return l, b
+end
+
+-- ── THE CLIENT'S CLAMP *ENFORCEMENT* (w2/bounce sim extension) ───────────────
+-- A programmatic SetPoint is not clamped AT THE MOMENT OF THE CALL — which is
+-- what makes flush placement possible at all — but the frame is clamped again
+-- the next time the CLIENT lays it out. So a window placed (or dragged) flush
+-- against the edge is shoved back inside on the very next client beat unless
+-- the clamp insets have actually been zeroed. THIS IS "IT BOUNCES BACK",
+-- modeled: an addon that zeroes the insets once and never re-asserts them
+-- against the client's own re-clamp will watch the owner's window walk inward.
+-- Returns true when the frame was actually moved (a test can count the shoves).
+function Sim.EnforceClamp(frame)
+    if type(frame) ~= "table" then return false end
+    if frame._left == nil or frame._bottom == nil then return false end
+    if type(frame.IsClampedToScreen) ~= "function" or not frame:IsClampedToScreen() then
+        return false
+    end
+    local minL, maxL, minB, maxB = clampBounds(frame)
+    local l, b = frame._left, frame._bottom
+    if l < minL then l = minL elseif l > maxL then l = maxL end
+    if b < minB then b = minB elseif b > maxB then b = maxB end
+    if l == frame._left and b == frame._bottom then return false end
+    record("clamp:shove")
+    Sim.clampShoves = (Sim.clampShoves or 0) + 1
+    frame._left, frame._bottom = l, b
+    return true
+end
+
+-- The client's own LAYOUT PASS: everything marked dirty by a clamp rewrite is
+-- resolved here, after the Lua that dirtied it has returned. A test calls this
+-- to ask "and then the client laid the frame out — is it still where I put it?"
+-- Returns how many frames were actually shoved.
+function Sim.LayoutBeat()
+    local n = 0
+    local function beat(f)
+        if type(f) == "table" and f._clampDirty then
+            f._clampDirty = nil
+            if Sim.EnforceClamp(f) then n = n + 1 end
+        end
+    end
+    for id = 1, _G.NUM_CHAT_WINDOWS do beat(Sim.Frame(id)) end
+    for _, f in ipairs(Sim.tempFrames or {}) do beat(f) end
+    return n
 end
 -- Chat-frame display knobs (recorded; the skin fading tests read these).
 function WIDGET_API.SetFading(self, on) record("SetFading") self._fading = on and true or false end
@@ -975,6 +1032,24 @@ _G.FCF_SetButtonSide = function(frame, side, forceUpdate)
         end
         bf:Show()                       -- THE RE-SHOW
     end
+    -- ── THE RE-CLAMP (w2/bounce sim extension) ───────────────────────────────
+    -- The column's width has to stay on screen, so the client reserves it in
+    -- the window's CLAMP RECT — and it rewrites those insets every time it
+    -- re-decides the side. An addon that zeroed them once gets them back here,
+    -- unasked, on a beat it did not choose. Same provenance posture as the
+    -- re-show above: the CALL is catalog-verified on 11509, the reservation is
+    -- modeled from the owner's symptom (the window refuses the last stretch to
+    -- the edge, and walks back inward after it is placed there).
+    --
+    -- ENFORCEMENT IS DEFERRED, DELIBERATELY AND FAITHFULLY: SetClampRectInsets
+    -- only stores numbers. The frame is clamped when the client next RESOLVES
+    -- its position, i.e. after the Lua call stack unwinds — which is precisely
+    -- why an in-call post-hook that re-zeroes the insets preempts the shove,
+    -- and why one that arrives a beat late does not. Marking here and shoving
+    -- in Sim.LayoutBeat models that gap honestly instead of collapsing it.
+    frame._clampInsets = { Sim.STOCK_CLAMP_INSETS[1], Sim.STOCK_CLAMP_INSETS[2],
+                           Sim.STOCK_CLAMP_INSETS[3], Sim.STOCK_CLAMP_INSETS[4] }
+    frame._clampDirty = true
     return frame._buttonSide
 end
 _G.FCF_UpdateButtonSide = function(frame)
@@ -992,9 +1067,19 @@ _G.FloatingChatFrame_Update = function(id)
     if not (w and f) then return end
     f._projectedName = w.name
     f._shown = w.shown and true or false
+    -- THE CLIENT'S OWN RESTORE BEAT (w2/bounce sim extension): the window
+    -- update re-places the frame FROM THE PER-CHARACTER STORE. Any move the
+    -- store never learned about — an addon's own StartMoving/StopMovingOrSizing
+    -- drag, say — is undone right here, by the client, without asking. That is
+    -- the second half of "it bounces back".
+    if type(_G.FCF_RestorePositionAndDimensions) == "function" then
+        _G.FCF_RestorePositionAndDimensions(f)
+    end
     -- The client re-evaluates the button side (and re-shows the column) on its
     -- own window-update beat.
     _G.FCF_UpdateButtonSide(f)
+    -- …and re-decides the tab's alpha on the same beat.
+    if type(_G.FCFTab_UpdateAlpha) == "function" then _G.FCFTab_UpdateAlpha(f) end
 end
 _G.FCF_DockUpdate = function()
     record("FCF_DockUpdate")
@@ -1069,10 +1154,217 @@ _G.FCF_ResetChatWindows = function()
     record("FCF_ResetChatWindows")
     Sim.windows = defaultWindows()
 end
-_G.FCF_SavePositionAndDimensions = function() record("FCF_SavePositionAndDimensions") end
-_G.FCF_StopDragging = function() record("FCF_StopDragging") end
+
+-- ── POSITION: SAVE / RESTORE, AND THE NATIVE TAB DRAG ────────────────────────
+-- (w2/bounce sim extension.) The three calls are catalog-verified on 11509
+-- (FCF_SavePositionAndDimensions, FCF_RestorePositionAndDimensions,
+-- FCF_StopDragging, FCFTab_OnDragStop); what is MODELED here is the two-layer
+-- reality the addon has to live in:
+--   * the frame's LIVE corner and the per-character store's `pos` tuple are
+--     two different facts, and only the client's own SAVE verb makes them
+--     agree — StartMoving/StopMovingOrSizing writes NOTHING to the store;
+--   * the client's RESTORE verb re-places the frame from the store, and it
+--     runs on beats the addon never asked for (FloatingChatFrame_Update).
+-- So an addon that moves a window without committing it to the store is
+-- writing a position with an expiry date. UNKIND BY DEFAULT: restore really
+-- moves the frame, and the clamp is enforced right after it.
+local function storePosOf(frame)
+    local w = W(type(frame) == "table" and frame._id or nil)
+    return w and w.pos or nil
+end
+
+_G.FCF_SavePositionAndDimensions = function(frame)
+    record("FCF_SavePositionAndDimensions")
+    local w = W(type(frame) == "table" and frame._id or nil)
+    if not (w and frame._left and frame._bottom) then return end
+    w.pos = { "BOTTOMLEFT", frame._left, frame._bottom }
+    w.dim = { frame._w or w.dim[1], frame._h or w.dim[2] }
+end
+
+_G.FCF_RestorePositionAndDimensions = function(frame)
+    record("FCF_RestorePositionAndDimensions")
+    if type(frame) ~= "table" then return end
+    local p = storePosOf(frame)
+    if type(p) ~= "table" then return end
+    local point, x, y = tostring(p[1]), tonumber(p[2]) or 0, tonumber(p[3]) or 0
+    local P = _G.UIParent
+    local ratio = P:GetEffectiveScale() / frame:GetEffectiveScale()
+    local ph = P:GetHeight() * ratio
+    if point == "TOPLEFT" then
+        frame._left, frame._bottom = x, ph + y - (frame._h or 0)
+    else
+        -- BOTTOMLEFT and anything this sim does not model are read as a
+        -- bottom-left corner (the client's own default for a chat window).
+        frame._left, frame._bottom = x, y
+    end
+    -- NOT clamped here, deliberately: the client's restore is a SetPoint, and a
+    -- SetPoint is not clamped at the moment of the call. The clamp bites on the
+    -- client's next layout beat (FCF_SetButtonSide), and keeping the two apart
+    -- is what lets a test tell the RESTORE bounce and the RE-CLAMP bounce
+    -- apart instead of watching one alibi the other.
+end
+
+-- The drop's real work, held as a LOCAL as well as a global. Both bindings
+-- exist because the two DROP POSTURES below differ in exactly one thing:
+-- whether the client's tab-drop path passes through the GLOBAL names an addon
+-- can hook, or does the same work through its own internal references.
+local function stopDragging(frame, savePos)
+    if type(frame) ~= "table" then return end
+    frame._moving = false
+    savePos(frame)
+    if type(frame.buttonFrame) == "table" and type(_G.FCF_UpdateButtonSide) == "function" then
+        _G.FCF_UpdateButtonSide(frame)
+    end
+end
+
+_G.FCF_StopDragging = function(frame)
+    record("FCF_StopDragging")
+    stopDragging(frame, _G.FCF_SavePositionAndDimensions)
+end
+
+-- THE TWO DROP POSTURES (simulator doctrine: the unkind one is a real variant,
+-- not a footnote). A native tab drop ends in FCFTab_OnDragStop either way; what
+-- differs is what it calls next.
+--
+--   "globals" (default): FCFTab_OnDragStop -> the GLOBAL FCF_StopDragging ->
+--       the GLOBAL FCF_SavePositionAndDimensions. An addon hooking either of
+--       those two already sees the drop.
+--   "internal" (UNKIND): the same work, reached through the client's own
+--       internal references, so NEITHER global is called and the ONLY named
+--       surface the drop touches is FCFTab_OnDragStop itself. The catalog
+--       proves all three names exist on 11509; it does not prove which one the
+--       drop path terminates in, and a capture layer that bets on the obvious
+--       two is a capture layer with a hole. This posture is what makes hooking
+--       the ENTRY POINT load-bearing rather than decorative.
+Sim.TAB_DROP_POSTURE = "globals"
+
+local savePositionInternal = function(frame)
+    -- Deliberately NOT _G.FCF_SavePositionAndDimensions: an internal reference
+    -- captured before any addon loaded is not hookable, which is the point.
+    local w = Sim.windows[type(frame) == "table" and frame._id or nil]
+    if not (w and frame._left and frame._bottom) then return end
+    w.pos = { "BOTTOMLEFT", frame._left, frame._bottom }
+    w.dim = { frame._w or w.dim[1], frame._h or w.dim[2] }
+end
+
+-- The tab's own drag-stop handler: the entry point a NATIVE tab drag actually
+-- ends in. It is a separate global from FCF_StopDragging, which is exactly why
+-- a capture layer that hooks only the latter can miss a player's move.
+_G.FCFTab_OnDragStop = function(tabOrFrame)
+    record("FCFTab_OnDragStop")
+    local frame = tabOrFrame
+    if type(frame) == "table" and frame._kind == "Button" and type(frame.GetParent) == "function" then
+        frame = frame:GetParent()
+    end
+    if type(frame) ~= "table" then return end
+    if Sim.TAB_DROP_POSTURE == "internal" then
+        stopDragging(frame, savePositionInternal)
+    else
+        _G.FCF_StopDragging(frame)
+    end
+end
+
+-- Drive a NATIVE tab drag end to end: the player grabs the tab, drags the
+-- window's corner (clamped like any drag) and lets go. Nothing about this path
+-- goes through the addon's own OnDragStart/OnDragStop scripts — it is the
+-- client's, start to finish — which is the whole point of the leg.
+function Sim.TabDragTo(frame, left, bottom, posture)
+    if type(frame) ~= "table" then return nil end
+    local saved = Sim.TAB_DROP_POSTURE
+    if posture then Sim.TAB_DROP_POSTURE = posture end
+    frame._movable = true
+    frame._moving = true
+    local l, b = Sim.DragTo(frame, left, bottom)
+    local tab = _G[(frame._name or "") .. "Tab"]
+    _G.FCFTab_OnDragStop(tab or frame)
+    Sim.TAB_DROP_POSTURE = saved
+    return l, b
+end
 _G.FCF_StartAlertFlash = function() record("FCF_StartAlertFlash") end
 _G.FCF_StopAlertFlash = function() record("FCF_StopAlertFlash") end
+
+-- The dock's own add/remove: a tab dropped ONTO the dock (or torn OFF it) is a
+-- player-initiated move that never touches FCF_StopDragging's undocked path.
+_G.FCFDock_AddChatFrame = function(dock, frame)
+    record("FCFDock_AddChatFrame")
+    if type(frame) ~= "table" then return end
+    local w = W(frame._id); if w then w.docked = frame._id end
+end
+_G.FCFDock_RemoveChatFrame = function(dock, frame)
+    record("FCFDock_RemoveChatFrame")
+    if type(frame) ~= "table" then return end
+    local w = W(frame._id); if w then w.docked = false end
+end
+
+-- ── THE CLIENT'S OWN TAB ALPHA (w2/fade sim extension) ───────────────────────
+-- The defect the owner reported ("the tabs still fade when not focused on")
+-- lives HERE, and it was invisible headless because the sim had no tab-alpha
+-- machinery at all — an absent API is a kinder client (Class 9's secondary
+-- blind spot, named).
+--
+-- The client's model, catalog-verified on 11509 (FCFTab_UpdateAlpha,
+-- FCF_FadeInChatFrame, FCF_FadeOutChatFrame, UIFrameFadeRemoveFrame): the TAB
+-- carries two alpha fields of its own — `noMouseAlpha` and `mouseOverAlpha` —
+-- and the updater picks between them from the pointer state. The fade-out verb
+-- rewrites `noMouseAlpha` DOWN and drops the chat frame's own alpha with it.
+-- Neither has anything to do with the message-fading knob (SetFading), which
+-- is why disabling that never stopped the tabs fading.
+--
+-- UNKIND: the beat below fades EVERY window the pointer is not over, every
+-- time it runs. Pinning alpha once is not a fix; holding the last word is.
+Sim.TAB_NO_MOUSE_ALPHA    = 0.4    -- an unfocused tab, faded by the client
+Sim.CHATFRAME_FADED_ALPHA = 0.25   -- …and the window that carries it
+_G.DEFAULT_CHATFRAME_ALPHA = 1
+
+local function tabOf(chatFrame)
+    if type(chatFrame) ~= "table" then return nil end
+    return _G[(chatFrame._name or "") .. "Tab"]
+end
+
+_G.FCFTab_UpdateAlpha = function(chatFrame)
+    record("FCFTab_UpdateAlpha")
+    local tab = tabOf(chatFrame)
+    if type(tab) ~= "table" then return end
+    if tab.mouseOverAlpha == nil then tab.mouseOverAlpha = 1 end
+    if tab.noMouseAlpha   == nil then tab.noMouseAlpha   = Sim.TAB_NO_MOUSE_ALPHA end
+    tab:SetAlpha(tab._mouseOver and tab.mouseOverAlpha or tab.noMouseAlpha)
+end
+
+_G.FCF_FadeOutChatFrame = function(chatFrame)
+    record("FCF_FadeOutChatFrame")
+    if type(chatFrame) ~= "table" then return end
+    local tab = tabOf(chatFrame)
+    if type(tab) == "table" then tab.noMouseAlpha = Sim.TAB_NO_MOUSE_ALPHA end
+    chatFrame:SetAlpha(Sim.CHATFRAME_FADED_ALPHA)
+    _G.FCFTab_UpdateAlpha(chatFrame)
+end
+
+_G.FCF_FadeInChatFrame = function(chatFrame)
+    record("FCF_FadeInChatFrame")
+    if type(chatFrame) ~= "table" then return end
+    local tab = tabOf(chatFrame)
+    if type(tab) == "table" then tab.noMouseAlpha = 1 end
+    chatFrame:SetAlpha(_G.DEFAULT_CHATFRAME_ALPHA)
+    _G.FCFTab_UpdateAlpha(chatFrame)
+end
+
+_G.UIFrameFadeRemoveFrame = function(frame)
+    record("UIFrameFadeRemoveFrame")
+    if type(frame) == "table" then frame._fadeInFlight = nil end
+end
+
+-- THE UNKIND BEAT: the client's own per-frame fade pass. Nothing schedules it
+-- for you — a test calls it to ask "does the addon still own the tab's alpha
+-- after the client has had another go at it?"
+function Sim.ClientFadeBeat()
+    for id = 1, _G.NUM_CHAT_WINDOWS do
+        local f = Sim.Frame(id)
+        if f and f._shown then _G.FCF_FadeOutChatFrame(f) end
+    end
+    for _, f in ipairs(Sim.tempFrames or {}) do
+        if f._shown then _G.FCF_FadeOutChatFrame(f) end
+    end
+end
 _G.FCF_GetNumActiveChatFrames = function()
     record("FCF_GetNumActiveChatFrames")
     local n = 0

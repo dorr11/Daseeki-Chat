@@ -205,6 +205,7 @@ Options.BINDINGS = {
     { id = "windows.editBox",           kind = "field", branch = "skin", key = "editBox" },
     { id = "windows.altDragMove",       kind = "field", branch = "skin", key = "altDragMove" },
     { id = "windows.unclampWindows",    kind = "field", branch = "skin", key = "unclampWindows" },
+    { id = "windows.snapToEdges",       kind = "field", branch = "skin", key = "snapToEdges" },
     { id = "windows.moveMode", kind = "runtime",
       why = "/dchat unlock is SESSION-scoped by design (an unlocked state that survived a "
          .. "login would turn every stray drag into a moved window). The control mirrors "
@@ -863,6 +864,13 @@ local function buildWindows(flow)
         tooltip = "Loosen the margin the game holds chat windows away from the edge with. "
                .. "They stay on screen; they just stop being fenced off it.",
         get = fieldGet("skin", "unclampWindows"), set = boolSet("skin", "unclampWindows"),
+    }))
+    reg(sec:Checkbox({
+        label = "Snap to edges when dragging",
+        tooltip = "Drop a window near a screen edge, a screen centre line or another chat "
+               .. "window's edge and it lands ON it, exactly. A hairline shows what it is "
+               .. "about to line up with while you drag.",
+        get = fieldGet("skin", "snapToEdges"), set = boolSet("skin", "snapToEdges"),
     }))
     reg(sec:Checkbox({
         label = "Unlock windows for this session",

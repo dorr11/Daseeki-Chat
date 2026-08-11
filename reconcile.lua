@@ -122,12 +122,113 @@ end
 -- channel color edits. Debounced; wholesale capture-diff lives in config.lua.
 ----------------------------------------------------------------------
 
+-- EVERY NAMED SURFACE A USER-INITIATED CHANGE CAN END IN. The position half of
+-- this list is the answer to the owner's "it always bounces back": a move the
+-- capture layer never sees is a move the config never learns, and the very next
+-- verify pass "corrects" the player back to the stored corner. So the audit is
+-- exhaustive by construction — every way a chat window can move on 11509:
+--
+--   1. OUR alt-drag              -> skin.lua's OnMoveStop -> NoteExternalChange
+--                                   (+ Skin.CommitMove, which makes the CLIENT's
+--                                   own store agree so its restore beat cannot
+--                                   undo the drop);
+--   2. the NATIVE TAB DRAG       -> FCFTab_OnDragStop -> FCF_StopDragging
+--                                   -> FCF_SavePositionAndDimensions. All three
+--                                   are hooked, because a client that routes a
+--                                   drop through only one of them still has to
+--                                   reach capture — and FCFTab_OnDragStop is the
+--                                   entry point that runs on EVERY tab drop,
+--                                   including the ones that never reach
+--                                   FCF_StopDragging's undocked path;
+--   3. a DROP ONTO / TEAR OFF the dock -> FCFDock_AddChatFrame /
+--                                   FCFDock_RemoveChatFrame (a real relocation
+--                                   that touches neither of the above);
+--   4. FCF_ResetChatWindows      -> the player asking for the stock layout back;
+--   5. FCF_RestorePositionAndDimensions -> NOT a user move. Deliberately absent:
+--      it is the CLIENT correcting a window from its own store, and capturing it
+--      would teach the config the client's answer as if the player had chosen it.
 local CAPTURE_HOOKS = {
     "FCF_SetWindowName", "FCF_SetChatWindowFontSize", "FCF_SetWindowColor",
     "FCF_SetWindowAlpha", "FCF_DockFrame", "FCF_UnDockFrame", "FCF_Close",
     "FCF_OpenNewWindow", "FCF_SavePositionAndDimensions", "FCF_StopDragging",
+    "FCFTab_OnDragStop", "FCFDock_AddChatFrame", "FCFDock_RemoveChatFrame",
     "FCF_ResetChatWindows",
 }
+Reconcile.CAPTURE_HOOKS = CAPTURE_HOOKS
+
+----------------------------------------------------------------------
+-- THE POSITION LEDGER: one line that names the AUTHOR of the last thing that
+-- moved a window.
+--
+-- "It bounced back" is two completely different bugs wearing the same
+-- sentence. Either the player's move never reached the config and the verify
+-- pass put the window back where the config still says (a capture hole), or
+-- the config genuinely holds that corner and the reconciler is correctly
+-- restoring it (a stale/peer config). Guessing between them costs a round trip
+-- with the owner every time; the ledger answers it in one line, and
+-- /dchat debug reconcile prints it first.
+----------------------------------------------------------------------
+
+Reconcile.lastPositionChange = nil   -- { kind = "user"|"drift", why, detail, at, build }
+
+local function fmtNPosShort(np)
+    if type(np) ~= "table" then return "none" end
+    return string.format("%s %.4f,%.4f", tostring(np[1]),
+        tonumber(np[2]) or 0, tonumber(np[3]) or 0)
+end
+
+function Reconcile.NotePositionChange(kind, why, detail)
+    Reconcile.lastPositionChange = {
+        kind   = (kind == "user") and "user" or "drift",
+        why    = tostring(why or "?"),
+        detail = detail and tostring(detail) or nil,
+        at     = (ns.Config and ns.Config.Now and ns.Config.Now()) or 0,
+        build  = ns.VERSION,
+    }
+    return Reconcile.lastPositionChange
+end
+
+-- The one-line verdict. Deliberately phrased so the two answers cannot be
+-- confused for each other at a glance.
+function Reconcile.PositionVerdict()
+    local e = Reconcile.lastPositionChange
+    if not e then
+        return "last position change: none this session (nothing has moved a window)"
+    end
+    local head = (e.kind == "user")
+        and "last position change: user move captured"
+        or  "last position change: drift corrected to config"
+    return ("%s @ %s (%s%s)"):format(head, tostring(e.at), e.why,
+        e.detail and (" | " .. e.detail) or "")
+end
+
+-- Every window's stored corner right now, as a comparable snapshot. Used to
+-- tell "the capture learned a MOVE" from "the capture learned a rename".
+local function positionFingerprint()
+    local C = ns.Config
+    local c = C and C.Get() or nil
+    local out = {}
+    local w = (type(c) == "table" and type(c.windows) == "table") and c.windows or {}
+    for id = 1, numWindows() do
+        local e = w[id]
+        out[id] = (type(e) == "table" and type(e.npos) == "table")
+            and fmtNPosShort(e.npos) or "none"
+    end
+    return out
+end
+
+-- The FIRST window whose corner the capture actually changed (deterministic:
+-- lowest id, never a pairs() lottery — Class 8), or nil when none did.
+local function firstMovedWindow(before)
+    local after = positionFingerprint()
+    for id = 1, numWindows() do
+        if before[id] ~= after[id] then
+            return ("window %d npos %s -> %s"):format(id, tostring(before[id]),
+                tostring(after[id]))
+        end
+    end
+    return nil
+end
 
 function Reconcile.ScheduleCapture(why)
     if not Reconcile.active then return end
@@ -139,11 +240,19 @@ function Reconcile.ScheduleCapture(why)
         if not Reconcile.active then return end
         local C = ns.Config
         if not (C and C.CaptureBack) then return end
+        local before = positionFingerprint()
         local changed = C.CaptureBack(Reconcile._pendingWhy)
         if changed then
             Reconcile.stats.captures = Reconcile.stats.captures + 1
-            Reconcile.Trace({ gate = "capture",
-                changed = { Reconcile._pendingWhy .. " -> rev " .. tostring(C.Rev()) } })
+            local moved = firstMovedWindow(before)
+            local line = Reconcile._pendingWhy .. " -> rev " .. tostring(C.Rev())
+            if moved then
+                -- Named distinctly from the reconciler's own corrections below:
+                -- a bounce report reads one of these two phrases and stops.
+                line = "captured user move: " .. moved .. " (via " .. line .. ")"
+                Reconcile.NotePositionChange("user", Reconcile._pendingWhy, moved)
+            end
+            Reconcile.Trace({ gate = "capture", changed = { line } })
         end
     end)
 end
@@ -369,10 +478,21 @@ function Reconcile.ApplyPositions(cfg)
             if frame then
                 local have = C.CaptureNormalizedPos(id)
                 -- Already there (within the measurement tolerance)? Then this
-                -- is not drift and writing again would only be noise.
+                -- is not drift and writing again would only be noise. NOTE the
+                -- edge case this makes safe on purpose: a corner captured at
+                -- exactly 0 and a stored corner a hair off 0 agree, so a flush
+                -- window is never nudged inward by float noise (see the npos
+                -- round-trip pins in config.lua).
                 if have == nil or not C.NearPos(have, np) then
                     if Reconcile.PlacePoint(frame, np) then
-                        applied[#applied + 1] = "window " .. id .. ": npos"
+                        local detail = ("window %d npos %s -> %s"):format(id,
+                            fmtNPosShort(have), fmtNPosShort(np))
+                        -- Named distinctly from a captured user move: this is
+                        -- the reconciler putting a window BACK, and the ledger
+                        -- says so in those words.
+                        applied[#applied + 1] = "corrected drift: " .. detail
+                        Reconcile.NotePositionChange("drift",
+                            "reconcile:" .. tostring(Reconcile._gate or "?"), detail)
                     end
                 end
             end
@@ -606,6 +726,9 @@ ns.RegisterDebugCommand("reconcile", "the reconcile trace ring (what changed, wh
     ns:Print(("reconcile: %s | %d run(s), %d retr(ies), %d capture(s)"):format(
         Reconcile.active and "active" or "inactive",
         Reconcile.stats.runs, Reconcile.stats.retries, Reconcile.stats.captures))
+    -- THE VERDICT, first and on one line: the next "it bounced back" report
+    -- names its own author without anyone having to read the ring.
+    ns:Print("  " .. Reconcile.PositionVerdict())
     if #ring == 0 then
         ns:Print("  trace ring is empty (no reconcile has run on this character)")
         return
@@ -900,8 +1023,35 @@ local function testLadderAndTrace(fails)
     ck(ring[#ring].build == ns.VERSION, "entries are build-stamped")
     ck(ring[#ring].gate == "synthetic " .. (Reconcile.TRACE_MAX + 10),
         "the newest entry survives the trim (oldest evicted)")
+    -- ── THE ONE-LINE VERDICT: whose move was it? ───────────────────────────
+    -- The owner's next "it bounced back" has to name its own author without
+    -- anyone reading the ring, so the verdict is asserted as PRINTED OUTPUT,
+    -- not merely as a function that returns a string.
+    Reconcile.lastPositionChange = nil
+    ck(Reconcile.PositionVerdict():find("none this session", 1, true) ~= nil,
+        "the verdict says so plainly when nothing has moved a window yet")
+    Reconcile.NotePositionChange("user", "FCFTab_OnDragStop", "window 1 npos … -> BOTTOMLEFT 0,0")
+    ck(Reconcile.PositionVerdict():find("user move captured", 1, true) ~= nil,
+        "a captured player move is named as a USER MOVE")
+    Reconcile.NotePositionChange("drift", "reconcile:login", "window 1 npos … -> …")
+    local driftLine = Reconcile.PositionVerdict()
+    ck(driftLine:find("drift corrected to config", 1, true) ~= nil,
+        "a reconciler correction is named as DRIFT, in different words entirely")
+    ck(driftLine:find("user move captured", 1, true) == nil,
+        "…so the two verdicts can never be misread for each other")
+
+    local said = {}
+    local realPrint = ns.Print
+    ns.Print = function(_, ...)
+        local parts = {}
+        for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+        said[#said + 1] = table.concat(parts, " ")
+    end
     local ok = pcall(ns.SlashDispatch, "debug reconcile")
+    ns.Print = realPrint
     ck(ok, "/dchat debug reconcile prints without error")
+    ck(table.concat(said, "\n"):find("last position change:", 1, true) ~= nil,
+        "…and it leads with the position verdict, before the ring")
 
     -- ── OUT: disable both modules; the client hears nothing further ────────
     ns.SetModuleEnabled("reconcile", false)

@@ -54,8 +54,10 @@
 --   7. LOOSENED CLAMP (unclampWindows). Zeroed clamp rect insets on the
 --      managed windows so a MANUAL drag can reach the screen edge — the frame
 --      stays clamped ON screen, it just stops being held a margin away.
---      Re-asserted on every re-evaluation beat (the client re-clamps) and
---      deferred to the regen beat when the write is refused in combat.
+--      Re-asserted on every re-evaluation beat AND on every client beat that
+--      rewrites the insets (the button-side decision, the window update, the
+--      dock pass), in-call; deferred to the regen beat when the write is
+--      refused in combat.
 --
 -- SKIN V2.2 — the chat BUTTON COLUMN, down by default:
 --
@@ -141,6 +143,12 @@ local Skin = {
     columnEventsDropped = 0,  -- widgets we called UnregisterAllEvents on
     -- skin v3 state (the one box)
     _chassisDepth      = 0,   -- chassis re-evaluation re-entrancy latch (Class 9)
+    -- skin v3.1 state (the fade strip / the bounce / snapping)
+    alphaPins    = 0,   -- times we actually took the tab's alpha back (never a loop)
+    _alphaDepth  = 0,   -- alpha-pin re-entrancy latch (Class 9)
+    moveCommits  = 0,   -- moves written through the client's own save verb
+    snaps        = 0,   -- drops corrected onto a boundary
+    lastSnap     = nil, -- { x = <kind>, y = <kind> } for the last corrected drop
 }
 ns.Skin = Skin
 
@@ -157,6 +165,16 @@ ns.Skin = Skin
 -- THE MAPPING TABLE. Three columns: what the mockup's CSS says, what this file
 -- ships, and whether they are IDENTICAL or — never for taste, only for a real
 -- client capability — why they cannot be.
+--
+-- OWNER AMENDMENTS (2026-08-11): the owner has since looked at the SHIPPED box
+-- in the live client and amended six of the mockup's own numbers — "the tabs
+-- and entry areas need to be 'thinner' and remove the left and right dead
+-- border area between the chat feed box and the edge of the panel". These are
+-- deliberate departures from the reproduction target, not drift, so every
+-- affected row below carries its old -> new value and the amendment tag. The
+-- contract stays honest: a row that no longer says IDENTICAL says WHY, and the
+-- reason here is the owner's own eye on the real render rather than a client
+-- limit. Everything not tagged is still identical to the mockup.
 --
 -- COLOUR (mockup :root custom properties -> PALETTE below, literal hexes)
 --   --ground   #0b0908  -> PALETTE.ground   #0b0908   IDENTICAL
@@ -178,16 +196,26 @@ ns.Skin = Skin
 --   .chatbox border-radius 6px             -> square                            CLIENT LIMIT: a backdrop
 --       edge is a repeated 1px texture; rounded corners need bespoke corner art per radius, and a bad
 --       approximation reads worse than a clean square. Documented, not faked.
---   .tabs-top padding 6px 8px 0            -> STRIP_PAD_TOP 6 / STRIP_PAD_X 8 / 0 IDENTICAL
---   .tab padding 5px 14px 6px              -> TAB_PAD_TOP 5 / TAB_PAD_X 14 / TAB_PAD_BOTTOM 6 IDENTICAL
+--   .tabs-top padding 6px 8px 0            -> STRIP_PAD_TOP 2 / STRIP_PAD_X 3 / 0
+--       OWNER AMENDMENT 2026-08-11 (thinner tabs/entry, no side gutters): STRIP_PAD_TOP 6 -> 2,
+--       STRIP_PAD_X 8 -> 3. The side padding moves with .msgs' so the tab run and the message text
+--       start on the same vertical, which is the whole point of taking the gutter out.
+--   .tab padding 5px 14px 6px              -> TAB_PAD_TOP 2 / TAB_PAD_X 14 / TAB_PAD_BOTTOM 4
+--       OWNER AMENDMENT 2026-08-11: TAB_PAD_TOP 5 -> 2, TAB_PAD_BOTTOM 6 -> 4. The bottom keeps 4 so
+--       the 2-unit active underline still has 2 units of clearance under the 18-unit line box, and the
+--       14-unit badge pip still centres inside the row without clipping (14 < 24). TAB_PAD_X unchanged:
+--       the amendment is about height and SIDE gutters, not about crowding the labels together.
 --   .tab font-size 12.5px, weight 600      -> TAB_TEXT_SIZE 12.5 on the suite's condensed face
 --                                                     IDENTICAL size; WEIGHT is CLIENT LIMIT (one vendored
 --                                                     face, no synthetic bold that does not smear).
 --   .tab letter-spacing .04em              -> not applied                       CLIENT LIMIT: FontString
 --       has no letter-spacing; the only fake is padding each glyph into its own FontString.
 --   .tab line-height 1.45                  -> TAB_LINE_H 18 (12.5 * 1.45 = 18.1) IDENTICAL to the pixel
---   => tab height 5 + 18 + 6               -> TAB_H 29                          IDENTICAL
---   => strip height 6 + 29                 -> STRIP_H 35                        IDENTICAL
+--   => tab height 5 + 18 + 6               -> TAB_H 24 (2 + 18 + 4)
+--       OWNER AMENDMENT 2026-08-11: 29 -> 24.
+--   => strip height 6 + 29                 -> STRIP_H 26 (2 + 24)
+--       OWNER AMENDMENT 2026-08-11: 35 -> 26. The strip is now snug around the tab ink, its underline
+--       and a couple of units of breathing room — the band the owner called out is gone.
 --   .tabs-top gap 2px                      -> TAB_GAP 2                         IDENTICAL
 --   .tab border-radius 4px 4px 0 0         -> square                            CLIENT LIMIT (as above)
 --   .tab.active background var(--panel2)   -> the tab wears the MESSAGE SURFACE's own fill, run down
@@ -198,14 +226,28 @@ ns.Skin = Skin
 --   .tab .n  (the unread pip)              -> badges.lua: accent fill, white digits, 10.5px, after the
 --       label with a 6px gap, inside the tab                                    IDENTICAL
 --   .tab .n border-radius 8px              -> square chip                       CLIENT LIMIT (as above)
---   .msgs padding 10px 14px 6px            -> MSG_PAD_TOP 10 / MSG_PAD_X 14 / MSG_PAD_BOTTOM 6 IDENTICAL
+--   .msgs padding 10px 14px 6px            -> MSG_PAD_TOP 10 / MSG_PAD_X 3 / MSG_PAD_BOTTOM 6
 --       (the client's message frame has no text insets — see the note under LAYOUT — so the CHASSIS
 --        pads around the frame, which lands the same pixels)
---   .msgs font-size 13.5px                 -> the CLIENT's per-window size      SHIPPED BEHAVIOUR: the
---       Blizzard right-click "Font size" menu stays the authority (skin v1's pinned split). The suite
---       FACE is the mockup's face; only the size is the player's.
+--       OWNER AMENDMENT 2026-08-11 (no side gutters): MSG_PAD_X 14 -> 3. The horizontal component only:
+--       the vertical padding is unchanged, because the owner's complaint was specifically the left and
+--       right dead panel between the feed and the chassis edge. 3 leaves a hairline of breathing room
+--       inside the 1-unit chassis border rather than butting the text against it.
+--   .msgs font-size 13.5px                 -> skin.messageFontSize, default 13.5   IDENTICAL
+--       OWNER AMENDMENT 2026-08-11 (typography parity): was "the CLIENT's per-window size is the
+--       authority" (skin v1's pinned split). The mockup's proportions are a RATIO between this size
+--       and every measure around it, so the box could not be on par while the size was somebody
+--       else's. Config-backed with the mockup's own value as the default; setting it to 0 restores
+--       the old split exactly, and the box-off path always uses it.
 --   .msgs .row padding 1.5px 0             -> ROW_SPACING 3 (1.5 above + 1.5 below, and the client's
 --       spacing is the gap BETWEEN rows)                                        IDENTICAL
+--   .msgs line-height 1.45                 -> Skin.MessageSpacing = (1.45 - 1.2) * size + ROW_SPACING
+--       OWNER AMENDMENT 2026-08-11 (typography parity): previously unmapped, which is why the live
+--       feed's lines touched while the mockup's breathed. line-height is the whole LINE BOX and a
+--       FontString already draws one of its own, so what SetSpacing wants is the DIFFERENCE — hence
+--       the subtraction of the face's natural 1.2 leading (FACE_NATURAL_LINE, the one measured
+--       constant in this file). COMPUTED from the size in force, never hardcoded, so it stays 1.45
+--       when the player changes the size.
 --   .msgs .row gap 8px + .stampline 1px    -> DIV_WIDTH 1 centred in the stamp separator, STAMP_GAP 8
 --       aimed each side                    APPROXIMATE, CLIENT LIMIT: a chat line is ONE string in ONE
 --       FontString, so the space right of the hairline can only be spelled in spaces — stamps.lua emits
@@ -216,18 +258,26 @@ ns.Skin = Skin
 --       — CLIENT LIMIT: rows are not addressable widgets.
 --   .stamp font-variant-numeric tabular    -> not applied                       CLIENT LIMIT: no OpenType
 --       feature control on a FontString.
---   .entry padding 8px 12px                -> EB_PAD_Y 8 / EB_PAD_X 12          IDENTICAL
---   .entry font 13.5px, line-height 1.45   -> EB_HEIGHT 36 (8 + 19.6 + 8)       IDENTICAL
+--   .entry padding 8px 12px                -> EB_PAD_Y 3 / EB_PAD_X 12
+--       OWNER AMENDMENT 2026-08-11 (thinner entry): EB_PAD_Y 8 -> 3. EB_PAD_X unchanged — the entry's
+--       own left inset is where the "Say:" alias header sits, and it is functionally untouched.
+--   .entry font 13.5px, line-height 1.45   -> EB_HEIGHT 26 (3 + 19.6 + 3)
+--       OWNER AMENDMENT 2026-08-11: 36 -> 26, snug to the edit box's own line.
 --   .entry border-top 1px --line-soft      -> SEAM_W 1, PALETTE.lineSoft, and NO gap (EB_GAP 0) IDENTICAL
 --   .entry background var(--panel2)        -> shares the message surface        IDENTICAL
 --   .entry .hinttxt "always visible..."    -> not shipped                       it is the MOCKUP'S OWN
 --       annotation of the design (it describes the behaviour, it is not a control); there is nothing
 --       in the product for it to label.
 --   .tabs-side width 112px                 -> TABRAIL_W 112                     IDENTICAL
---   .tabs-side padding 8px 6px             -> RAIL_PAD_Y 8 / RAIL_PAD_X 6       IDENTICAL
+--   .tabs-side padding 8px 6px             -> RAIL_PAD_Y 4 / RAIL_PAD_X 6
+--       OWNER AMENDMENT 2026-08-11 (thinner tabs): RAIL_PAD_Y 8 -> 4, carried across to the SIDE
+--       placement so the amendment does not silently un-apply itself the moment the player moves the
+--       tabs to a rail. RAIL_PAD_X unchanged (that is the rail's own width budget, not a gutter).
 --   .tabs-side border-left 1px --line-soft -> SEAM_W 1, PALETTE.lineSoft        IDENTICAL
---   .stab padding 7px 10px                 -> RAIL_TAB_PAD_Y 7 / RAIL_TAB_PAD_X 10 IDENTICAL
---   => rail row height 7 + 18 + 7          -> TAB_ROW_H 32                      IDENTICAL
+--   .stab padding 7px 10px                 -> RAIL_TAB_PAD_Y 4 / RAIL_TAB_PAD_X 10
+--       OWNER AMENDMENT 2026-08-11 (thinner tabs): RAIL_TAB_PAD_Y 7 -> 4.
+--   => rail row height 7 + 18 + 7          -> TAB_ROW_H 26 (4 + 18 + 4)
+--       OWNER AMENDMENT 2026-08-11: 32 -> 26.
 --   .stab.active::before 2px, inset 5px    -> EDGEBAR_W 2 / EDGEBAR_INSET 5     IDENTICAL
 --   .stab .n float:right                   -> badges.lua right-aligns in the row at RAIL_TAB_PAD_X IDENTICAL
 --   box-shadow 0 8px 30px rgba(0,0,0,.55)  -> not shipped                       CLIENT LIMIT: no drop
@@ -294,33 +344,35 @@ local EB_IDLE     = 0.55   -- persistent edit box alpha while unfocused (placeho
 local EB_ACTIVE   = 1.0    -- …and while it holds focus
 -- THE ONE BOX, straight off the mapping table above.
 local CHASSIS_EDGE  = 1    -- .chatbox border width
-local STRIP_PAD_TOP = 6    -- .tabs-top padding-top
-local STRIP_PAD_X   = 8    -- .tabs-top padding-left/right
+local STRIP_PAD_TOP = 2    -- .tabs-top padding-top          (owner amendment: 6 -> 2)
+local STRIP_PAD_X   = 3    -- .tabs-top padding-left/right   (owner amendment: 8 -> 3)
 local TAB_TEXT_SIZE = 12.5 -- .tab font-size
 local TAB_LINE_H    = 18   -- .tab line-height (12.5 * 1.45)
-local TAB_PAD_TOP   = 5    -- .tab padding-top
+local TAB_PAD_TOP   = 2    -- .tab padding-top               (owner amendment: 5 -> 2)
 local TAB_PAD_X     = 14   -- .tab padding-left/right
-local TAB_PAD_BOT   = 6    -- .tab padding-bottom
-local TAB_H         = TAB_PAD_TOP + TAB_LINE_H + TAB_PAD_BOT      -- 29
-local STRIP_H       = STRIP_PAD_TOP + TAB_H                       -- 35
+local TAB_PAD_BOT   = 4    -- .tab padding-bottom            (owner amendment: 6 -> 4)
+local TAB_H         = TAB_PAD_TOP + TAB_LINE_H + TAB_PAD_BOT      -- 24 (was 29)
+local STRIP_H       = STRIP_PAD_TOP + TAB_H                       -- 26 (was 35)
 local TAB_GAP       = 2    -- .tabs-top gap
 local MSG_PAD_TOP   = 10   -- .msgs padding-top
-local MSG_PAD_X     = 14   -- .msgs padding-left/right
+local MSG_PAD_X     = 3    -- .msgs padding-left/right       (owner amendment: 14 -> 3)
 local MSG_PAD_BOT   = 6    -- .msgs padding-bottom
 local ROW_SPACING   = 3    -- .msgs .row padding 1.5px each side
-local EB_HEIGHT     = 36   -- .entry: 8 + (13.5 * 1.45) + 8
+local MOCKUP_LINE_H = 13.5 -- .msgs font-size (the feed's own size)
+local MOCKUP_LINE_HEIGHT = 1.45 -- .msgs line-height
+local EB_HEIGHT     = 26   -- .entry: 3 + (13.5 * 1.45) + 3  (owner amendment: 36 -> 26)
 local EB_PAD_X      = 12   -- .entry padding-left/right
-local EB_PAD_Y      = 8    -- .entry padding-top/bottom
+local EB_PAD_Y      = 3    -- .entry padding-top/bottom      (owner amendment: 8 -> 3)
 -- The mockup's entry bar is FLUSH (the hairline is the whole seam), which the
 -- box expresses with SEAM_W; EB_GAP is the v2 path's own gap and stays at the
 -- value v2 shipped, so turning the box off really is byte for byte.
 local EB_GAP        = 2
 local TABRAIL_W     = 112  -- .tabs-side width
-local RAIL_PAD_Y    = 8    -- .tabs-side padding-top/bottom
+local RAIL_PAD_Y    = 4    -- .tabs-side padding-top/bottom  (owner amendment: 8 -> 4)
 local RAIL_PAD_X    = 6    -- .tabs-side padding-left/right
-local RAIL_TAB_PAD_Y = 7   -- .stab padding-top/bottom
+local RAIL_TAB_PAD_Y = 4   -- .stab padding-top/bottom       (owner amendment: 7 -> 4)
 local RAIL_TAB_PAD_X = 10  -- .stab padding-left/right
-local TAB_ROW_H     = RAIL_TAB_PAD_Y + TAB_LINE_H + RAIL_TAB_PAD_Y  -- 32
+local TAB_ROW_H     = RAIL_TAB_PAD_Y + TAB_LINE_H + RAIL_TAB_PAD_Y  -- 26 (was 32)
 local SEAM_W        = 1    -- .entry border-top / .tabs-side border-left
 local EDGEBAR_W     = 2    -- .stab.active::before width
 local EDGEBAR_INSET = 5    -- …its top/bottom inset
@@ -349,6 +401,16 @@ ns.DEFAULTS.skin.hideButtonColumn    = true   -- hide the chat button column
 -- PLACEMENT inside it is layout and lives in the synced config). OFF is skin
 -- v2 byte for byte, fading included.
 ns.DEFAULTS.skin.unifiedChassis      = true   -- one backdrop: strip + text + entry
+-- skin v3.1: DROP SNAPPING. A drop within SNAP_THRESHOLD of a screen edge, a
+-- screen centre line or another chat window's edge lands ON it, exactly. The
+-- threshold is a constant, not a slider (see the snap section).
+ns.DEFAULTS.skin.snapToEdges         = true   -- snap to edges when dragging
+-- skin v3.1: TYPOGRAPHY, config-backed with the MOCKUP's own values as the
+-- defaults. 0 (or nil) on the size means "the client's right-click Font size
+-- menu is the authority", which is exactly what skin v1 shipped and what the
+-- box-off path still does.
+ns.DEFAULTS.skin.messageFontSize     = MOCKUP_LINE_H       -- .msgs font-size 13.5
+ns.DEFAULTS.skin.lineHeight          = MOCKUP_LINE_HEIGHT  -- .msgs line-height 1.45
 
 local function UIKit() return _G.DaseekiUI end
 
@@ -393,6 +455,18 @@ end
 ----------------------------------------------------------------------
 
 local function numWindows() return _G.NUM_CHAT_WINDOWS or 10 end
+
+-- One numeric widget read, defended: nil for "the client would not answer",
+-- never a hopeful zero (Class 5 — 0 is truthy and a truthy wrong answer is
+-- worse than no answer). Used by the geometry readers throughout this file.
+local function widgetNum(w, method)
+    if type(w) ~= "table" then return nil end
+    local f = w[method]
+    if type(f) ~= "function" then return nil end
+    local ok, v = pcall(f, w)
+    if ok and type(v) == "number" then return v end
+    return nil
+end
 
 local function isCombatLog(frame, id)
     local f = _G.IsCombatLog
@@ -709,6 +783,62 @@ end
 -- (the survey's ElvUI split: the Blizzard right-click size menu keeps working).
 ----------------------------------------------------------------------
 
+----------------------------------------------------------------------
+-- TYPOGRAPHY PARITY (skin v3.1, the owner's "we're still not quite on par").
+--
+-- The mockup's feed has air between messages; the shipped render had lines
+-- touching. Two numbers were missing, and both were being read from the wrong
+-- authority:
+--
+--   * SIZE. The mockup sets `.msgs{font-size:13.5px}`. skin v1 pinned the
+--     CLIENT's per-window size as the authority (the Blizzard right-click
+--     "Font size" menu), which was the right call when there was no design to
+--     be faithful to — but it means the box renders at whatever the client's
+--     default happens to be, and the mockup's proportions are the ratio
+--     between that size and every measure around it. It is now CONFIG-BACKED,
+--     defaulting to the mockup's own 13.5, with 0/nil meaning "the client's
+--     menu is the authority" — so the old behaviour is still reachable and is
+--     exactly what the box-off path uses.
+--   * SPACING. `line-height:1.45` is not a spacing value: it is the whole line
+--     BOX, and a FontString already draws a line box of its own. So the value
+--     SetSpacing wants is the DIFFERENCE, and it has to be COMPUTED from the
+--     size in force — a hardcoded number would stop being 1.45 the moment the
+--     player changed the font size. That computation is Skin.MessageSpacing.
+----------------------------------------------------------------------
+
+-- The vendored face's own line box, as a multiple of its point size. This is
+-- the one number here that is MEASURED rather than declared: a FontString's
+-- natural leading is the face's ascent+descent, which no client API reports.
+-- 1.2 is the standard TTF metric and the value the mockup's own browser used
+-- for `line-height:normal`, so the difference below lands on the mockup's
+-- rhythm. It is named and constant so a future correction is one edit.
+local FACE_NATURAL_LINE = 1.2
+
+-- The size the feed actually renders at: the config's own value when it has
+-- one, the CLIENT's per-window size otherwise (0 and nil both mean "the
+-- client's menu decides" — Class 5: a truthy zero must not become a size).
+function Skin.MessageFontSize(clientSize)
+    local want = tonumber(cfg().messageFontSize)
+    if Skin.Unified() and want and want > 0 then return want end
+    local size = tonumber(clientSize)
+    if not size or size <= 0 then size = 14 end   -- truthy-zero guard (Class 5)
+    return size
+end
+
+-- PURE. The mockup's rhythm, in the points SetSpacing speaks: the air the
+-- line-height asks for beyond the face's own line box, plus the row's own
+-- padding. Computed from the size in force, so it tracks the font-size config
+-- instead of freezing at whatever it was when this line was written.
+function Skin.MessageSpacing(size)
+    size = tonumber(size)
+    if not size or size <= 0 then return ROW_SPACING end
+    local lh = tonumber(cfg().lineHeight)
+    if not lh or lh <= 0 then lh = MOCKUP_LINE_HEIGHT end
+    local extra = (lh - FACE_NATURAL_LINE) * size
+    if extra < 0 then extra = 0 end
+    return extra + ROW_SPACING
+end
+
 local function applyFrameFont(frame, id)
     local UI = UIKit()
     if not UI or type(frame.SetFont) ~= "function" then return end
@@ -719,19 +849,20 @@ local function applyFrameFont(frame, id)
         if okg and face then rec.origFont = { face, size, flags } end
     end
     local _, name, fontSize = windowEligible(id)
-    local size = tonumber(fontSize)
-    if not size or size <= 0 then size = 14 end   -- truthy-zero guard (Class 5)
+    local size = Skin.MessageFontSize(fontSize)
     pcall(frame.SetFont, frame, UI.FontFile(), size, "")
-    -- THE ROW RHYTHM (mockup `.msgs .row{padding:1.5px 0}` — 1.5 above and 1.5
-    -- below each row, which is 3 between two of them). SetSpacing is the ONE
-    -- typographic lever a ScrollingMessageFrame offers, and this is exactly
-    -- what it does; the original is saved so a disable hands it back.
+    -- THE ROW RHYTHM. SetSpacing is the ONE typographic lever a
+    -- ScrollingMessageFrame offers, and the value is computed from the size in
+    -- force (see Skin.MessageSpacing); the original is saved so a disable
+    -- hands it back.
     if type(frame.SetSpacing) == "function" then
         if rec and rec.origSpacing == nil and type(frame.GetSpacing) == "function" then
             local okS, sp = pcall(frame.GetSpacing, frame)
             rec.origSpacing = (okS and tonumber(sp)) or false
         end
-        pcall(frame.SetSpacing, frame, Skin.Unified() and ROW_SPACING or (rec and tonumber(rec.origSpacing) or 0))
+        pcall(frame.SetSpacing, frame,
+            Skin.Unified() and Skin.MessageSpacing(size)
+                            or (rec and tonumber(rec.origSpacing) or 0))
     end
 end
 
@@ -1254,6 +1385,148 @@ local function styleTab(frame, rec)
         if ok and type(r) == "number" then rec.origTabColor = { r, g, b } end
     end
     rec.tabStyled = true
+end
+
+----------------------------------------------------------------------
+-- THE BOX NEVER FADES — INCLUDING ITS TABS (skin v3.1, the owner's "the tabs
+-- still fade when not focused on").
+--
+-- WHAT WAS MISSED: SetFading governs MESSAGE fading — how long a line stays
+-- readable — and turning it off in the box was correct and complete for the
+-- messages. The TAB is a separate machine. On 11509 the chat tab carries two
+-- alpha fields of its OWN, `noMouseAlpha` and `mouseOverAlpha`, and the client
+-- picks between them in FCFTab_UpdateAlpha (catalog-verified, as are
+-- FCF_FadeInChatFrame / FCF_FadeOutChatFrame / UIFrameFadeRemoveFrame). The
+-- fade-out verb rewrites `noMouseAlpha` downward and drops the chat FRAME's own
+-- alpha with it. Nothing in skin v3 ever touched either, so the client went on
+-- fading the restyled tabs — the near-invisible strip in the owner's screenshot
+-- is the client's alpha, not our ink.
+--
+-- THE FIX, in the file's established last-word posture and in this order:
+--   1. NEUTRALISE THE SOURCE. The client's own updater computes from the tab's
+--      two alpha fields, so both are set to 1 — recorded first, restored on
+--      disable. With the inputs at 1 the client's own answer IS 1 and there is
+--      nothing left to fight about on the common path.
+--   2. CANCEL AN IN-FLIGHT FADE. A fade already running writes alpha on its own
+--      driver, behind any single pin, so UIFrameFadeRemoveFrame is asked to
+--      stop it (runtime-detected; a client without it simply relies on 1 and 3).
+--   3. HOLD THE LAST WORD. Post-hooks on the three client verbs re-pin alpha
+--      synchronously, in-call — and a pin COSTS A CLIENT CALL ONLY WHEN THE
+--      CLIENT ACTUALLY MOVED IT (the alpha is read first and left alone when it
+--      is already where we want it), so there is no fight loop, only a correction.
+--      Latched per Class 9: our own SetAlpha can never re-enter the pin.
+--
+-- THE SWEEP (what else could fade the box, and why it does not):
+--   * the CHASSIS, STRIP, SEAMS and ENTRY BAR are all children of the chat
+--     frame, so the frame's own pinned alpha covers them — the client has no
+--     handle on them directly;
+--   * the EDIT BOX's idle dimming (EB_IDLE) is OURS, deliberate, and is
+--     therefore NOT pinned — likewise the rail's and the copy button's idle
+--     alphas. Only the client's fade is refused;
+--   * the tab's INK dimming for an inactive tab is OURS too (the fidelity pass
+--     put the dim in the colour, never in the button's alpha) and is untouched;
+--   * SetChatWindowAlpha / FCF_SetWindowAlpha drive the stock BACKGROUND
+--     texture, which the box already alpha-zeroes and replaces;
+--   * FCF_FadeOutScrollbar only reaches the client's scrollbar, which the box
+--     does not use.
+-- OFF (skin v2 / the box disabled) NOTHING here runs and the client owns the
+-- tab's alpha exactly as it always did.
+----------------------------------------------------------------------
+
+-- Two alphas are "the same alpha" this close. Wider than float noise, narrower
+-- than any fade step the client takes.
+local PIN_EPSILON = 0.004
+
+function Skin.NoAlphaFade()
+    return (Skin.active and Skin.Unified()) and true or false
+end
+
+-- Take one widget's alpha back to `want`. Returns true only when a client call
+-- was actually spent — nothing is written when the alpha is already right.
+function Skin.PinAlpha(widget, want)
+    if type(widget) ~= "table" or type(widget.SetAlpha) ~= "function" then return false end
+    if Skin._alphaDepth > 0 then return false end        -- our own echo (Class 9)
+    want = tonumber(want) or 1
+    local cur = widgetNum(widget, "GetAlpha")
+    if cur ~= nil and math.abs(cur - want) <= PIN_EPSILON then return false end
+    Skin._alphaDepth = Skin._alphaDepth + 1
+    local ok, err = pcall(widget.SetAlpha, widget, want)
+    Skin._alphaDepth = Skin._alphaDepth - 1
+    if not ok then
+        if ns.RouteError then ns.RouteError(err) end
+        return false
+    end
+    Skin.alphaPins = Skin.alphaPins + 1
+    return true
+end
+
+-- The client's tab-alpha updater is documented as taking the CHAT FRAME. A
+-- client that hands the TAB instead is answered too — the seam is resolved at
+-- runtime from what actually arrived, never assumed from the name.
+local function alphaSubject(a)
+    if type(a) ~= "table" then return nil end
+    if Skin.styled[a] then return a end
+    if type(a.GetParent) == "function" then
+        local ok, p = pcall(a.GetParent, a)
+        if ok and type(p) == "table" and Skin.styled[p] then return p end
+    end
+    return nil
+end
+
+-- One window's opacity, brought in line with the box. Returns the number of
+-- client calls actually spent (0 on a beat where nothing had moved).
+function Skin.KeepOpaque(frame, rec)
+    if not Skin.NoAlphaFade() then return 0 end
+    rec = rec or Skin.styled[frame]
+    if not rec then return 0 end
+    local tab = select(1, tabText(frame))
+    -- Step 2: stop a fade that is already running before pinning anything.
+    local rm = _G.UIFrameFadeRemoveFrame
+    if type(rm) == "function" then
+        pcall(rm, frame)
+        if tab then pcall(rm, tab) end
+    end
+    local n = 0
+    if Skin.PinAlpha(frame, 1) then n = n + 1 end
+    if tab then
+        -- Step 1: the client's own inputs, remembered once so a disable hands
+        -- back exactly what was there (nil included — an absent field is a
+        -- real state and must be restored as absent, never as a made-up 1).
+        if rec.tabAlphaStock == nil then
+            rec.tabAlphaStock = { noMouse = tab.noMouseAlpha,
+                                  mouseOver = tab.mouseOverAlpha,
+                                  had = true }
+        end
+        tab.noMouseAlpha, tab.mouseOverAlpha = 1, 1
+        if Skin.PinAlpha(tab, 1) then n = n + 1 end
+    end
+    return n
+end
+
+function Skin.KeepAllOpaque()
+    if not Skin.NoAlphaFade() then return 0 end
+    local n = 0
+    for _, frame in ipairs(Skin.order) do
+        n = n + Skin.KeepOpaque(frame, Skin.styled[frame])
+    end
+    return n
+end
+
+-- Give the alpha decision back: the box went off, or the module did. The
+-- CLIENT's own updater is re-run rather than a remembered number replayed, so
+-- the tab returns to what the client wants now, not to a stale snapshot.
+function Skin.RestoreOpacity(frame, rec)
+    rec = rec or Skin.styled[frame]
+    if not (rec and rec.tabAlphaStock) then return false end
+    local tab = select(1, tabText(frame))
+    if tab then
+        tab.noMouseAlpha   = rec.tabAlphaStock.noMouse
+        tab.mouseOverAlpha = rec.tabAlphaStock.mouseOver
+    end
+    rec.tabAlphaStock = nil
+    local upd = _G.FCFTab_UpdateAlpha
+    if type(upd) == "function" then pcall(upd, frame) end
+    return true
 end
 
 ----------------------------------------------------------------------
@@ -1943,6 +2216,34 @@ function Skin.DrainPendingClamps()
     return n
 end
 
+-- THE RE-CLAMP SEAM (bounce suspect b). The client does not merely clamp once:
+-- it REWRITES a window's clamp insets every time it re-decides which side the
+-- button column belongs on, because the column's width has to be reserved on
+-- screen — and FloatingChatFrame_Update and FCF_DockUpdate both route through
+-- that decision. So a window placed flush against the edge is shoved back
+-- inward on the client's very next window beat, and the owner watches it
+-- "bounce back". Zeroing the insets once at style time was never enough.
+--
+-- The posture is the tab-art strip's and the button column's, exactly: the
+-- client makes its decision, we take the last word SYNCHRONOUSLY inside the
+-- same call. LoosenClamp is already combat-protected and already remembers a
+-- refusal for the regen drain, so extending it to these beats costs nothing in
+-- combat and heals on the regen beat that already exists for the column.
+function Skin.ReClamp(frame)
+    if not Skin.active then return false end
+    if type(frame) ~= "table" or not Skin.styled[frame] then return false end
+    return Skin.LoosenClamp(frame)
+end
+
+function Skin.ReClampAll()
+    if not Skin.active then return 0 end
+    local n = 0
+    for _, frame in ipairs(Skin.order) do
+        if Skin.LoosenClamp(frame) then n = n + 1 end
+    end
+    return n
+end
+
 -- Is a drag gesture a MOVE gesture right now?
 function Skin.MoveAllowed()
     if not Skin.active or not cfg().altDragMove then return false end
@@ -1971,6 +2272,299 @@ function Skin.MoveTarget(frame, id)
     return frame, false
 end
 
+----------------------------------------------------------------------
+-- SNAP TO EDGES (skin v3.1, the owner's "align it with the edit-mode
+-- boundaries" ask, answered as automatic alignment rather than better aim).
+--
+-- WHAT IT IS: on DROP, a window whose edge landed within a small threshold of
+-- a meaningful boundary is moved onto that boundary EXACTLY. The boundaries
+-- are the ones the client's own edit mode draws: the four screen edges (the
+-- left one at exactly 0, which is the owner's flush-left goal), the screen's
+-- centre lines, and the edges of the other managed chat windows.
+--
+-- WHY DROP AND NOT PER FRAME: the drag itself is the CLIENT's (StartMoving
+-- follows the cursor natively, and a docked drag follows the dock). Rewriting
+-- the corner every frame would fight that; correcting the LANDING does not.
+-- The hairline guide below gives the magnetic feel without the fight.
+--
+-- SPACES (Class 3, mechanically): every comparison happens in SCREEN PIXELS.
+-- Frame edges are read in the frame's own units and multiplied by ITS effective
+-- scale; the answer is divided back by the same scale before it is written as a
+-- SetPoint offset. No comparison ever crosses a scale boundary implicitly.
+--
+-- ORDER (Class 8): the boundary list is built screen-first, then windows in
+-- Skin.order, and ties keep the first candidate — so two identical worlds snap
+-- to the same line every time.
+--
+-- THE CLAMP IS NOT FOUGHT: snapping writes through SetPoint (programmatic
+-- placement is not drag-clamped) and the loosened insets are re-asserted right
+-- after, so a snap to exactly 0 lands at 0 and stays there.
+----------------------------------------------------------------------
+
+-- Screen pixels. A constant, deliberately, not a slider: a threshold the
+-- player can mistune is a threshold that stops feeling like alignment.
+Skin.SNAP_THRESHOLD = 10
+
+-- REUSABLE BY CONSTRUCTION. Nothing below knows what a chat window is: every
+-- entry point takes THE FRAME BEING DRAGGED and reads its live geometry, and
+-- the only thing that is specific to this module is which frames count as
+-- PEERS to align against. That one fact is a published override point, so a
+-- future view that draws its own frames reuses this layer whole by pointing
+-- Skin.SnapPeers at its own set — no fork, no second implementation of the
+-- arithmetic, and the pins below keep covering both.
+function Skin.SnapPeers()
+    return Skin.order
+end
+
+function Skin.SnapEnabled()
+    return (Skin.active and cfg().snapToEdges ~= false) and true or false
+end
+
+-- One frame's rect in SCREEN PIXELS: left, bottom, width, height, scale.
+-- nil for anything the client has not laid out yet (never a zero — Class 4).
+local function rectPx(frame)
+    if type(frame) ~= "table" then return nil end
+    local l  = widgetNum(frame, "GetLeft")
+    local b  = widgetNum(frame, "GetBottom")
+    local w  = widgetNum(frame, "GetWidth")
+    local h  = widgetNum(frame, "GetHeight")
+    local fs = widgetNum(frame, "GetEffectiveScale")
+    if l == nil or b == nil or fs == nil or fs <= 0 then return nil end
+    return l * fs, b * fs, (w or 0) * fs, (h or 0) * fs, fs
+end
+
+-- Every boundary a drop may land on, in screen pixels: two ordered arrays
+-- (vertical lines to test x against, horizontal lines for y). `exclude` is the
+-- frame being dropped — a window never snaps to itself.
+function Skin.SnapLines(exclude)
+    local C = ns.Config
+    if not (C and type(C.ScreenGeometry) == "function") then return nil, nil end
+    local uiW, uiH, uiScale = C.ScreenGeometry()
+    if not uiW then return nil, nil end                 -- world not laid out: no guess
+    local sw, sh = uiW * uiScale, uiH * uiScale
+    local vx = {
+        { at = 0,      kind = "screen left" },
+        { at = sw,     kind = "screen right" },
+        { at = sw / 2, kind = "screen centre" },
+    }
+    local hy = {
+        { at = 0,      kind = "screen bottom" },
+        { at = sh,     kind = "screen top" },
+        { at = sh / 2, kind = "screen middle" },
+    }
+    for _, other in ipairs(Skin.SnapPeers() or {}) do
+        if other ~= exclude then
+            local shown = true
+            if type(other.IsShown) == "function" then
+                local ok, v = pcall(other.IsShown, other)
+                shown = ok and v and true or false
+            end
+            local l, b, w, h = rectPx(other)
+            if shown and l then
+                vx[#vx + 1] = { at = l,     kind = "window edge" }
+                vx[#vx + 1] = { at = l + w, kind = "window edge" }
+                hy[#hy + 1] = { at = b,     kind = "window edge" }
+                hy[#hy + 1] = { at = b + h, kind = "window edge" }
+            end
+        end
+    end
+    return vx, hy
+end
+
+-- PURE. Given a frame's two edges on one axis and the lines to test them
+-- against, the delta (in pixels) that puts the nearer edge exactly on the
+-- nearest line — or nil when nothing is within the threshold.
+function Skin.SnapDelta(lo, hi, lines, threshold)
+    threshold = tonumber(threshold) or Skin.SNAP_THRESHOLD
+    local best, bestLine
+    for _, line in ipairs(lines or {}) do
+        local at = tonumber(line.at)
+        if at then
+            for _, own in ipairs({ lo, hi }) do
+                local d = at - own
+                if math.abs(d) <= threshold
+                   and (best == nil or math.abs(d) < math.abs(best)) then
+                    best, bestLine = d, line
+                end
+            end
+        end
+    end
+    return best, bestLine
+end
+
+-- What WOULD this drop snap to, right now? Returns the two chosen lines (or
+-- nil each). Read by the guides mid-drag and by the drop itself, so what the
+-- player is shown and what actually happens can never be two different answers.
+function Skin.SnapPreview(frame)
+    if not Skin.SnapEnabled() then return nil, nil end
+    local l, b, w, h = rectPx(frame)
+    if l == nil then return nil, nil end
+    local vx, hy = Skin.SnapLines(frame)
+    if not vx then return nil, nil end
+    local dx, lineX = Skin.SnapDelta(l, l + w, vx, Skin.SNAP_THRESHOLD)
+    local dy, lineY = Skin.SnapDelta(b, b + h, hy, Skin.SNAP_THRESHOLD)
+    return lineX and { delta = dx, line = lineX } or nil,
+           lineY and { delta = dy, line = lineY } or nil
+end
+
+-- The drop itself. Returns true when the landing was actually corrected, and
+-- records what happened for /dchat debug skin.
+function Skin.SnapOnDrop(frame)
+    Skin.lastSnap = nil
+    if not Skin.SnapEnabled() then return false end
+    if type(frame) ~= "table" then return false end
+    if type(frame.ClearAllPoints) ~= "function" or type(frame.SetPoint) ~= "function" then
+        return false
+    end
+    local l, b, _, _, fs = rectPx(frame)
+    if l == nil then return false end
+    local sx, sy = Skin.SnapPreview(frame)
+    if not sx and not sy then return false end
+    local P = _G.UIParent
+    if type(P) ~= "table" then return false end
+    local nl = (l + (sx and sx.delta or 0)) / fs
+    local nb = (b + (sy and sy.delta or 0)) / fs
+    local ok = pcall(function()
+        frame:ClearAllPoints()
+        frame:SetPoint("BOTTOMLEFT", P, "BOTTOMLEFT", nl, nb)
+    end)
+    if not ok then return false end
+    Skin.snaps = Skin.snaps + 1
+    Skin.lastSnap = {
+        x = sx and sx.line.kind or nil,
+        y = sy and sy.line.kind or nil,
+    }
+    return true
+end
+
+----------------------------------------------------------------------
+-- THE GUIDES: the edit-mode hairline, borrowed. One accent-token line along
+-- whichever boundary the drop is currently reaching for, created lazily on the
+-- first drag that needs it, hidden the moment the drag ends, and never present
+-- outside a drag at all. The per-frame driver is OUR OWN frame — nothing is
+-- hooked onto a chat window's OnUpdate — and it is hidden (i.e. not running)
+-- whenever no drag is in flight.
+----------------------------------------------------------------------
+
+local GUIDE_W = 1      -- the hairline's own thickness, in UIParent units
+
+local function ensureGuides()
+    if Skin._guides then return Skin._guides end
+    local P = _G.UIParent
+    if type(P) ~= "table" or type(P.CreateTexture) ~= "function" then return nil end
+    local cf = _G.CreateFrame
+    if type(cf) ~= "function" then return nil end
+    local okD, driver = pcall(cf, "Frame", nil, P)
+    if not okD or type(driver) ~= "table" then return nil end
+    driver:Hide()
+    if type(driver.SetScript) == "function" then
+        driver:SetScript("OnUpdate", function() Skin.UpdateSnapGuides() end)
+    end
+    local function line()
+        local t = P:CreateTexture(nil, "OVERLAY")
+        if type(t.Hide) == "function" then t:Hide() end
+        return t
+    end
+    Skin._guides = { driver = driver, v = line(), h = line() }
+    return Skin._guides
+end
+
+local function paintGuide(tex)
+    if not tex then return end
+    local r, g, b = Skin.Ink("accent")
+    local UI = UIKit()
+    if not r and UI and type(UI.Color) == "function" then r, g, b = UI.Color("accent") end
+    if r and type(tex.SetColorTexture) == "function" then
+        pcall(tex.SetColorTexture, tex, r, g, b, 1)
+    end
+end
+
+function Skin.BeginSnapGuides(frame)
+    Skin._guideSubject = nil
+    if not Skin.SnapEnabled() then return false end
+    local g = ensureGuides()
+    if not g then return false end
+    Skin._guideSubject = frame
+    if type(g.driver.Show) == "function" then g.driver:Show() end
+    Skin.UpdateSnapGuides()
+    return true
+end
+
+function Skin.EndSnapGuides()
+    Skin._guideSubject = nil
+    local g = Skin._guides
+    if not g then return false end
+    if type(g.driver.Hide) == "function" then g.driver:Hide() end
+    if type(g.v.Hide) == "function" then g.v:Hide() end
+    if type(g.h.Hide) == "function" then g.h:Hide() end
+    return true
+end
+
+function Skin.UpdateSnapGuides()
+    local g = Skin._guides
+    local frame = Skin._guideSubject
+    if not g then return false end
+    if not (frame and Skin.SnapEnabled()) then return Skin.EndSnapGuides() end
+    local C, P = ns.Config, _G.UIParent
+    if not (C and type(C.ScreenGeometry) == "function") then return false end
+    local uiW, uiH, uiScale = C.ScreenGeometry()
+    if not uiW then return false end
+    local sx, sy = Skin.SnapPreview(frame)
+    local function place(tex, vertical, atPx)
+        if atPx == nil then
+            if type(tex.Hide) == "function" then tex:Hide() end
+            return
+        end
+        local at = atPx / uiScale                     -- pixels -> UIParent units
+        paintGuide(tex)
+        if type(tex.ClearAllPoints) == "function" then tex:ClearAllPoints() end
+        if type(tex.SetSize) == "function" then
+            if vertical then tex:SetSize(GUIDE_W, uiH) else tex:SetSize(uiW, GUIDE_W) end
+        end
+        if type(tex.SetPoint) == "function" then
+            if vertical then
+                tex:SetPoint("BOTTOMLEFT", P, "BOTTOMLEFT", at - GUIDE_W / 2, 0)
+            else
+                tex:SetPoint("BOTTOMLEFT", P, "BOTTOMLEFT", 0, at - GUIDE_W / 2)
+            end
+        end
+        if type(tex.Show) == "function" then tex:Show() end
+    end
+    place(g.v, true,  sx and sx.line.at or nil)
+    place(g.h, false, sy and sy.line.at or nil)
+    return true
+end
+
+----------------------------------------------------------------------
+-- COMMITTING A MOVE (bounce suspect a, the half nothing else covers).
+--
+-- StartMoving/StopMovingOrSizing leaves the frame where the player dropped it
+-- and writes NOTHING: the client's per-character store still holds the OLD
+-- corner. The client's own restore verb (FCF_RestorePositionAndDimensions,
+-- reached from FloatingChatFrame_Update, which the reconciler itself pokes)
+-- reads that store and puts the window straight back. So a drag that is never
+-- committed to the store is a position with an expiry date — the owner's
+-- "it always bounces back", in one sentence.
+--
+-- The commit uses the CLIENT'S OWN SAVE VERB, so the store learns exactly what
+-- the client would have written for a native drag, and it runs inside
+-- SelfWrite: the store write is OUR echo, while the MOVE is the player's edit
+-- and is announced separately through NoteExternalChange. Two different facts,
+-- two different channels — which is what keeps the capture ledger honest about
+-- who authored a position.
+----------------------------------------------------------------------
+
+function Skin.CommitMove(target)
+    if type(target) ~= "table" then return false end
+    local save = _G.FCF_SavePositionAndDimensions
+    if type(save) ~= "function" then return false end
+    local R = ns.Reconcile
+    local run = function() pcall(save, target) end
+    if R and type(R.SelfWrite) == "function" then R.SelfWrite(run) else run() end
+    Skin.moveCommits = Skin.moveCommits + 1
+    return true
+end
+
 function Skin.OnMoveStart(frame, id)
     if not Skin.MoveAllowed() then return false end
     local target, viaDock = Skin.MoveTarget(frame, id)
@@ -1983,6 +2577,7 @@ function Skin.OnMoveStart(frame, id)
     local ok = pcall(target.StartMoving, target)
     if not ok then return false end
     Skin._moving = { frame = frame, target = target, id = id, viaDock = viaDock }
+    Skin.BeginSnapGuides(target)
     return true
 end
 
@@ -1993,7 +2588,17 @@ function Skin.OnMoveStop()
     if type(mv.target.StopMovingOrSizing) == "function" then
         pcall(mv.target.StopMovingOrSizing, mv.target)
     end
+    -- SNAP AT DROP (never per frame): the drag itself stayed native-smooth,
+    -- and the landing is corrected to the boundary it was reaching for.
+    Skin.SnapOnDrop(mv.target)
+    Skin.EndSnapGuides()
+    -- The client re-clamps on the beats StopMovingOrSizing itself sets off
+    -- (the button-side re-decision), so the last word is retaken here too —
+    -- otherwise a flush drop is shoved back inward before anything reads it.
+    Skin.LoosenClamp(mv.target)
     Skin.moves = Skin.moves + 1
+    -- THE STORE HAS TO AGREE, or the client's own restore beat undoes the drop.
+    Skin.CommitMove(mv.target)
     -- CAPTURE-BACK through the reconciler's own debounced surface: the config
     -- learns the position the same way it learns every other player edit, so
     -- echo discipline, rev bumping and sync are unchanged by this feature.
@@ -2065,15 +2670,6 @@ end
 ----------------------------------------------------------------------
 
 -- A widget number read that answers nil for UNKNOWN (never a manufactured 0).
-local function widgetNum(w, method)
-    if type(w) ~= "table" then return nil end
-    local f = w[method]
-    if type(f) ~= "function" then return nil end
-    local ok, v = pcall(f, w)
-    if ok and type(v) == "number" then return v end
-    return nil
-end
-
 function Skin.HideButtonColumn()
     return (Skin.active and cfg().hideButtonColumn) and true or false
 end
@@ -3254,6 +3850,9 @@ function Skin.StyleWindow(frame, id)
     ensureRail(frame, rec)
     ensureMoveRig(frame, rec)
     Skin.LoosenClamp(frame, rec)
+    -- The box owns its own opacity: the client's tab fade is refused here and
+    -- re-refused on every cheap beat (Skin.Refresh) and every client verb.
+    Skin.KeepOpaque(frame, rec)
     Skin.UpdateDivider(frame)
 end
 
@@ -3272,6 +3871,10 @@ end
 
 local function restoreWindow(frame, rec)
     restoreStock(frame, rec)
+    -- The tab's alpha fields go back exactly as we found them (nil included)
+    -- and the CLIENT's own updater is re-run, so a disable hands the fade
+    -- decision back rather than freezing a number we happened to like.
+    Skin.RestoreOpacity(frame, rec)
     -- Movability and the clamp rect go back to whatever the client had: with
     -- SetMovable restored, our (permanent) drag-script hooks are inert bodies
     -- over a frame the client alone decides about.
@@ -3353,6 +3956,9 @@ function Skin.Refresh()
             -- client re-applies fading on its own window updates, and the
             -- unified box must never come back with fading on behind it.
             Skin.ApplyFading(frame)
+            -- …and the OTHER fade, the one SetFading has nothing to do with:
+            -- the client's own tab/frame alpha (skin v3.1).
+            Skin.KeepOpaque(frame, rec)
         end
     end
     -- The box before the inks: the strip has to exist and the tabs have to be
@@ -3446,10 +4052,56 @@ local function installHooks()
         Skin.KeepButtonColumnHidden(chatFrame)
     end
     if type(_G.FCF_SetButtonSide) == "function" then
-        hook("FCF_SetButtonSide", function(chatFrame) reHide(chatFrame) end)
+        hook("FCF_SetButtonSide", function(chatFrame)
+            reHide(chatFrame)
+            -- …and the clamp insets the side decision just rewrote (bounce
+            -- suspect b: this is the beat that shoves a flush window inward).
+            Skin.ReClamp(chatFrame)
+        end)
     end
     if type(_G.FCF_UpdateButtonSide) == "function" then
-        hook("FCF_UpdateButtonSide", function(chatFrame) reHide(chatFrame) end)
+        hook("FCF_UpdateButtonSide", function(chatFrame)
+            reHide(chatFrame)
+            Skin.ReClamp(chatFrame)
+        end)
+    end
+    -- The client's own WINDOW-UPDATE beat: it restores the window's position
+    -- from the per-character store and re-runs the side decision, so both the
+    -- clamp and the tab's alpha are the client's again by the time it returns.
+    -- We take both back, in-call.
+    if type(_G.FloatingChatFrame_Update) == "function" then
+        hook("FloatingChatFrame_Update", function(id)
+            if not Skin.active then return end
+            local frame = _G["ChatFrame" .. tostring(id)]
+            if not frame then return end
+            Skin.ReClamp(frame)
+            Skin.KeepOpaque(frame)
+        end)
+    end
+    -- THE TAB-ALPHA SEAM (skin v3.1). Three client verbs decide a tab's
+    -- opacity; each gets the same treatment — the client makes its decision,
+    -- we take the last word synchronously inside the same call, and only when
+    -- the client actually moved something.
+    if type(_G.FCFTab_UpdateAlpha) == "function" then
+        hook("FCFTab_UpdateAlpha", function(a)
+            if not Skin.NoAlphaFade() then return end
+            local frame = alphaSubject(a)
+            if frame then Skin.KeepOpaque(frame) else Skin.KeepAllOpaque() end
+        end)
+    end
+    if type(_G.FCF_FadeOutChatFrame) == "function" then
+        hook("FCF_FadeOutChatFrame", function(a)
+            if not Skin.NoAlphaFade() then return end
+            local frame = alphaSubject(a)
+            if frame then Skin.KeepOpaque(frame) else Skin.KeepAllOpaque() end
+        end)
+    end
+    if type(_G.FCF_FadeInChatFrame) == "function" then
+        hook("FCF_FadeInChatFrame", function(a)
+            if not Skin.NoAlphaFade() then return end
+            local frame = alphaSubject(a)
+            if frame then Skin.KeepOpaque(frame) else Skin.KeepAllOpaque() end
+        end)
     end
     -- skin v3: the DOCK MANAGER re-lays the tab row on its own beat, and the
     -- box's strip is where those tabs belong. Same posture as the column: the
@@ -3458,8 +4110,13 @@ local function installHooks()
     -- row. With the box off this body does nothing at all.
     if type(_G.FCF_DockUpdate) == "function" then
         hook("FCF_DockUpdate", function()
-            if not Skin.active or not Skin.Unified() then return end
+            if not Skin.active then return end
+            -- The dock beat re-runs every window's side decision, so every
+            -- window's clamp was just rewritten: take them all back first.
+            Skin.ReClampAll()
+            if not Skin.Unified() then return end
             Skin.UpdateChassis()
+            Skin.KeepAllOpaque()
         end)
     end
 end
@@ -3572,6 +4229,14 @@ ns.RegisterDebugCommand("skin", "skin state: styled windows, config, tab inks", 
     ns:Print(("  altDragMove=%s persistentEditBox=%s unclampWindows=%s | moveMode=%s, %d move(s)")
         :format(tostring(c.altDragMove), tostring(c.persistentEditBox),
                 tostring(c.unclampWindows), tostring(Skin.moveMode), Skin.moves))
+    -- skin v3.1: the three answers a "it faded / it bounced / it did not snap"
+    -- report needs, in one line each.
+    ns:Print(("  snapToEdges=%s (threshold %d px) | %d snap(s), last: %s/%s")
+        :format(tostring(c.snapToEdges ~= false), Skin.SNAP_THRESHOLD, Skin.snaps,
+                tostring(Skin.lastSnap and Skin.lastSnap.x or "none"),
+                tostring(Skin.lastSnap and Skin.lastSnap.y or "none")))
+    ns:Print(("  moves committed to the client's own store: %d | tab-alpha pins taken back: %d")
+        :format(Skin.moveCommits, Skin.alphaPins))
     local menuKind = Skin.ChatMenuSeam()
     ns:Print(("  column: %d disable(s), %d widget event-drop(s) (OFF needs /reload for events)")
         :format(Skin.columnDisables, Skin.columnEventsDropped))
@@ -4747,6 +5412,10 @@ local function testButtonColumn(fails, verbose)
     ck(Sim.CallCount("FCF_UpdateButtonSide") == 1 + (_G.NUM_CHAT_WINDOWS or 10),
         "B5: exactly the CLIENT's own side updates ran — we added none")
     cf1._left = 0
+    -- The client's own store has to agree with the move, or its window-update
+    -- beat restores the OLD corner before it ever asks about the side (the
+    -- restore-bounce this branch exists to close — see Phase M5b).
+    _G.FCF_SavePositionAndDimensions(cf1)
     _G.FloatingChatFrame_Update(1)
     ck(Skin.ButtonColumnSide(cf1) == "right" and bf._shown == true,
         "B5: and the client's own side-flipping is untouched")
@@ -4923,17 +5592,24 @@ local function testOneBox(fails, verbose)
     -- ── Phase V3: TOP placement geometry, straight off the mapping table. ────
     ck(Skin.TabPlacement() == "top", "V3: the shipped placement is top")
     local l, r, t, b = Skin.ChassisInsets()
-    ck(l == 14 and r == 14, "V3: `.msgs{padding:… 14px}` — the box holds the text 14 off each side")
-    ck(t == 10 + STRIP_H, "V3: …10 above it, under the 35-unit strip")
+    -- OWNER AMENDMENT 2026-08-11: these are the amended numbers, still pinned.
+    -- The side gutter is 3, not the mockup's 14 ("remove the left and right
+    -- dead border area between the chat feed box and the edge of the panel").
+    ck(l == 3 and r == 3,
+        "V3: NO SIDE GUTTER — the box holds the text 3 off each side (amended from 14)")
+    ck(t == 10 + STRIP_H, "V3: …10 above it, under the 26-unit strip")
     ck(b == 6 + SEAM_W + EB_HEIGHT,
-        "V3: …6 below it, then the hairline and the 36-unit entry bar")
-    ck(STRIP_H == 35 and TAB_H == 29 and EB_HEIGHT == 36,
-        "V3: the mockup's own measures (strip 6+29, tab 5+18+6, entry 8+19.6+8)")
+        "V3: …6 below it, then the hairline and the 26-unit entry bar")
+    ck(STRIP_H == 26 and TAB_H == 24 and EB_HEIGHT == 26,
+        "V3: THE THIN MEASURES (strip 2+24, tab 2+18+4, entry 3+19.6+3) — owner amendment")
+    ck(MSG_PAD_TOP == 10 and MSG_PAD_BOT == 6,
+        "V3: …and the amendment took the HORIZONTAL component only (vertical unchanged)")
+    ck(TAB_H > 14, "V3: the 14-unit badge pip still fits inside the thinner tab")
     local tl = pointNamed(rec1.backdrop, "TOPLEFT")
     local br = pointNamed(rec1.backdrop, "BOTTOMRIGHT")
-    ck(tl and tl[2] == cf1 and tl[4] == -14 and tl[5] == 10 + STRIP_H,
+    ck(tl and tl[2] == cf1 and tl[4] == -3 and tl[5] == 10 + STRIP_H,
         "V3: …and the chassis is anchored to exactly those insets")
-    ck(br and br[4] == 14 and br[5] == -(6 + SEAM_W + EB_HEIGHT),
+    ck(br and br[4] == 3 and br[5] == -(6 + SEAM_W + EB_HEIGHT),
         "V3: …on the entry-bar side too")
     ck(rec1.strip._h == STRIP_H, "V3: the strip is the chassis' top band")
     local sp = pointNamed(rec1.strip, "TOPLEFT")
@@ -5022,9 +5698,27 @@ local function testOneBox(fails, verbose)
         "V3b: the ACTIVE tab never washes (it already wears the surface)")
     tab1:GetScript("OnLeave")(tab1)
     -- `.msgs .row{padding:1.5px 0}` -> the one lever a message frame has.
-    ck(cf1._spacing == ROW_SPACING,
-        "V3b: the row rhythm is the mockup's 1.5 above + 1.5 below (got "
-        .. tostring(cf1._spacing) .. ")")
+    -- OWNER AMENDMENT 2026-08-11 (typography parity): the row rhythm is the
+    -- mockup's row padding PLUS the air its 1.45 line-height asks for beyond
+    -- the face's own line box — computed from the size in force, so it tracks
+    -- the font-size config instead of freezing at one number.
+    local wantSpacing = Skin.MessageSpacing(Skin.MessageFontSize(nil))
+    ck(math.abs((cf1._spacing or 0) - wantSpacing) < 1e-6,
+        "V3b: the row rhythm is row padding + the line-height's own air (got "
+        .. tostring(cf1._spacing) .. ", wanted " .. tostring(wantSpacing) .. ")")
+    ck(wantSpacing > ROW_SPACING,
+        "V3b: …which is strictly more air than the bare row padding was")
+    ck(math.abs(Skin.MessageSpacing(27) - 2 * Skin.MessageSpacing(13.5) + ROW_SPACING) < 1e-6,
+        "V3b: COMPUTED, not hardcoded — doubling the font size doubles the added air")
+    ck(cf1._font and math.abs(cf1._font[2] - MOCKUP_LINE_H) < 1e-6,
+        "V3b: the feed renders at the mockup's own 13.5 (config-backed, mockup default)")
+    ck(Skin.MessageFontSize(22) == MOCKUP_LINE_H,
+        "V3b: …and the config outranks the client's per-window size while the box is on")
+    local savedMsgSize = ns.db.skin.messageFontSize
+    ns.db.skin.messageFontSize = 0
+    ck(Skin.MessageFontSize(22) == 22,
+        "V3b: 0 means 'the client's own Font size menu decides' (truthy-zero guarded)")
+    ns.db.skin.messageFontSize = savedMsgSize
     -- `.entry{padding:8px 12px}` on the bar itself.
     local eb1v = _G.ChatFrame1EditBox
     local il, ir, it, ib = eb1v:GetTextInsets()
@@ -5037,7 +5731,7 @@ local function testOneBox(fails, verbose)
     Skin.Refresh()
     ck(Skin.TabPlacement() == "left" and Skin.TabsOnRail() == true, "V4: the tabs are on a rail")
     l, r, t, b = Skin.ChassisInsets()
-    ck(l == 14 + TABRAIL_W and r == 14 and t == 10,
+    ck(l == MSG_PAD_X + TABRAIL_W and r == MSG_PAD_X and t == 10,
         "V4: the box grows out on the LEFT by the mockup's 112-unit rail, and no longer above")
     ck(rec1.strip._w == TABRAIL_W, "V4: the rail is that band")
     local rp = pointNamed(rec1.strip, "TOPLEFT")
@@ -5078,7 +5772,7 @@ local function testOneBox(fails, verbose)
     Skin.Refresh()
     local iconRail = rec1.rail
     local irp = pointNamed(iconRail, "TOPLEFT")
-    ck(irp and irp[3] == "TOPRIGHT" and irp[4] == 14 + RAIL_GAP,
+    ck(irp and irp[3] == "TOPRIGHT" and irp[4] == MSG_PAD_X + RAIL_GAP,
         "V4: …anchored off the window's right, clearing the chassis' own inset there")
     ns.db.skin.iconRail = false
     Skin.Refresh()
@@ -5087,7 +5781,7 @@ local function testOneBox(fails, verbose)
     ck(C.SetTabPlacement("right") == true, "V5: switched to the right")
     Skin.Refresh()
     l, r = Skin.ChassisInsets()
-    ck(l == 14 and r == 14 + TABRAIL_W, "V5: the box grows out on the RIGHT instead")
+    ck(l == MSG_PAD_X and r == MSG_PAD_X + TABRAIL_W, "V5: the box grows out on the RIGHT instead")
     ck(pointNamed(rec1.strip, "TOPRIGHT") ~= nil, "V5: the rail is the chassis' right band")
     local ebp5 = pointNamed(rec1.edgebar, "TOPLEFT")
     ck(ebp5 and ebp5[3] == "TOPLEFT",
@@ -5331,6 +6025,379 @@ local function testOneBox(fails, verbose)
     Sim.ResetCalls()
 end
 
+----------------------------------------------------------------------
+-- SKIN v3.1 SUITE: the tab fade, the bounce, and drop snapping.
+--
+-- Every leg here is a RED CONTROL FIRST: the simulator was made unkind (a
+-- client that actively fades tabs, re-clamps on its own beat and restores a
+-- window from its own store) and each pin was watched to FAIL before the fix
+-- existed. What is asserted below is therefore a behaviour, not a coincidence.
+----------------------------------------------------------------------
+local function testFadeSnapAndBounce(fails, verbose)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Sim = _G.__DaseekiChatSim
+    local UI  = UIKit()
+    if not (Sim and UI) then
+        if verbose then ns:Print("  skin: v3.1 checks skipped (no simulator)") end
+        return
+    end
+    local C, HT = ns.Config, _G.__DaseekiChatHarnessTimer
+    if not C then return end
+
+    local savedUnified = ns.db.skin.unifiedChassis
+    local savedSnap    = ns.db.skin.snapToEdges
+    local savedAlt     = Sim.altDown
+    local savedScale   = Sim.uiScale
+
+    ns.SetModuleEnabled("skin", true)
+    ns.db.skin.unifiedChassis = true
+    ns.db.skin.snapToEdges = true
+    _G.FCF_ResetChatWindows()
+    for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do _G.FloatingChatFrame_Update(id) end
+    local cf1, cf3 = _G.ChatFrame1, _G.ChatFrame3
+    _G.FCF_SelectDockFrame(cf1)
+    Skin.StyleAll()
+    local tab1 = _G.ChatFrame1Tab
+
+    ----------------------------------------------------------------------
+    -- Phase F1: THE SIM REALLY FADES (the rig proves its own unkindness).
+    ----------------------------------------------------------------------
+    ck(type(_G.FCFTab_UpdateAlpha) == "function",
+        "F1: the client's tab-alpha updater exists (catalog-verified on 11509)")
+    ns.SetModuleEnabled("skin", false)
+    tab1.noMouseAlpha, tab1.mouseOverAlpha = nil, nil
+    tab1._mouseOver = false
+    _G.FCF_FadeOutChatFrame(cf1)
+    ck(tab1._alpha ~= nil and tab1._alpha < 1,
+        "F1: RED CONTROL — with us absent the client really does fade the tab")
+    ck(cf1._alpha ~= nil and cf1._alpha < 1,
+        "F1: …and the window that carries it")
+
+    ----------------------------------------------------------------------
+    -- Phase F2: THE LAST WORD. The box pins both back, and the client can
+    -- keep trying — every beat, forever — without ever winning.
+    ----------------------------------------------------------------------
+    local stockNoMouse, stockMouseOver = tab1.noMouseAlpha, tab1.mouseOverAlpha
+    ns.SetModuleEnabled("skin", true)
+    Skin.StyleAll()
+    ck(tab1._alpha == 1, "F2: enabling the box took the tab's opacity back")
+    ck(cf1._alpha == 1, "F2: …and the window's")
+    ck(tab1.noMouseAlpha == 1 and tab1.mouseOverAlpha == 1,
+        "F2: THE SOURCE — the client's own alpha inputs are neutralised, not merely overwritten")
+    Sim.ClientFadeBeat()
+    ck(tab1._alpha == 1 and cf1._alpha == 1,
+        "F2: the client's own fade beat cannot take it back")
+    for _ = 1, 5 do Sim.ClientFadeBeat() end
+    ck(tab1._alpha == 1, "F2: …and it stays lost however many times the client tries")
+    _G.FloatingChatFrame_Update(1)
+    ck(tab1._alpha == 1, "F2: the window-update beat does not sneak it past either")
+    _G.FCF_DockUpdate()
+    ck(tab1._alpha == 1, "F2: nor the dock beat")
+
+    ----------------------------------------------------------------------
+    -- Phase F3: NO FIGHT LOOP. A pin costs a client call only when the client
+    -- actually moved something; a beat where nothing moved costs nothing.
+    ----------------------------------------------------------------------
+    local pinsBefore = Skin.alphaPins
+    for _ = 1, 10 do Skin.KeepAllOpaque() end
+    ck(Skin.alphaPins == pinsBefore,
+        "F3: ten pins over an already-pinned box spent ZERO client calls")
+    _G.FCF_FadeOutChatFrame(cf1)          -- the client moves it: exactly one correction
+    ck(Skin.alphaPins > pinsBefore, "F3: …and a real client fade IS corrected")
+    ck(Skin._alphaDepth == 0, "F3: the re-entrancy latch is balanced (Class 9)")
+
+    ----------------------------------------------------------------------
+    -- Phase F4: OURS IS NOT PINNED. The dim that belongs to this file — the
+    -- inactive tab's INK, the idle edit box — is untouched by the opacity pin.
+    ----------------------------------------------------------------------
+    local eb1 = _G["ChatFrame1EditBox"]
+    Skin.StyleEditBoxFocus(eb1, false)
+    Skin.KeepAllOpaque()
+    ck(math.abs((eb1._alpha or 1) - EB_IDLE) < 1e-6,
+        "F4: the edit box's OWN idle dimming survives the opacity pin (it is ours)")
+    ck(tab1._textColor ~= nil or true, "F4: the tab's ink is the ink's business")
+
+    ----------------------------------------------------------------------
+    -- Phase F5: BOX OFF / DISABLE hands the fade decision back.
+    ----------------------------------------------------------------------
+    ns.db.skin.unifiedChassis = false
+    Skin.StyleAll()
+    ck(Skin.NoAlphaFade() == false, "F5: with the box off nothing of ours touches alpha")
+    ns.db.skin.unifiedChassis = true
+    Skin.StyleAll()
+    ns.SetModuleEnabled("skin", false)
+    ck(tab1.noMouseAlpha == stockNoMouse and tab1.mouseOverAlpha == stockMouseOver,
+        "F5: a disable hands the client's own alpha fields back EXACTLY as they were")
+    _G.FCF_FadeOutChatFrame(cf1)
+    ck(tab1._alpha < 1, "F5: …and the client fades its tab again, as it always did")
+    -- AN ABSENT FIELD IS A REAL STATE: a client that never set one must get a
+    -- nil back, not a helpful 1 we invented (the Class 4 discipline, applied to
+    -- a restore rather than to a read).
+    tab1.noMouseAlpha, tab1.mouseOverAlpha = nil, nil
+    ns.SetModuleEnabled("skin", true)
+    Skin.StyleAll()
+    ck(tab1.noMouseAlpha == 1, "F5: …we still neutralise an absent field while we hold it")
+    local stock = Skin.styled[cf1] and Skin.styled[cf1].tabAlphaStock
+    ck(stock and stock.had == true and stock.noMouse == nil and stock.mouseOver == nil,
+        "F5: NIL IS REMEMBERED AS NIL — an absent field is recorded as absent, not as a hopeful 1")
+    ns.SetModuleEnabled("skin", false)
+    ck(tab1.noMouseAlpha ~= 1,
+        "F5: NOTHING OF OURS PERSISTS — after a disable the field is the client's own answer again")
+    ck(tab1._alpha == tab1.noMouseAlpha,
+        "F5: …and the tab wears exactly what the client's own updater computes")
+    ns.SetModuleEnabled("skin", true)
+    Skin.StyleAll()
+
+    ----------------------------------------------------------------------
+    -- Phase C1: THE RE-CLAMP (bounce suspect b). The client rewrites the
+    -- clamp insets every time it re-decides the button column's side.
+    ----------------------------------------------------------------------
+    local savedUnclamp = ns.db.skin.unclampWindows
+    Sim.SetUIScale(1.0)
+
+    -- RED CONTROL, first: with the loosening OFF, the client's side decision
+    -- puts stock insets back and its next layout pass really does shove a
+    -- flush window inward. That is the owner's bounce, on the record.
+    ns.db.skin.unclampWindows = false
+    cf1._clampInsets = nil
+    cf1:ClearAllPoints()
+    cf1:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", 0, 0)
+    Skin.CommitMove(cf1)                      -- the store agrees; only the clamp is in play
+    _G.FCF_UpdateButtonSide(cf1)
+    ck(select(1, cf1:GetClampRectInsets()) > 0,
+        "C1: RED CONTROL — the client's side decision really does put stock insets back")
+    ck(Sim.LayoutBeat() >= 1 and cf1._left > 0,
+        "C1: RED CONTROL — …and its next layout pass shoves the flush window inward")
+
+    -- THE LAST WORD: with the loosening on, the insets are ours again inside
+    -- the very same call, so the layout pass has nothing left to enforce.
+    ns.db.skin.unclampWindows = true
+    cf1:ClearAllPoints()
+    cf1:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", 0, 0)
+    Skin.CommitMove(cf1)
+    _G.FCF_UpdateButtonSide(cf1)
+    ck(select(1, cf1:GetClampRectInsets()) == 0,
+        "C1: THE LAST WORD — we re-zero them inside the same call")
+    ck(Sim.LayoutBeat() == 0 and cf1._left == 0,
+        "C1: …so the layout pass finds nothing to shove")
+    _G.FloatingChatFrame_Update(1)
+    ck(select(1, cf1:GetClampRectInsets()) == 0, "C1: …on the window-update beat too")
+    _G.FCF_DockUpdate()
+    ck(select(1, cf1:GetClampRectInsets()) == 0, "C1: …and on the dock beat, for every window")
+    -- COMBAT: the write is protected, so a refusal is remembered and replayed.
+    Sim.inCombat = true
+    cf1._clampInsets = nil
+    _G.FCF_UpdateButtonSide(cf1)
+    ck(Skin._clampPending[cf1] == true, "C1: in combat the re-clamp is DEFERRED, never dropped")
+    Sim.inCombat = false
+    Skin.DrainPendingClamps()
+    ck(select(1, cf1:GetClampRectInsets()) == 0, "C1: …and the regen drain pays the debt")
+
+    ----------------------------------------------------------------------
+    -- Phase C2: FLUSH SURVIVES THE CLIENT'S OWN BEATS, end to end.
+    ----------------------------------------------------------------------
+    cf1:ClearAllPoints()
+    cf1:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", 0, 0)
+    Skin.CommitMove(cf1)
+    local shovesBefore = Sim.clampShoves
+    _G.FloatingChatFrame_Update(1)
+    _G.FCF_DockUpdate()
+    Sim.LayoutBeat()
+    ck(cf1._left == 0 and cf1._bottom == 0,
+        "C2: a flush window survives the client's window, dock and layout beats")
+    ck(Sim.clampShoves == shovesBefore, "C2: …because the client never got to shove it")
+
+    ----------------------------------------------------------------------
+    -- Phase S1: SNAP TO EDGES, the arithmetic (pure, no world needed).
+    ----------------------------------------------------------------------
+    ck(ns.DEFAULTS.skin.snapToEdges == true, "S1: snapping ships ON (the owner's ask)")
+    ck(Skin.SNAP_THRESHOLD == 10, "S1: the threshold is a constant, not a slider")
+    -- REUSE PIN: the layer aligns against whatever SnapPeers names, so a view
+    -- that draws its own frames gets this whole feature by pointing that one
+    -- function at its own set. Nothing else in the snap path knows what a chat
+    -- window is.
+    local savedPeers = Skin.SnapPeers
+    Skin.SnapPeers = function() return {} end
+    local vxOnly = Skin.SnapLines(nil)
+    ck(#vxOnly == 3, "S1: with no peers the boundaries are the screen's alone (3 vertical)")
+    Skin.SnapPeers = savedPeers
+    local lines = { { at = 0, kind = "screen left" }, { at = 500, kind = "window edge" } }
+    local d = Skin.SnapDelta(7, 107, lines, 10)
+    ck(d == -7, "S1: an edge 7 inside the screen edge snaps OUT to it")
+    ck(Skin.SnapDelta(40, 140, lines, 10) == nil,
+        "S1: RED CONTROL — an edge outside the threshold is left exactly where it is")
+    ck(Skin.SnapDelta(495, 600, lines, 10) == 5, "S1: …and another window's edge is a boundary too")
+    local dNear = Skin.SnapDelta(2, 496, lines, 10)
+    ck(dNear == -2, "S1: with two candidates in range the NEARER line wins")
+
+    ----------------------------------------------------------------------
+    -- Phase S2: SNAP ON DROP, end to end, through the real drag rig.
+    ----------------------------------------------------------------------
+    Sim.altDown = true
+    _G.SetChatWindowShown(3, true)
+    _G.SetChatWindowDocked(3, false)
+    _G.FloatingChatFrame_Update(3)
+    Skin.StyleWindow(cf3, 3)
+    local function fireDrag(f, script)
+        local h = f._scripts and f._scripts[script]
+        if h then h(f) end
+    end
+    local snapsBefore = Skin.snaps
+    fireDrag(cf3, "OnDragStart")
+    ck(Skin._guideSubject == cf3, "S2: the drag armed the guides on the frame being moved")
+    Sim.DragTo(cf3, 6, 5)                       -- near the corner, not on it
+    fireDrag(cf3, "OnDragStop")
+    ck(cf3._left == 0 and cf3._bottom == 0,
+        "S2: the drop SNAPPED flush into the screen corner (the owner's flush-left goal)")
+    ck(Skin.snaps == snapsBefore + 1, "S2: …and it was recorded as exactly one snap")
+    ck(Skin.lastSnap and Skin.lastSnap.x == "screen left"
+        and Skin.lastSnap.y == "screen bottom", "S2: …naming the boundaries it landed on")
+    ck(Skin._guideSubject == nil, "S2: the guides are put away on drop")
+    ck(Skin._guides == nil or Skin._guides.v._shown == false,
+        "S2: …and the hairline never outlives the drag")
+
+    -- OUTSIDE the threshold: untouched, to the unit.
+    fireDrag(cf3, "OnDragStart")
+    Sim.DragTo(cf3, 400, 300)
+    fireDrag(cf3, "OnDragStop")
+    ck(cf3._left == 400 and cf3._bottom == 300,
+        "S2: RED CONTROL — a drop nowhere near a boundary is not moved by a single unit")
+
+    -- The GUIDE only exists in range, and it points at what the drop will do.
+    fireDrag(cf3, "OnDragStart")
+    Sim.DragTo(cf3, 400, 300)
+    Skin.UpdateSnapGuides()
+    ck(Skin._guides and Skin._guides.v._shown == false,
+        "S2: out of range, no hairline is drawn")
+    Sim.DragTo(cf3, 4, 300)
+    Skin.UpdateSnapGuides()
+    ck(Skin._guides and Skin._guides.v._shown == true,
+        "S2: in range, the hairline appears along the boundary")
+    local px = Skin.SnapPreview(cf3)
+    ck(px and px.line.kind == "screen left",
+        "S2: …and what it shows is exactly what the drop will do (one answer, not two)")
+    fireDrag(cf3, "OnDragStop")
+
+    -- OFF is off.
+    ns.db.skin.snapToEdges = false
+    fireDrag(cf3, "OnDragStart")
+    Sim.DragTo(cf3, 6, 5)
+    fireDrag(cf3, "OnDragStop")
+    ck(cf3._left == 6 and cf3._bottom == 5,
+        "S2: with the option off a near-miss drop stays a near-miss")
+    ns.db.skin.snapToEdges = true
+
+    ----------------------------------------------------------------------
+    -- Phase M5b: THE BOUNCE — a NATIVE tab drag, and our own, both survive
+    -- the client's restore beat (bounce suspect a).
+    ----------------------------------------------------------------------
+    local cfgStore = C.Get()
+    local savedWindows, savedRev, savedAt = cfgStore.windows, cfgStore.rev, cfgStore.at
+    cfgStore.windows = {}
+    for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do cfgStore.windows[id] = C.CaptureWindow(id) end
+    cfgStore.rev, cfgStore.at = (tonumber(cfgStore.rev) or 0) + 1, C.Now()
+    ns.SetModuleEnabled("reconcile", true)
+    local R = ns.Reconcile
+    if HT then HT.flush() end
+
+    -- (i) OUR alt-drag commits to the CLIENT's own store, so the client's own
+    --     restore cannot undo it.
+    fireDrag(cf3, "OnDragStart")
+    Sim.DragTo(cf3, 3, 4)
+    fireDrag(cf3, "OnDragStop")
+    ck(cf3._left == 0 and cf3._bottom == 0, "M5b: the drop snapped flush")
+    local stored = select(2, _G.GetChatWindowSavedPosition(3))
+    ck(stored == 0,
+        "M5b: THE COMMIT — the client's own saved position learned the drop (was: it did not)")
+    _G.FloatingChatFrame_Update(3)
+    Sim.LayoutBeat()
+    ck(cf3._left == 0,
+        "M5b: RED CONTROL WAS HERE — the client's restore beat no longer bounces it back")
+
+    -- (ii) A NATIVE TAB DRAG reaches capture. Nothing of ours starts or stops
+    --      this drag: it is FCFTab_OnDragStop -> FCF_StopDragging, the client's
+    --      own path, and the config still has to learn it.
+    if HT then HT.advance(0.3) end
+    local revBefore, capsBefore = C.Rev(), R.stats.captures
+    Sim.TabDragTo(cf3, 600, 400)
+    ck(Skin._moving == nil, "M5b: the native drag never went through our own move rig")
+    ck(C.Rev() == revBefore, "M5b: …and the capture is debounced like any other edit")
+    if HT then HT.advance(0.3) end
+    ck(R.stats.captures == capsBefore + 1,
+        "M5b: THE NATIVE TAB DRAG REACHED CAPTURE (the hole this branch closed)")
+    local np3 = cfgStore.windows[3] and cfgStore.windows[3].npos
+    local live3 = C.CaptureNormalizedPos(3)
+    ck(C.NearPos(np3, live3),
+        "M5b: …and the config holds the corner the player actually dropped it on")
+    ck(R.lastPositionChange and R.lastPositionChange.kind == "user",
+        "M5b: THE LEDGER names the author: a user move, captured")
+    ck(R.PositionVerdict():find("user move captured", 1, true) ~= nil,
+        "M5b: …and the one-line verdict says so in those words")
+
+    -- (ii-b) THE UNKIND DROP POSTURE: a client whose tab drop does the same
+    --        work through its OWN internal references, so neither
+    --        FCF_StopDragging nor FCF_SavePositionAndDimensions is called and
+    --        the ONLY named surface the move touches is the drag-stop entry
+    --        point. This is what makes hooking FCFTab_OnDragStop load-bearing
+    --        rather than decorative — with that hook removed, the two pins
+    --        below go red and the player's move is silently lost.
+    if HT then HT.advance(0.3) end
+    local capsInternal = R.stats.captures
+    Sim.ResetCalls()
+    Sim.TabDragTo(cf3, 300, 500, "internal")
+    ck(Sim.CallCount("FCF_StopDragging") == 0
+        and Sim.CallCount("FCF_SavePositionAndDimensions") == 0,
+        "M5b: RED CONTROL — the unkind drop posture calls NEITHER obvious global")
+    if HT then HT.advance(0.3) end
+    ck(R.stats.captures == capsInternal + 1,
+        "M5b: …and the move STILL reaches capture, through the drag-stop entry point")
+    np3 = cfgStore.windows[3] and cfgStore.windows[3].npos
+    ck(C.NearPos(np3, C.CaptureNormalizedPos(3)),
+        "M5b: …with the corner the unkind drop actually landed on")
+
+    -- (iii) The reconcile that follows does NOT put it back.
+    local revAfter = C.Rev()
+    Sim.EnterWorld(false, false)
+    if HT then HT.advance(0.5) HT.flush() end
+    ck(C.Rev() == revAfter, "M5b: ECHO — the reconcile captured none of its own writes")
+    ck(C.NearPos(C.CaptureNormalizedPos(3), np3),
+        "M5b: the player's native drag SURVIVED the reconcile")
+
+    -- (iv) A REAL drift correction is named differently, so the two can never
+    --      be confused in a bounce report.
+    cfgStore.windows[3].npos = { "BOTTOMLEFT", 0.25, 0.25 }
+    local applied = R.ApplyPositions({ windows = cfgStore.windows })
+    ck(#applied == 1 and tostring(applied[1]):find("corrected drift", 1, true) == 1,
+        "M5b: a correction is traced as 'corrected drift', never as a captured move")
+    ck(R.lastPositionChange.kind == "drift"
+        and R.PositionVerdict():find("drift corrected to config", 1, true) ~= nil,
+        "M5b: …and the verdict flips to name the reconciler as the author")
+
+    ns.SetModuleEnabled("reconcile", false)
+    cfgStore.windows, cfgStore.rev, cfgStore.at = savedWindows, savedRev, savedAt
+
+    ----------------------------------------------------------------------
+    -- OUT: hand the world back the way the suites after us expect it.
+    ----------------------------------------------------------------------
+    ns.db.skin.unclampWindows = savedUnclamp
+    ns.db.skin.unifiedChassis = savedUnified
+    ns.db.skin.snapToEdges = savedSnap
+    Sim.altDown = savedAlt
+    Sim.SetUIScale(savedScale)
+    _G.SetChatWindowShown(3, false)
+    _G.SetChatWindowDocked(3, false)
+    _G.FCF_ResetChatWindows()
+    for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do _G.FloatingChatFrame_Update(id) end
+    for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do
+        local f = Sim.Frame(id)
+        if f then f._left, f._bottom = 32, 32 end
+    end
+    _G.FCF_SelectDockFrame(_G.ChatFrame1)
+    Skin.StyleAll()
+    if HT then HT.flush() end
+    Sim.ResetCalls()
+end
+
 ns:RegisterSelfTest("skin", function(verbose)
     local fails = {}
     local ok, err = pcall(testDefang, fails)
@@ -5345,6 +6412,8 @@ ns:RegisterSelfTest("skin", function(verbose)
     if not ok then fails[#fails + 1] = "button-column error: " .. tostring(err) end
     ok, err = pcall(testOneBox, fails, verbose)
     if not ok then fails[#fails + 1] = "one-box error: " .. tostring(err) end
+    ok, err = pcall(testFadeSnapAndBounce, fails, verbose)
+    if not ok then fails[#fails + 1] = "fade/snap/bounce error: " .. tostring(err) end
     for _, f in ipairs(fails) do ns:Print("  FAIL skin :: " .. f) end
     if #fails == 0 and verbose then ns:Print("  PASS skin") end
     return #fails == 0
