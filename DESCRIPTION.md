@@ -6,6 +6,7 @@
 A modern, configurable chat window for WoW Classic Era. Set up your chat once — tabs, channels, colors, fonts, layout — and every character on every account you run gets exactly that setup at login, automatically. No per-character fiddling, ever.
 
 ## Features
+- **Its own chat window**: Daseeki Chat draws the whole thing — panel, tab strip, message feed and input bar — instead of re-dressing Blizzard's. The game's chat windows stay alive behind it as the engine and still receive everything; they are simply hidden. That means the tabs never fade on you, the window never walks back from the screen edge, and Blizzard's artwork never shows through. Turn it off and the game's own chat window comes straight back, untouched. The combat log is left native.
 - **One config, every character**: your chat layout lives in an account-spanning configuration. A brand-new character logs in and the windows, tabs, channel assignments and colors materialize on their own — and if you rearrange anything in game, the change syncs back and follows you everywhere. With Daseeki Nexus installed the config even rides across your other accounts.
 - **Channel-colored tabs**: each tab wears its channel's color — the Guild tab in guild green, live-following your own color settings. Tab colors are also individually pickable.
 - **Custom channel names**: rename how channels display — "[2. Trade - City]" can be just "[Trade]" — in chat lines, on the edit box, and on the tab, from one setting.

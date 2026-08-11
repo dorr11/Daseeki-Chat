@@ -2,12 +2,76 @@
 
 ## Unreleased — first release
 
-Daseeki Chat replaces Prat on this account: a skin-over treatment of the game's
-own ten chat windows, drawn in the shared Daseeki look, with one account-spanning
-chat configuration that every character — including a brand-new one — reconciles
-to automatically at login.
+Daseeki Chat replaces Prat on this account: **its own chat window**, drawn in the
+shared Daseeki look, with one account-spanning chat configuration that every
+character — including a brand-new one — reconciles to automatically at login.
 
-This entry accumulates until 1.0.0 ships. Foundation so far:
+This entry accumulates until 1.0.0 ships.
+
+### Daseeki draws its own chat window
+
+**This is the headline.** Chat no longer re-dresses the game's chat window — it
+draws its own, and the game's ten chat windows become a hidden engine behind it.
+
+The reason is simple: two rounds of careful work still could not hold the design
+on screen. The game kept taking its window back. It fades the tabs on beats
+nobody asked for, it re-decides where the little button column goes and pushes
+the window away from the screen edge while it is at it, it puts its own artwork
+back underneath ours, and it re-places the window from its own saved position on
+its own schedule. Every single property of the design was a fight, forever, and
+"forever" is not a thing software wins. Drawing our own makes the design the
+*default state* instead of a position to be defended.
+
+What you get:
+
+- **One box, at the design's own numbers.** The panel, the border, the tab
+  strip, the message area and the input bar are all ours, in the exact colours
+  the approved design specifies — no approximations, no tones bled through from
+  underneath. Your thinner tabs and entry bar, and the removed dead space at the
+  left and right of the feed, are the shipped defaults.
+- **Tabs that stop fading.** They never fade again, because there is nothing to
+  fade them — our tabs are not part of the game's tab machinery at all. An
+  unselected tab is *quieter in colour*, which is what the design draws;
+  nothing in the window animates its transparency, ever. The selected tab wears
+  the message surface's own fill so the two read as one piece, with the accent
+  underline above it, and it can sit on the top, left or right exactly as
+  before.
+- **Your window stays where you put it.** There is no bounce-back to fix any
+  more: the game has no machinery pointed at a window it does not own. Drag it
+  by the tab strip, or ALT-drag anywhere on it; it snaps to screen edges, screen
+  centre lines and the same boundaries as before, and the position still lives
+  in the same synced configuration and still shows up in
+  `/dchat debug reconcile`.
+- **Everything you already configured still applies.** Tab position, per-tab
+  colours, channel routing, channel names and aliases, timestamps, class
+  colours, link handling, scrollback across sessions and the unread counters all
+  work exactly as they did and are still synced across your characters — the
+  configuration layer did not change at all. Messages are decorated by the same
+  code, in the same order, and arrive in the new window with their colours
+  intact.
+- **Your typing bar is still the game's.** Slash commands, channel stickiness
+  and sending are the game's own machinery, moved into our window rather than
+  rewritten — there is no version of "we reimplemented sending" that is safe.
+  It is always visible, Escape unfocuses it without hiding it, and switching
+  tabs points it at that tab so replies and your sticky channel follow you.
+- **Unread counters ride the new tabs**, as the same red chip with white digits,
+  and clear when you look at the tab.
+- **The combat log is left alone**, native and untouched.
+- **Turning it off gives the game's chat straight back.** Uncheck *Draw
+  Daseeki's own chat window* under **Appearance** (or `/dchat disable view`) and
+  the game's windows come back visible, the typing bar goes home, and nothing
+  has been destroyed. New sliders there set the message text size, the line
+  height and the tab text size.
+- Two things the design asks for that the game genuinely cannot do survive:
+  **letter spacing** and **tabular figures** are not available on game text at
+  all. Rounded corners and the drop shadow are now *possible* — they need
+  bespoke corner art and are queued rather than refused. Everything else in the
+  mapping table (now at the top of `view.lua`) reads identical.
+- `/dchat debug view` prints the whole thing: the design's numbers, the palette,
+  the mirror's counters, how many times the game tried to re-show a window we
+  had put away, and the line count per tab.
+
+Foundation, and the work the drawn window is built on top of:
 
 - Repo skeleton, module lifecycle, `/dchat` slash surface with an extensible
   `debug` subcommand registry, additive-and-healing SavedVariables init.

@@ -64,6 +64,11 @@ local BRANCH_DEFAULTS = {
     urls    = function() return ns.Urls and ns.Urls.DEFAULTS end,
     history = function() return ns.DEFAULTS and ns.DEFAULTS.history end,
     badges  = function() return ns.DEFAULTS and ns.DEFAULTS.badges end,
+    -- D2 revision: the owned view's LOOK branch. Account-local by decision (see
+    -- view.lua's config note) — the LAYOUT it renders (tab placement, per-tab
+    -- colour, position) rides the SYNCED config and is bound below as `config`
+    -- controls, exactly as skin v3's two were.
+    view    = function() return ns.DEFAULTS and ns.DEFAULTS.view end,
 }
 
 function Options.BranchDefaults(branch)
@@ -158,6 +163,16 @@ end
 ----------------------------------------------------------------------
 
 Options.BINDINGS = {
+    -- The owned view (D2 revision). The module switch is the big one: off gives
+    -- stock client chat back, windows shown and edit box home, nothing
+    -- destroyed. The three below it are the view's own typography, which is
+    -- account-local LOOK — the layout it draws is bound in Tabs, as `config`.
+    { id = "view.module",      kind = "module", module = "view" },
+    { id = "view.fontSize",    kind = "field",  branch = "view", key = "fontSize" },
+    { id = "view.lineHeight",  kind = "field",  branch = "view", key = "lineHeight" },
+    { id = "view.tabTextSize", kind = "field",  branch = "view", key = "tabTextSize" },
+    { id = "view.copyButton",  kind = "field",  branch = "view", key = "copyButton" },
+
     -- Appearance
     { id = "appearance.channelTabs",         kind = "field",  branch = "skin",   key = "channelTabs" },
     { id = "appearance.stampDivider",        kind = "field",  branch = "skin",   key = "stampDivider" },
@@ -222,8 +237,9 @@ Options.BINDINGS = {
          .. "is its seam, the same shape the alias editor uses." },
     { id = "tabs.color", kind = "config",
       why = "a tab's explicit colour is per-window LAYOUT and rides the synced config too "
-         .. "(config.windows[id].tabColor, beside that window's routing). Config.SetTabColor is "
-         .. "its seam; skin.lua owns what a spec string means." },
+         .. "(config.windows[id].tabColor, beside that window's routing, protected from a client "
+         .. "capture by Config.WINDOW_CONFIG_ONLY_FIELDS). Config.SetTabColor is its seam; "
+         .. "skin.lua owns what a spec string MEANS and view.lua paints the answer." },
     { id = "tabs.badge",   kind = "field", branch = "badges",  key = "optOut" },
     { id = "tabs.stamp",   kind = "field", branch = "stamps",  key = "windows" },
     { id = "tabs.history", kind = "field", branch = "history", key = "optOut" },
@@ -462,6 +478,12 @@ end
 
 -- The honest line about fading while the one-box layout is on.
 function Options.FadingStatus()
+    local V = ns.View
+    if V and V.active then
+        return "Fading is OFF while Daseeki draws its own chat window - it is always there, "
+            .. "so the text in it is too. Your setting below is remembered, not rewritten, and "
+            .. "applies again the moment you turn the drawn window off."
+    end
     local Skin = ns.Skin
     if Skin and Skin.Unified and Skin.Unified() then
         return "Fading is OFF while the one-box layout is on - the box is always there, so the "
@@ -536,6 +558,44 @@ end
 local function buildAppearance(flow)
     local sec = flow:AddSection("Appearance")
     sec:Hint("How the chat windows are dressed. Every change applies live.")
+
+    -- ── THE OWNED VIEW (D2 revision) ────────────────────────────────────
+    -- First, because it decides what every control under it even applies to:
+    -- with the view on, Daseeki Chat draws the whole window itself and the
+    -- game's own chat windows become a hidden engine. Off is stock chat back,
+    -- windows shown, nothing destroyed.
+    reg(sec:Checkbox({
+        label = "Draw Daseeki's own chat window",
+        tooltip = "Daseeki Chat draws the whole window - the tab strip, the message feed and "
+               .. "the input bar - instead of re-dressing the game's. The game's chat windows "
+               .. "stay alive behind it and still receive everything; they are just hidden. "
+               .. "Turning this off gives the game's own chat window straight back.",
+        get = moduleGet("view"), set = moduleSet("view"),
+    }))
+    reg(sec:Slider({
+        label = "Message text size", min = 8, max = 24, step = 0.5, width = 260,
+        tooltip = "The chat feed's own font size in Daseeki's window. The line spacing follows "
+               .. "it automatically, so the rhythm of the design holds at any size.",
+        get = fieldGet("view", "fontSize"),
+        set = fieldSet("view", "fontSize", function(v) return tonumber(v) or 13.5 end),
+    }))
+    reg(sec:Slider({
+        label = "Line height", min = 1.0, max = 2.0, step = 0.05, width = 260,
+        tooltip = "How much air sits between message lines, as a multiple of the text size.",
+        get = fieldGet("view", "lineHeight"),
+        set = fieldSet("view", "lineHeight", function(v) return tonumber(v) or 1.45 end),
+    }))
+    reg(sec:Slider({
+        label = "Tab text size", min = 8, max = 20, step = 0.5, width = 260,
+        get = fieldGet("view", "tabTextSize"),
+        set = fieldSet("view", "tabTextSize", function(v) return tonumber(v) or 12.5 end),
+    }))
+    reg(sec:Checkbox({
+        label = "Copy-chat button on Daseeki's window",
+        tooltip = "Era has no clipboard; the copy window pre-selects the text for Ctrl+C.",
+        get = fieldGet("view", "copyButton"), set = boolSet("view", "copyButton"),
+    }))
+    sec:AddSeparator()
 
     reg(sec:Checkbox({
         label = "One box: tabs, text and input on a single surface",
@@ -1172,7 +1232,10 @@ local function testBindings(fails)
     local kinds = {}
     for _, b in ipairs(Options.BINDINGS) do kinds[b.kind] = (kinds[b.kind] or 0) + 1 end
     ck((kinds.field or 0) >= 20, "the pane binds the shipped config surface, not a sample")
-    ck((kinds.module or 0) == 5, "each feature module's on/off is bound (got " .. tostring(kinds.module) .. ")")
+    -- 6 since the D2 revision: the owned view joined stamps/names/urls/history/
+    -- badges as a module the pane can turn off. An exact count, not a floor —
+    -- a module that grows a switch nobody bound would otherwise pass silently.
+    ck((kinds.module or 0) == 6, "each feature module's on/off is bound (got " .. tostring(kinds.module) .. ")")
     ck((kinds.alias or 0) >= 3, "the alias editor is bound")
     ck((kinds.config or 0) == 2, "the two SYNCED layout controls are bound to config.lua's seams")
     ck((kinds.runtime or 0) == 1 and (kinds.action or 0) == 1, "the session lock + the reconcile verb are bound")

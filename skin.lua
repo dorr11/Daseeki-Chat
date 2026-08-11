@@ -153,175 +153,88 @@ local Skin = {
 ns.Skin = Skin
 
 ----------------------------------------------------------------------
--- ================= THE MOCKUP CONTRACT (2026-08-11) =================
+-- ============ RETIREMENT NOTICE — D2 REVISION, 2026-08-11 ============
 --
--- The owner approved chat-mockups.html and then said, of the shipped v3
--- render: "the mockup is perfect, its exactly what im going for so i would
--- like to reproduce it as identically as possible."  So the mockup is not a
--- set of relationships to translate — it is the REPRODUCTION TARGET, and this
--- table is the contract. It is the single place the box's numbers and colours
--- are decided; the renderer below reads it and invents nothing.
+-- THE MOCKUP CONTRACT AND THE PALETTE HAVE MOVED TO view.lua. They belonged to
+-- whoever paints the pixels, and that is no longer this file: the owner
+-- directed the D2 revision ("if drawing our own gets a better result, do
+-- that"), so Daseeki-Chat draws its OWN chassis over a hidden client engine and
+-- the mapping table lives beside the renderer it governs. Six of that table's
+-- rows used to say CLIENT LIMIT because they were properties of painting on
+-- somebody else's frame; owning the frame retired four of them outright.
 --
--- THE MAPPING TABLE. Three columns: what the mockup's CSS says, what this file
--- ships, and whether they are IDENTICAL or — never for taste, only for a real
--- client capability — why they cannot be.
+-- WHAT RETIRES HERE, and how: every CLIENT-FRAME RESTYLE path below is gated
+-- OFF while the view owns the pixels (Skin.ViewOwnsPixels) rather than deleted,
+-- because "the box off" is still a shipped, tested state — the v2/v3 treatment
+-- is what a player gets if they disable the view module, and a path with no
+-- test is a path with no truth. The gated set is exactly:
+--   * the chassis-on-a-client-frame (ensureBackdrop / UpdateChassis / the strip)
+--   * the client tab restyle (styleTab / tab art strip / tab fill / underline)
+--   * the tab-alpha strip (KeepOpaque / the three FCF alpha post-hooks)
+--   * the stock-art strip (stripStock)
+--   * client typography (applyFrameFont / SetSpacing on a client window)
 --
--- OWNER AMENDMENTS (2026-08-11): the owner has since looked at the SHIPPED box
--- in the live client and amended six of the mockup's own numbers — "the tabs
--- and entry areas need to be 'thinner' and remove the left and right dead
--- border area between the chat feed box and the edge of the panel". These are
--- deliberate departures from the reproduction target, not drift, so every
--- affected row below carries its old -> new value and the amendment tag. The
--- contract stays honest: a row that no longer says IDENTICAL says WHY, and the
--- reason here is the owner's own eye on the real render rather than a client
--- limit. Everything not tagged is still identical to the mockup.
+-- WHAT SURVIVES AND IS REUSED BY THE VIEW, unchanged:
+--   * the movement / capture-back / clamp layer and Skin.CommitMove;
+--   * the FRAME-AGNOSTIC SNAP LAYER, through its published SnapPeers override
+--     point — view.lua points it at its own chassis and forks nothing;
+--   * the button-column disable (harmless with the engine hidden, and still
+--     wanted the moment the view is turned off);
+--   * the copy window (Skin.OpenCopy reads any frame with the public message
+--     history surface, which is exactly what a view frame is);
+--   * the palette ACCESSOR (Skin.Ink / Skin.Palette below), kept as the seam
+--     stamps.lua and badges.lua already call — it now delegates to view.lua's
+--     table rather than holding a second copy;
+--   * the pure resolution helpers (DominantChannel / TabInk / TabLabel /
+--     ChannelInk / DefangLine / ExtractCopyText), which the view calls.
 --
--- COLOUR (mockup :root custom properties -> PALETTE below, literal hexes)
---   --ground   #0b0908  -> PALETTE.ground   #0b0908   IDENTICAL
---   --panel    #16100f  -> PALETTE.panel    #16100f   IDENTICAL (chassis + strip/rail)
---   --panel2   #1d1514  -> PALETTE.panel2   #1d1514   IDENTICAL (messages + entry + active tab)
---   --line     #6e1d1a  -> PALETTE.line     #6e1d1a   IDENTICAL (chassis border)
---   --line-soft#3a1512  -> PALETTE.lineSoft #3a1512   IDENTICAL (entry seam, rail seam, stamp divider)
---   --accent   #c2402e  -> PALETTE.accent   #c2402e   IDENTICAL (pip fill, hover ink, mark fallback)
---   --gold     #d9a83f  -> PALETTE.gold     #d9a83f   IDENTICAL (carried; the box itself uses none)
---   --text     #e6dfd4  -> PALETTE.text     #e6dfd4   IDENTICAL (active tab ink fallback, hover wash source)
---   --muted    #93887e  -> PALETTE.muted    #93887e   IDENTICAL (inactive tab ink fallback, quiet glyphs)
---   --faint    #5c534c  -> PALETTE.faint    #5c534c   IDENTICAL (stamp ink — stamps.lua's shipped default)
---   .chatbox background: solid --panel      alpha 1.0 IDENTICAL (v3 shipped 0.85 and read pure black)
---   per-channel message colours             CLIENT    the mockup's own footer says so: message ink is
---                                                     the CLIENT's chat colour table, live, never a hex.
---
--- GEOMETRY (1 CSS px = 1 UI unit, literally)
---   .chatbox border 1px --line             -> CHASSIS_EDGE 1 + PALETTE.line     IDENTICAL
---   .chatbox border-radius 6px             -> square                            CLIENT LIMIT: a backdrop
---       edge is a repeated 1px texture; rounded corners need bespoke corner art per radius, and a bad
---       approximation reads worse than a clean square. Documented, not faked.
---   .tabs-top padding 6px 8px 0            -> STRIP_PAD_TOP 2 / STRIP_PAD_X 3 / 0
---       OWNER AMENDMENT 2026-08-11 (thinner tabs/entry, no side gutters): STRIP_PAD_TOP 6 -> 2,
---       STRIP_PAD_X 8 -> 3. The side padding moves with .msgs' so the tab run and the message text
---       start on the same vertical, which is the whole point of taking the gutter out.
---   .tab padding 5px 14px 6px              -> TAB_PAD_TOP 2 / TAB_PAD_X 14 / TAB_PAD_BOTTOM 4
---       OWNER AMENDMENT 2026-08-11: TAB_PAD_TOP 5 -> 2, TAB_PAD_BOTTOM 6 -> 4. The bottom keeps 4 so
---       the 2-unit active underline still has 2 units of clearance under the 18-unit line box, and the
---       14-unit badge pip still centres inside the row without clipping (14 < 24). TAB_PAD_X unchanged:
---       the amendment is about height and SIDE gutters, not about crowding the labels together.
---   .tab font-size 12.5px, weight 600      -> TAB_TEXT_SIZE 12.5 on the suite's condensed face
---                                                     IDENTICAL size; WEIGHT is CLIENT LIMIT (one vendored
---                                                     face, no synthetic bold that does not smear).
---   .tab letter-spacing .04em              -> not applied                       CLIENT LIMIT: FontString
---       has no letter-spacing; the only fake is padding each glyph into its own FontString.
---   .tab line-height 1.45                  -> TAB_LINE_H 18 (12.5 * 1.45 = 18.1) IDENTICAL to the pixel
---   => tab height 5 + 18 + 6               -> TAB_H 24 (2 + 18 + 4)
---       OWNER AMENDMENT 2026-08-11: 29 -> 24.
---   => strip height 6 + 29                 -> STRIP_H 26 (2 + 24)
---       OWNER AMENDMENT 2026-08-11: 35 -> 26. The strip is now snug around the tab ink, its underline
---       and a couple of units of breathing room — the band the owner called out is gone.
---   .tabs-top gap 2px                      -> TAB_GAP 2                         IDENTICAL
---   .tab border-radius 4px 4px 0 0         -> square                            CLIENT LIMIT (as above)
---   .tab.active background var(--panel2)   -> the tab wears the MESSAGE SURFACE's own fill, run down
---       to the strip's bottom edge                                              IDENTICAL
---   .tab.active::after inset 6px, 2px      -> UL_INSET 6 / UL_HEIGHT 2 / UL_Y 0 IDENTICAL
---   .tab:hover rgba(255,255,255,.04)       -> PALETTE.text at HOVER_WASH 0.04   IDENTICAL in effect (the
---       mockup washes with white; the token-honest source of "white" here is the text ink).
---   .tab .n  (the unread pip)              -> badges.lua: accent fill, white digits, 10.5px, after the
---       label with a 6px gap, inside the tab                                    IDENTICAL
---   .tab .n border-radius 8px              -> square chip                       CLIENT LIMIT (as above)
---   .msgs padding 10px 14px 6px            -> MSG_PAD_TOP 10 / MSG_PAD_X 3 / MSG_PAD_BOTTOM 6
---       (the client's message frame has no text insets — see the note under LAYOUT — so the CHASSIS
---        pads around the frame, which lands the same pixels)
---       OWNER AMENDMENT 2026-08-11 (no side gutters): MSG_PAD_X 14 -> 3. The horizontal component only:
---       the vertical padding is unchanged, because the owner's complaint was specifically the left and
---       right dead panel between the feed and the chassis edge. 3 leaves a hairline of breathing room
---       inside the 1-unit chassis border rather than butting the text against it.
---   .msgs font-size 13.5px                 -> skin.messageFontSize, default 13.5   IDENTICAL
---       OWNER AMENDMENT 2026-08-11 (typography parity): was "the CLIENT's per-window size is the
---       authority" (skin v1's pinned split). The mockup's proportions are a RATIO between this size
---       and every measure around it, so the box could not be on par while the size was somebody
---       else's. Config-backed with the mockup's own value as the default; setting it to 0 restores
---       the old split exactly, and the box-off path always uses it.
---   .msgs .row padding 1.5px 0             -> ROW_SPACING 3 (1.5 above + 1.5 below, and the client's
---       spacing is the gap BETWEEN rows)                                        IDENTICAL
---   .msgs line-height 1.45                 -> Skin.MessageSpacing = (1.45 - 1.2) * size + ROW_SPACING
---       OWNER AMENDMENT 2026-08-11 (typography parity): previously unmapped, which is why the live
---       feed's lines touched while the mockup's breathed. line-height is the whole LINE BOX and a
---       FontString already draws one of its own, so what SetSpacing wants is the DIFFERENCE — hence
---       the subtraction of the face's natural 1.2 leading (FACE_NATURAL_LINE, the one measured
---       constant in this file). COMPUTED from the size in force, never hardcoded, so it stays 1.45
---       when the player changes the size.
---   .msgs .row gap 8px + .stampline 1px    -> DIV_WIDTH 1 centred in the stamp separator, STAMP_GAP 8
---       aimed each side                    APPROXIMATE, CLIENT LIMIT: a chat line is ONE string in ONE
---       FontString, so the space right of the hairline can only be spelled in spaces — stamps.lua emits
---       a space-run separator and the hairline is centred in it. The gap therefore follows the face's
---       space advance instead of being exactly 8.
---   .stampline background --line-soft      -> PALETTE.lineSoft, alpha 1         IDENTICAL colour;
---       the mockup draws it per ROW (margin 2px 0), we draw ONE column hairline down the message area
---       — CLIENT LIMIT: rows are not addressable widgets.
---   .stamp font-variant-numeric tabular    -> not applied                       CLIENT LIMIT: no OpenType
---       feature control on a FontString.
---   .entry padding 8px 12px                -> EB_PAD_Y 3 / EB_PAD_X 12
---       OWNER AMENDMENT 2026-08-11 (thinner entry): EB_PAD_Y 8 -> 3. EB_PAD_X unchanged — the entry's
---       own left inset is where the "Say:" alias header sits, and it is functionally untouched.
---   .entry font 13.5px, line-height 1.45   -> EB_HEIGHT 26 (3 + 19.6 + 3)
---       OWNER AMENDMENT 2026-08-11: 36 -> 26, snug to the edit box's own line.
---   .entry border-top 1px --line-soft      -> SEAM_W 1, PALETTE.lineSoft, and NO gap (EB_GAP 0) IDENTICAL
---   .entry background var(--panel2)        -> shares the message surface        IDENTICAL
---   .entry .hinttxt "always visible..."    -> not shipped                       it is the MOCKUP'S OWN
---       annotation of the design (it describes the behaviour, it is not a control); there is nothing
---       in the product for it to label.
---   .tabs-side width 112px                 -> TABRAIL_W 112                     IDENTICAL
---   .tabs-side padding 8px 6px             -> RAIL_PAD_Y 4 / RAIL_PAD_X 6
---       OWNER AMENDMENT 2026-08-11 (thinner tabs): RAIL_PAD_Y 8 -> 4, carried across to the SIDE
---       placement so the amendment does not silently un-apply itself the moment the player moves the
---       tabs to a rail. RAIL_PAD_X unchanged (that is the rail's own width budget, not a gutter).
---   .tabs-side border-left 1px --line-soft -> SEAM_W 1, PALETTE.lineSoft        IDENTICAL
---   .stab padding 7px 10px                 -> RAIL_TAB_PAD_Y 4 / RAIL_TAB_PAD_X 10
---       OWNER AMENDMENT 2026-08-11 (thinner tabs): RAIL_TAB_PAD_Y 7 -> 4.
---   => rail row height 7 + 18 + 7          -> TAB_ROW_H 26 (4 + 18 + 4)
---       OWNER AMENDMENT 2026-08-11: 32 -> 26.
---   .stab.active::before 2px, inset 5px    -> EDGEBAR_W 2 / EDGEBAR_INSET 5     IDENTICAL
---   .stab .n float:right                   -> badges.lua right-aligns in the row at RAIL_TAB_PAD_X IDENTICAL
---   box-shadow 0 8px 30px rgba(0,0,0,.55)  -> not shipped                       CLIENT LIMIT: no drop
---       shadow primitive; the honest fake is a nine-slice glow texture, which is bespoke art.
---
--- NOT IN THE MOCKUP, kept from skin v2/v3 because the mockup is silent on them:
---   the icon rail, the copy affordance (styled to the rail's quiet-glyph idiom), the button-column
---   posture, alt-drag, the persistent edit box, the clamp. None of them paint inside the box.
---
--- WHEN THE BOX IS OFF (unifiedChassis = false) NONE of the above applies: the v2 treatment is byte for
--- byte what it was, tokens and all. Every mockup value below is read only through the unified path.
+-- The measurement constants below stay: the box-off path still renders with
+-- them, and view.lua carries its own copies as the OWNER-AMENDED values it
+-- ships (one file, one set of numbers it is responsible for).
 ----------------------------------------------------------------------
 
--- THE PALETTE. Literal mockup hexes, and the ONE place they live: a future
--- re-theme is one edit here. Core-token reactivity for the box is deliberate
--- future work — "identical now" is the requirement the owner set, and a
--- derived tone cannot be identical to a hex by construction.
-local PALETTE = {
-    ground   = 0x0b0908,
-    panel    = 0x16100f,
-    panel2   = 0x1d1514,
-    line     = 0x6e1d1a,
-    lineSoft = 0x3a1512,
-    accent   = 0xc2402e,
-    gold     = 0xd9a83f,
-    text     = 0xe6dfd4,
-    muted    = 0x93887e,
-    faint    = 0x5c534c,
-}
+----------------------------------------------------------------------
+-- ======== THE MOCKUP CONTRACT — MOVED TO view.lua, 2026-08-11 ========
+--
+-- The mapping table that stood here — every mockup CSS declaration against
+-- what shipped, marked IDENTICAL or with the client limit that refused it —
+-- MOVED TO view.lua on 2026-08-11 with the D2 revision, together with the
+-- PALETTE table it referred to. It governs the renderer, and the renderer is
+-- view.lua now. See view.lua's header for the current contract (and for which
+-- of the old CLIENT LIMIT rows survived owning the frame: four did, three
+-- rounded-corner rows became DEFERRED, and the rest died with skin-over).
+--
+-- The measurement constants this file still needs (the box-off path renders
+-- with them) are declared below, unchanged. view.lua carries its own copies of
+-- the OWNER-AMENDED values as the numbers IT is responsible for; the two are
+-- deliberately separate because they render two different things.
+----------------------------------------------------------------------
 
--- r, g, b, a for a palette entry. Published (Skin.Ink) so stamps.lua and
--- badges.lua paint from the same table rather than each keeping a copy.
+-- THE PALETTE ACCESSOR. The table itself lives in view.lua now (it is the
+-- renderer's, and the renderer moved); this stays as the SEAM stamps.lua and
+-- badges.lua already call, so neither has to learn a new name and neither ever
+-- holds a second copy of a hex. Answers nil for an unknown name, exactly as
+-- before — never a hopeful black (Class 5 applied to ink).
 function Skin.Ink(name, alpha)
-    local v = PALETTE[name]
-    if not v then return nil end
-    return math.floor(v / 65536) % 256 / 255,
-           math.floor(v / 256) % 256 / 255,
-           (v % 256) / 255,
-           alpha or 1
+    local V = ns.View
+    if V and type(V.Ink) == "function" then
+        local ok, r, g, b, a = pcall(V.Ink, name, alpha)
+        if ok and type(r) == "number" then return r, g, b, a end
+    end
+    return nil
 end
 
 -- The palette itself, read-only by convention (the settings page and the
--- harness both want to name a colour without re-typing it).
-function Skin.Palette() return PALETTE end
+-- harness both want to name a colour without re-typing it). Delegated like
+-- Skin.Ink above — one table, in view.lua.
+function Skin.Palette()
+    local V = ns.View
+    if V and type(V.Palette) == "function" then
+        local ok, t = pcall(V.Palette)
+        if ok and type(t) == "table" then return t end
+    end
+    return {}
+end
 
 -- Layout constants (measures, not colors).
 local BG_ALPHA    = 0.85   -- v2 chat backdrop fill alpha over the world
@@ -426,7 +339,36 @@ end
 -- arrangement and therefore the safe answer.
 ----------------------------------------------------------------------
 
+-- ── THE RETIREMENT GATE (D2 revision, 2026-08-11) ────────────────────────────
+-- One question, asked in one place: is view.lua painting right now? While it
+-- is, every CLIENT-FRAME restyle path in this file is inert — the client's
+-- windows are hidden and dressing a hidden window is work nobody sees. What
+-- keeps running is the movement/capture/snap layer, the button-column disable
+-- and the copy window, all of which the view reuses (see the retirement notice
+-- at the top of this file for the full list).
+function Skin.ViewOwnsPixels()
+    local V = ns.View
+    return (V and V.active) and true or false
+end
+
+-- Hand the client's frames back before the view goes on, so there is never a
+-- moment with two treatments on one window. Called by view.lua's OnEnable.
+-- Reversible by construction: this is the same restore path OnDisable uses,
+-- and Skin.StyleAll re-dresses if the view is turned off with skin still on.
+function Skin.RetireStyling()
+    for _, frame in ipairs(Skin.order) do
+        local rec = Skin.styled[frame]
+        if rec then Skin.RestoreDress(frame, rec) end
+    end
+    return #Skin.order
+end
+
 function Skin.Unified()
+    -- The one box is skin-over's box. With the view painting there is no
+    -- skin-over box at all, and every `if Skin.Unified()` branch below (and in
+    -- badges.lua, which asks the same question about its chip) has to hear
+    -- that from one place rather than each guessing.
+    if Skin.ViewOwnsPixels() then return false end
     return (cfg().unifiedChassis ~= false) and true or false
 end
 
@@ -2316,8 +2258,16 @@ function Skin.SnapPeers()
     return Skin.order
 end
 
+-- The snap layer belongs to whichever module is actually moving frames. Skin
+-- v3.1 wrote "a future view that draws its own frames reuses this layer whole
+-- by pointing Skin.SnapPeers at its own set" — that future arrived with the D2
+-- revision, so the LIVENESS question is asked of both owners. Everything else
+-- about the layer is unchanged, which is the whole point of having built it
+-- frame-agnostically.
 function Skin.SnapEnabled()
-    return (Skin.active and cfg().snapToEdges ~= false) and true or false
+    local V = ns.View
+    local live = Skin.active or (V and V.active) or false
+    return (live and cfg().snapToEdges ~= false) and true or false
 end
 
 -- One frame's rect in SCREEN PIXELS: left, bottom, width, height, scale.
@@ -3827,22 +3777,33 @@ function Skin.StyleWindow(frame, id)
         Skin.styled[frame] = rec
         Skin.order[#Skin.order + 1] = frame
     end
-    stripStock(frame, rec)
-    ensureBackdrop(frame, rec)
-    styleTab(frame, rec)
-    applyFrameFont(frame, id)
-    Skin.ApplyFading(frame)
-    if not isCombatLog(frame, id) then
-        styleEditBox(frame, rec)
-        ensureEditBoxRig(frame, rec)
-        local eb = editBoxOf(frame)
-        if eb then
-            Skin.ColorEditBoxHeader(eb)
-            Skin.AliasEditBoxHeader(eb)
-            Skin.KeepEditBoxShown(eb)
+    -- ── RETIRED WHILE THE VIEW PAINTS (D2 revision) ──────────────────────
+    -- Everything between here and the next marker is a CLIENT-FRAME RESTYLE:
+    -- the stock-art strip, the chassis-on-a-client-frame, the tab restyle,
+    -- client typography, the fading knob and the client's own edit-box dress.
+    -- view.lua owns those pixels now (and hosts that edit box), so with the
+    -- view up none of it runs — not gated per-call inside each helper, but
+    -- refused here at the one place they are all reached from.
+    local retired = Skin.ViewOwnsPixels()
+    if not retired then
+        stripStock(frame, rec)
+        ensureBackdrop(frame, rec)
+        styleTab(frame, rec)
+        applyFrameFont(frame, id)
+        Skin.ApplyFading(frame)
+        if not isCombatLog(frame, id) then
+            styleEditBox(frame, rec)
+            ensureEditBoxRig(frame, rec)
+            local eb = editBoxOf(frame)
+            if eb then
+                Skin.ColorEditBoxHeader(eb)
+                Skin.AliasEditBoxHeader(eb)
+                Skin.KeepEditBoxShown(eb)
+            end
         end
+        ensureCopyButton(frame, rec)
     end
-    ensureCopyButton(frame, rec)
+    -- ── SURVIVES: the movement / capture / clamp / column layer ──────────
     -- The column goes down BEFORE the rail is placed: the rail's own offset
     -- reads the footprint the column leaves behind (v2.2).
     ensureButtonColumnRig(frame, rec)
@@ -3850,10 +3811,14 @@ function Skin.StyleWindow(frame, id)
     ensureRail(frame, rec)
     ensureMoveRig(frame, rec)
     Skin.LoosenClamp(frame, rec)
-    -- The box owns its own opacity: the client's tab fade is refused here and
-    -- re-refused on every cheap beat (Skin.Refresh) and every client verb.
-    Skin.KeepOpaque(frame, rec)
-    Skin.UpdateDivider(frame)
+    if not retired then
+        -- The box owns its own opacity: the client's tab fade is refused here
+        -- and re-refused on every cheap beat and every client verb. RETIRED
+        -- while the view paints — our tabs are not in the client's fade walk
+        -- at all, so there is no last word to keep taking.
+        Skin.KeepOpaque(frame, rec)
+        Skin.UpdateDivider(frame)
+    end
 end
 
 function Skin.StyleAll()
@@ -3863,12 +3828,17 @@ function Skin.StyleAll()
             Skin.StyleWindow(frame, id)
         end
     end
+    if Skin.ViewOwnsPixels() then return end
     -- The box is assembled AFTER every window is dressed: which frame hosts a
-    -- chassis depends on the whole dock, not on any one window.
+    -- chassis depends on the whole dock, not on any one window. RETIRED while
+    -- the view paints (there is no skin-over box then).
     Skin.UpdateChassis()
     Skin.UpdateTabColors()
 end
 
+-- PUBLISHED as Skin.RestoreDress (see the retirement gate near the top): the
+-- view calls it to hand the client's frames back before it starts painting,
+-- which is the same restore OnDisable performs. One implementation.
 local function restoreWindow(frame, rec)
     restoreStock(frame, rec)
     -- The tab's alpha fields go back exactly as we found them (nil included)
@@ -3935,12 +3905,18 @@ local function restoreWindow(frame, rec)
     end
 end
 
+Skin.RestoreDress = restoreWindow
+
 -- The v2 re-evaluation beat: everything whose answer can change without a
 -- restyle — the channel inks, the active underline, the rail's config gate and
 -- the divider's stamps-are-on gate. Cheap and idempotent; called from the
 -- selection hook, the theme/font hooks, UPDATE_CHAT_COLOR and CVAR_UPDATE.
 function Skin.Refresh()
     if not Skin.active then return end
+    -- RETIRED while the view paints: every branch below dresses a client
+    -- frame. The movement layer needs no beat (it is script-driven) and the
+    -- column stays down because the view hid it with the window.
+    if Skin.ViewOwnsPixels() then return end
     for _, frame in ipairs(Skin.order) do
         local rec = Skin.styled[frame]
         if rec then

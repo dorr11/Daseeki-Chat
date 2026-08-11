@@ -65,10 +65,25 @@ urls.lua
 # stamping, restamp-on-restore (uptime-based entries fade instantly otherwise).
 history.lua
 badges.lua
-# skin.lua: frame/editbox/tab restyle per suite theme + the copy-chat affordance.
-# Loads after every pipeline module so its module registration order (and the
-# /dchat debug registry) lists engine before dress.
+# skin.lua: the shared movement/capture/snap layer, the copy-chat affordance and
+# the (now gated) skin-over restyle paths. Loads after every pipeline module so
+# its module registration order (and the /dchat debug registry) lists engine
+# before dress. D2 REVISION 2026-08-11: while view.lua is active, skin's
+# CLIENT-FRAME restyle paths are retired (Skin.ViewOwnsPixels gates them off);
+# what survives is the movement/capture/snap layer, the button-column disable,
+# the copy window and the palette accessor, all of which the view reuses.
 skin.lua
+# view.lua: THE OWNED CHAT VIEW (D2 revision). One chassis of ours - tab strip,
+# per-tab ScrollingMessageFrames, entry bar - over the client's ten windows kept
+# alive but HIDDEN as the engine. FILE MAP AMENDMENT, 2026-08-11, owner-directed
+# ("if drawing our own gets a better result, do that. thats my mistake in the
+# design"): DASEEKI_CHAT_DESIGN.md's D2 REVISION section is the approved spec and
+# its file map names this file; the harness's EXPECTED_FILE_MAP gate was amended
+# in the SAME COMMIT and still pins this list byte-for-byte - the map stays LAW,
+# it simply has one more entry. Loads AFTER skin.lua (it consumes the movement /
+# snap / palette layer) and BEFORE options.lua (which binds against the shapes
+# this file publishes).
+view.lua
 # options.lua: the settings pane (Daseeki-Core hub page) + the channel-alias
 # editor. FILE MAP AMENDMENT, post-V1, owner-requested 2026-08-11 ("do we not
 # have a configuration menu for chat?") — DASEEKI_CHAT_DESIGN.md's file map and

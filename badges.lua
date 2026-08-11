@@ -130,6 +130,13 @@ local RAIL_PAD_X    = 10     -- .stab padding-right, where a rail count sits
 -- ACTIVE (a disabled skin draws no box at all, and the chip belongs to the box)
 -- and the box has to be the configured look.
 local function boxed()
+    -- D2 REVISION (2026-08-11): the box is the VIEW's now. The chip belongs to
+    -- the box whoever draws it, so the question is asked of the view first and
+    -- of skin-over second — a player who turns the view off and leaves skin's
+    -- one box on still gets the mockup's chip, and a player with neither gets
+    -- the pre-mockup quiet FontString, byte for byte.
+    local V = ns.View
+    if V and V.active then return true end
     local S = ns.Skin
     if not (S and S.active and type(S.Unified) == "function") then return false end
     local ok, on = pcall(S.Unified)
@@ -137,7 +144,8 @@ local function boxed()
 end
 
 -- The suite's palette, through skin's published accessor (one table, one place
--- — see skin.lua's PALETTE). Falls back to Core tokens when skin is absent.
+-- — the table lives in view.lua since the D2 revision and Skin.Ink is the seam
+-- that reaches it). Falls back to Core tokens when neither is loaded.
 local function ink(name)
     local S = ns.Skin
     if S and type(S.Ink) == "function" then
@@ -181,12 +189,34 @@ end
 ----------------------------------------------------------------------
 
 function Badges.Placement()
+    -- The view answers first while it is painting (its tabs are the ones the
+    -- badge is riding); skin-over answers when it is the one drawing tabs.
+    local V = ns.View
+    if V and V.active and type(V.TabsOnRail) == "function" then
+        local ok, rail = pcall(V.TabsOnRail)
+        if ok then return rail and "rail" or "top" end
+    end
     local S = ns.Skin
     if S and type(S.TabsOnRail) == "function" then
         local ok, rail = pcall(S.TabsOnRail)
         if ok and rail then return "rail" end
     end
     return "top"
+end
+
+-- THE TAB THIS BADGE RIDES. One question, asked in one place, because the
+-- answer moved: while view.lua paints, a window's tab is OUR button on the
+-- view's strip; otherwise it is the client's $parentTab, exactly as it always
+-- was. Everything downstream (anchoring, the pip width seam, the chip) is
+-- unchanged — the badge simply hangs off a different parent.
+function Badges.TabFor(frame)
+    local V = ns.View
+    if V and V.active and type(V.TabButtonFor) == "function" then
+        local ok, btn = pcall(V.TabButtonFor, frame)
+        if ok and type(btn) == "table" then return btn end
+    end
+    local name = frame and frame.GetName and frame:GetName()
+    return name and _G[name .. "Tab"] or nil
 end
 
 -- The width this badge asks its tab for, so skin.lua can make the tab that
@@ -268,13 +298,24 @@ end
 local function ensureWidget(frame)
     local w = Badges.widgets[frame]
     if w then
+        -- THE REBIND (D2 revision): the tab a badge rides can CHANGE at
+        -- runtime — the view coming up moves it from the client's tab to ours,
+        -- and the view going down moves it back. Re-parent on the way through
+        -- rather than rebuilding the widget, so a live count survives the move.
+        local want = Badges.TabFor(frame)
+        if want and want ~= w.tab then
+            w.tab = want
+            w.placement, w.boxed = nil, nil       -- force the re-anchor below
+            if type(w.holder.SetParent) == "function" then
+                pcall(w.holder.SetParent, w.holder, want)
+            end
+        end
         Badges.AnchorWidget(w)
         return w
     end
     local UI = _G.DaseekiUI
     if not (UI and _G.CreateFrame) then return nil end
-    local name = frame.GetName and frame:GetName()
-    local tab = name and _G[name .. "Tab"]
+    local tab = Badges.TabFor(frame)
     if not tab then return nil end
     local holder = _G.CreateFrame("Frame", nil, tab)
     holder:SetSize(PIP_MIN_W, PIP_H)
@@ -326,6 +367,14 @@ function Badges.UpdateBadge(frame)
     -- the pip inside the tab), and skin owns the tab. Ring its bell only when
     -- the width actually moved — a beat that changes nothing costs nothing.
     if (was or 0) ~= (w.width or 0) then
+        local V = ns.View
+        if V and V.active and type(V.LayoutTabs) == "function" then
+            -- The view sizes its tabs around PipWidth (the seam skin-over
+            -- introduced, preserved), so a chip that grew a digit means the
+            -- tab run has to be laid out again. Relayout is anchor-only and
+            -- never calls back here, so the bell cannot ring itself.
+            pcall(V.LayoutTabs)
+        end
         local S = ns.Skin
         if S and type(S.NoteBadgeChanged) == "function" then pcall(S.NoteBadgeChanged) end
     end
