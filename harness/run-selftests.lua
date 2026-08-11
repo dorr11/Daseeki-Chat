@@ -867,7 +867,7 @@ ns:RegisterSelfTest("integration", function(verbose)
             "leg 1: the URL linkified beside it")
         ck(msg:find("|Hplayer:Puu%-Whitemane") ~= nil,
             "leg 1: the sender's click payload is intact")
-        local _, stampN = msg:gsub("%[%d%d:%d%d%]", "")
+        local _, stampN = msg:gsub("%d%d:%d%d", "")
         ck(stampN == 1, "leg 1: exactly ONE stamp on the stored line (got " .. stampN .. ")")
         ck(ns.Badges.counts[cf1] == 1, "leg 1: the unseen window badged exactly once")
         local ring = ns.History.rings[1]
@@ -898,7 +898,7 @@ ns:RegisterSelfTest("integration", function(verbose)
         for i = 1, #cf1.historyBuffer.list do
             local e = cf1.historyBuffer.list[i]
             if not e.daseekiRestored then allRestored = false end
-            local _, n = tostring(e.message):gsub("%[%d%d:%d%d%]", "")
+            local _, n = tostring(e.message):gsub("%d%d:%d%d", "")
             if n > 1 then doubleStamped = true end
         end
         ck(allRestored, "leg 2: every backfilled entry is marked daseekiRestored")
@@ -921,7 +921,7 @@ ns:RegisterSelfTest("integration", function(verbose)
             and tostring(newest.message):find("back-live", 1, true) ~= nil,
             "leg 3: live content lands after the divider (newest entry is live)")
         ck(divAt < total, "leg 3: the divider sits strictly before the live line")
-        local _, liveStamps = tostring(newest and newest.message):gsub("%[%d%d:%d%d%]", "")
+        local _, liveStamps = tostring(newest and newest.message):gsub("%d%d:%d%d", "")
         ck(liveStamps == 1, "leg 3: the live line wears exactly one stamp")
         ck(ns.Badges.counts[cf1] == 1,
             "leg 3: the live line badged exactly once (restored lines contributed zero)")
@@ -945,7 +945,7 @@ ns:RegisterSelfTest("integration", function(verbose)
             "leg 4: …with the channel link's payload byte-identical")
         ck(chanMsg:find(aliasLink, 1, true) ~= nil,
             "leg 4: …and the item link beside it is still byte-intact")
-        local _, aliasStamps = chanMsg:gsub("%[%d%d:%d%d%]", "")
+        local _, aliasStamps = chanMsg:gsub("%d%d:%d%d", "")
         ck(aliasStamps == 1, "leg 4: the aliased line still wears exactly one stamp")
         C.SetAlias("World", "")
         Sim.SendChat{ event = "CHAT_MSG_CHANNEL", text = "native again",

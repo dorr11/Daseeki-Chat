@@ -115,9 +115,56 @@ end
 -- own text, ink and alpha belong to skin.lua and are never touched here.
 ----------------------------------------------------------------------
 
+-- THE MOCKUP CONTRACT (2026-08-11), the `.tab .n` row of skin.lua's mapping
+-- table: an accent-filled chip carrying WHITE digits, 10.5px, sitting after the
+-- tab's label with a 6px gap. Outside the one box the badge keeps exactly the
+-- quiet muted/accent FontString it has always been — the chip is the box's
+-- look, and the box's gate is the only thing that turns it on.
+local PIP_TEXT_SIZE = 10.5   -- .tab .n font-size
+local PIP_PAD_X     = 5      -- .tab .n padding: 0 5px
+local PIP_H         = 14     -- the chip's own height (10.5 * 1.3, rounded)
+local PIP_MIN_W     = 14     -- a single digit still reads as a chip, not a bar
+local RAIL_PAD_X    = 10     -- .stab padding-right, where a rail count sits
+
+-- Is the ONE BOX actually on screen? Both halves matter: the skin has to be
+-- ACTIVE (a disabled skin draws no box at all, and the chip belongs to the box)
+-- and the box has to be the configured look.
+local function boxed()
+    local S = ns.Skin
+    if not (S and S.active and type(S.Unified) == "function") then return false end
+    local ok, on = pcall(S.Unified)
+    return (ok and on) and true or false
+end
+
+-- The suite's palette, through skin's published accessor (one table, one place
+-- — see skin.lua's PALETTE). Falls back to Core tokens when skin is absent.
+local function ink(name)
+    local S = ns.Skin
+    if S and type(S.Ink) == "function" then
+        local ok, r, g, b, a = pcall(S.Ink, name)
+        if ok and type(r) == "number" then return r, g, b, a end
+    end
+    local UI = _G.DaseekiUI
+    if UI and UI.Color then return UI.Color(name) end
+    return nil
+end
+
 local function applyInk(frame, w)
     local UI = _G.DaseekiUI
     if not (UI and UI.Color and w and w.fs and w.fs.SetTextColor) then return end
+    if boxed() then
+        -- The mockup's chip: accent fill, white digits, whatever the line was.
+        -- A WHISPER still gets to say so — the chip is already accent, so the
+        -- distinction moves to the fill's own strength.
+        w.fs:SetTextColor(1, 1, 1, 1)
+        if w.chip and type(w.chip.SetColorTexture) == "function" then
+            local r, g, b = ink("accent")
+            if r then w.chip:SetColorTexture(r, g, b, Badges.whisperFlag[frame] and 1 or 0.85) end
+            w.chip:Show()
+        end
+        return
+    end
+    if w.chip then w.chip:Hide() end
     w.fs:SetTextColor(UI.Color(Badges.whisperFlag[frame] and "accent" or "muted"))
 end
 
@@ -142,19 +189,60 @@ function Badges.Placement()
     return "top"
 end
 
+-- The width this badge asks its tab for, so skin.lua can make the tab that
+-- wide (`.tab .n` is INSIDE the tab in the mockup, and a tab sized to its label
+-- alone has nowhere to put it). Zero when nothing is showing — a tab with no
+-- unread is exactly as wide as its label plus its padding.
+function Badges.PipWidth(frame)
+    local w = Badges.widgets[frame]
+    if not (w and w.holder) then return 0 end
+    if type(w.holder.IsShown) == "function" then
+        local ok, shown = pcall(w.holder.IsShown, w.holder)
+        if ok and not shown then return 0 end
+    end
+    return tonumber(w.width) or 0
+end
+
+-- Size the chip to its digits (the mockup's `padding:0 5px` around them).
+local function sizePip(w)
+    if not (w and w.holder and w.fs) then return 0 end
+    local textW = 0
+    if type(w.fs.GetStringWidth) == "function" then
+        local ok, v = pcall(w.fs.GetStringWidth, w.fs)
+        textW = (ok and tonumber(v)) or 0
+    end
+    local width = math.max(PIP_MIN_W, textW + 2 * PIP_PAD_X)
+    if type(w.holder.SetSize) == "function" then pcall(w.holder.SetSize, w.holder, width, PIP_H) end
+    w.width = width
+    return width
+end
+
 function Badges.AnchorWidget(w)
     if not (w and w.holder and w.tab) then return nil end
     local holder, tab = w.holder, w.tab
     if type(holder.ClearAllPoints) ~= "function" then return nil end
     local where = Badges.Placement()
-    if w.placement == where then return where end
+    local box = boxed()
+    if w.placement == where and w.boxed == box then return where end
     pcall(holder.ClearAllPoints, holder)
     if where == "rail" then
-        holder:SetPoint("RIGHT", tab, "RIGHT", -4, 0)
+        -- `.stab .n{float:right}` — right-aligned inside the row's own padding.
+        holder:SetPoint("RIGHT", tab, "RIGHT", box and -RAIL_PAD_X or -4, 0)
         if w.fs and type(w.fs.SetJustifyH) == "function" then w.fs:SetJustifyH("RIGHT") end
         if w.fs and type(w.fs.ClearAllPoints) == "function" then
             w.fs:ClearAllPoints()
-            w.fs:SetPoint("RIGHT", holder, "RIGHT", 0, 0)
+            w.fs:SetPoint("RIGHT", holder, "RIGHT", box and -PIP_PAD_X or 0, 0)
+        end
+    elseif box then
+        -- THE MOCKUP'S PIP: after the LABEL, inside the tab, 6px of gap. Off
+        -- the label's own right edge, never off the tab's — that is what used
+        -- to leave it floating in the 2px gap between two tabs.
+        local label = tab.Text or (tab.GetName and _G[tab:GetName() .. "Text"])
+        holder:SetPoint("LEFT", label or tab, "RIGHT", 6, 0)
+        if w.fs and type(w.fs.SetJustifyH) == "function" then w.fs:SetJustifyH("CENTER") end
+        if w.fs and type(w.fs.ClearAllPoints) == "function" then
+            w.fs:ClearAllPoints()
+            w.fs:SetPoint("CENTER", holder, "CENTER", 0, 0)
         end
     else
         -- Off the tab text's end, never over it (skin owns the tab's own ink).
@@ -166,6 +254,7 @@ function Badges.AnchorWidget(w)
         end
     end
     w.placement = where
+    w.boxed = box
     return where
 end
 
@@ -188,14 +277,28 @@ local function ensureWidget(frame)
     local tab = name and _G[name .. "Tab"]
     if not tab then return nil end
     local holder = _G.CreateFrame("Frame", nil, tab)
-    holder:SetSize(26, 12)
+    holder:SetSize(PIP_MIN_W, PIP_H)
+    -- The chip's fill, BEHIND the digits and behind nothing else. It is hidden
+    -- outside the box, so the pre-mockup badge is byte for byte what it was.
+    local chip
+    if type(holder.CreateTexture) == "function" then
+        chip = holder:CreateTexture(nil, "BACKGROUND")
+        chip:SetPoint("TOPLEFT", holder, "TOPLEFT", 0, 0)
+        chip:SetPoint("BOTTOMRIGHT", holder, "BOTTOMRIGHT", 0, 0)
+        chip:Hide()
+    end
     local fs = holder:CreateFontString(nil, "OVERLAY")
     fs:SetFontObject(UI.fonts and UI.fonts.small or nil)
+    -- `.tab .n{font-size:10.5px}` on the suite face (see skin.lua's mapping
+    -- table; tabular figures are a documented client limit).
+    if type(fs.SetFont) == "function" and type(UI.FontFile) == "function" then
+        pcall(fs.SetFont, fs, UI.FontFile(), PIP_TEXT_SIZE, "")
+    end
     if UI.Skin then
         UI.Skin(fs, function() applyInk(frame, Badges.widgets[frame]) end)
     end
     holder:Hide()
-    w = { holder = holder, fs = fs, tab = tab }
+    w = { holder = holder, fs = fs, tab = tab, chip = chip }
     Badges.widgets[frame] = w
     Badges.AnchorWidget(w)
     return w
@@ -208,12 +311,23 @@ function Badges.UpdateBadge(frame)
     if Badges.active and not optedOut(Badges.frameIds[frame]) then
         text = Badges.FormatCount(Badges.counts[frame])
     end
+    local was = w.width
     if text then
         w.fs:SetText(text)
         applyInk(frame, w)
+        sizePip(w)
         w.holder:Show()
     else
         w.holder:Hide()
+        if w.chip then w.chip:Hide() end
+        w.width = 0
+    end
+    -- The tab has to be as wide as its label PLUS this chip (the mockup keeps
+    -- the pip inside the tab), and skin owns the tab. Ring its bell only when
+    -- the width actually moved — a beat that changes nothing costs nothing.
+    if (was or 0) ~= (w.width or 0) then
+        local S = ns.Skin
+        if S and type(S.NoteBadgeChanged) == "function" then pcall(S.NoteBadgeChanged) end
     end
 end
 

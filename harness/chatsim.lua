@@ -343,7 +343,19 @@ function WIDGET_API.ClearFocus(self)
 end
 function WIDGET_API.HasFocus(self) return self._focused and true or false end
 function WIDGET_API.HighlightText(self) record("HighlightText") self._highlighted = true end
-function WIDGET_API.SetTextInsets(self) end
+-- ui/mockup-fidelity sim extension (additive): the insets are RECORDED now, so
+-- the entry bar's mockup padding is a pin instead of a claim.
+function WIDGET_API.SetTextInsets(self, l, r, t, b) self._textInsets = { l, r, t, b } end
+function WIDGET_API.GetTextInsets(self)
+    local i = self._textInsets
+    if not i then return 0, 0, 0, 0 end
+    return i[1], i[2], i[3], i[4]
+end
+-- …and the ONE typographic lever a ScrollingMessageFrame has: the row rhythm.
+function WIDGET_API.SetSpacing(self, s) self._spacing = s end
+function WIDGET_API.GetSpacing(self) return self._spacing or 0 end
+-- Draw sublevel, so "the surface is above the backdrop's own fill" is readable.
+function WIDGET_API.SetDrawLayer(self, layer, sub) self._drawLayer = { layer, sub } end
 function WIDGET_API.SetMaxLetters(self, n) self._maxLetters = n end
 function WIDGET_API.SetCursorPosition(self, n) end
 function WIDGET_API.SetNumeric(self, on) end
@@ -642,6 +654,16 @@ local STOCK_TEXTURES = {
     "BottomTexture",
 }
 _G.CHAT_FRAME_TEXTURES = STOCK_TEXTURES
+-- ui/mockup-fidelity sim extension (additive): the CLIENT's own TAB dress.
+-- Era's chat tab is a three-slice button with selected and highlight sets, all
+-- global-named $parentTab<suffix>. The addon never stripped these, which is why
+-- the shipped one box still wore the client's filled tab art — so the sim has
+-- to have them for "the box strips them" to be an assertion rather than a claim.
+local TAB_TEXTURES = {
+    "Left", "Middle", "Right",
+    "SelectedLeft", "SelectedMiddle", "SelectedRight",
+    "HighlightLeft", "HighlightMiddle", "HighlightRight",
+}
 _G.NUM_CHAT_WINDOWS = 10
 _G.MAX_WOW_CHAT_CHANNELS = 20
 
@@ -688,6 +710,10 @@ local function makeChatFrame(id)
     -- Tab + its text.
     local tab = newWidget("Button", name .. "Tab", f)
     tab.Text = newWidget("FontString", name .. "TabText", tab)
+    tab.Text._text = name .. "Tab"          -- a real label, so tab WIDTH is measurable
+    for _, suffix in ipairs(TAB_TEXTURES) do
+        newWidget("Texture", name .. "Tab" .. suffix, tab)
+    end
     -- w2/button-column sim extension: the CHAT BUTTON FRAME — the little
     -- chat-menu + scroll-button column hanging off the window's edge. Modeled
     -- in BOTH client shapes (the frame's own `buttonFrame` field, which is the
