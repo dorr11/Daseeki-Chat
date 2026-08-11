@@ -101,6 +101,9 @@ local Skin = {
     columnHides = 0,   -- times we actually took the column down (never a loop)
     menuOpens   = 0,   -- times we opened the client's chat menu
     _bfDepth    = 0,   -- button-column re-entrancy latch (Class 9)
+    -- skin v2.3 state (the column is DISABLED, not just hidden — owner ask)
+    columnDisables     = 0,   -- windows whose column subtree lost the mouse
+    columnEventsDropped = 0,  -- widgets we called UnregisterAllEvents on
 }
 ns.Skin = Skin
 
@@ -571,6 +574,59 @@ local function ensureUnderline(tab, rec)
     return tex
 end
 
+----------------------------------------------------------------------
+-- CHANNEL ALIASES, SURFACE 3 OF 3: the tab label.
+--
+-- A window whose routing collapses to exactly ONE channel identity (the same
+-- strict dominance rule the tab INK already uses — see DominantChannel) wears
+-- that channel's alias as its label. Same seam, same answer: if the chat line
+-- says "[Trade]" and the edit box says "Trade:", the tab says "Trade".
+--
+-- Reversible by construction: the client's own label is remembered on the
+-- first override, and the moment the alias goes away (or the module does) the
+-- remembered text is put back — never a blanket re-write of a name the player
+-- or the reconciler owns.
+----------------------------------------------------------------------
+
+function Skin.TabLabel(frame, id)
+    local C = ns.Config
+    if not (C and C.AliasLabel) then return nil end
+    if isCombatLog(frame, id) then return nil end
+    if frame and frame.isTemporary then return nil end
+    local entry = Skin.WindowRouting(id)
+    local kind, value = Skin.DominantChannel(entry, false)
+    if kind ~= "channel" then return nil end
+    local num
+    local Ch = ns.Channels
+    if Ch and Ch.NumberOf then num = Ch.NumberOf(value) end
+    return C.AliasLabel(num, value)
+end
+
+-- Apply (or take back) one tab's alias label. Returns the label in force, or
+-- nil when the tab is showing the client's own text.
+function Skin.ApplyTabLabel(frame, rec, text)
+    if not (rec and text and type(text.SetText) == "function") then return nil end
+    local label = Skin.TabLabel(frame, rec.id)
+    if label then
+        if rec.origTabText == nil and type(text.GetText) == "function" then
+            local ok, was = pcall(text.GetText, text)
+            rec.origTabText = (ok and type(was) == "string") and was or false
+        end
+        if rec.tabLabel ~= label then
+            pcall(text.SetText, text, label)
+            rec.tabLabel = label
+        end
+        return label
+    end
+    if rec.tabLabel ~= nil then
+        -- The alias went away: hand the client's own label back.
+        if type(rec.origTabText) == "string" then pcall(text.SetText, text, rec.origTabText) end
+        rec.tabLabel = nil
+        rec.origTabText = nil
+    end
+    return nil
+end
+
 function Skin.UpdateTabColors()
     local UI = UIKit()
     if not UI then return end
@@ -581,6 +637,7 @@ function Skin.UpdateTabColors()
         local tab, text = tabText(frame)
         local rec = Skin.styled[frame]
         if tab and text then
+            Skin.ApplyTabLabel(frame, rec, text)
             local isSel = (frame == sel)
             local r, g, b, source
             if channelTabs then
@@ -889,10 +946,67 @@ function Skin.ColorEditBoxHeader(eb)
     return r, g, b
 end
 
+----------------------------------------------------------------------
+-- CHANNEL ALIASES, SURFACE 2 OF 3: the sticky prefix on the edit box.
+--
+-- One alias source (Config.AliasLabel — the same call the chat-line link
+-- decorator and the tab label make), three surfaces. Nothing here knows how an
+-- alias is spelled, whether the number is kept, or where aliases are stored;
+-- it asks the seam and renders the answer.
+--
+-- SHAPE DISCIPLINE: each surface keeps the CLIENT's own shape and swaps only
+-- the label inside it. The chat line's header is bracketed ("[2. Trade - City]"
+-- -> "[Trade]"), and the edit box's prefix is not ("2. Trade - City:" ->
+-- "Trade:"). Adding brackets here would invent a shape the client never used.
+--
+-- Runs at the client's own header beat (the ChatEdit_UpdateHeader post-hook),
+-- so a sticky change, a tab-cycle or a /channel switch re-derives it for free
+-- and an un-aliased channel is simply left with the text the client just wrote.
+----------------------------------------------------------------------
+
+-- The (number, name) pair for whatever the edit box is sticky-targeting. The
+-- client hands a NUMBER; the name is resolved through GetChannelName, the same
+-- by-name discipline the color path uses. Either half may be UNKNOWN (nil).
+function Skin.EditBoxChannelTarget(eb)
+    local target = editBoxAttr(eb, "ChatEdit_GetChannelTarget", "channelTarget")
+    if target == nil or target == "" then return nil, nil end
+    local f = _G.GetChannelName
+    if type(f) == "function" then
+        local ok, num, name = pcall(f, target)
+        if ok and type(name) == "string" and name ~= "" then
+            return tonumber(num) or tonumber(target), name
+        end
+    end
+    -- No resolver (or an un-joined target): a string target IS the name.
+    if type(target) == "string" and not tonumber(target) then return nil, target end
+    return tonumber(target), nil
+end
+
+-- Rewrite the prefix to the alias when there is one. Returns the label it
+-- wrote, or nil when it wrote nothing (which is the untouched-client case).
+function Skin.AliasEditBoxHeader(eb)
+    if not Skin.active then return nil end
+    local header = editBoxHeader(eb)
+    if not header or type(header.SetText) ~= "function" then return nil end
+    local chatType = editBoxAttr(eb, "ChatEdit_GetActiveChatType", "chatType")
+    if type(chatType) ~= "string" or chatType:upper() ~= "CHANNEL" then return nil end
+    local C = ns.Config
+    if not (C and C.AliasLabel) then return nil end
+    local num, name = Skin.EditBoxChannelTarget(eb)
+    if not name then return nil end
+    local label = C.AliasLabel(num, name)
+    if not label then return nil end
+    header:SetText(label .. ":")
+    return label
+end
+
 function Skin.RecolorEditBoxHeaders()
     for _, frame in ipairs(Skin.order) do
         local eb = editBoxOf(frame)
-        if eb then Skin.ColorEditBoxHeader(eb) end
+        if eb then
+            Skin.ColorEditBoxHeader(eb)
+            Skin.AliasEditBoxHeader(eb)
+        end
     end
 end
 
@@ -1318,12 +1432,140 @@ end
 -- shape this code can take. A refused hide is not retried in a spin either: it
 -- is swallowed here and picked up by the next client beat that re-shows the
 -- column, which is the only beat where it matters again.
+----------------------------------------------------------------------
+-- THE COLUMN IS DISABLED, NOT MERELY HIDDEN (owner, 2026-08-11: "completely
+-- disable them and remove their hitboxes").
+--
+-- Hide() takes the pixels; it does NOT reliably take the mouse. A hidden frame
+-- does not receive input in this client, but the column is a frame the client
+-- RE-SHOWS on its own beats (every button-side update), and in the window
+-- between its show and our re-hide its buttons are live — which is exactly the
+-- "invisible hitbox beside my chat window" the owner is describing. So the
+-- option now takes three things, in this order:
+--   1. the MOUSE, off the column frame and off every descendant button, with
+--      each widget's prior state RECORDED so OFF restores it exactly;
+--   2. any EVENT registrations those widgets hold (UnregisterAllEvents);
+--   3. the pixels (Hide), plus the existing keep-hidden last word as the belt.
+-- Re-applied on every beat that re-shows the column, so a client that
+-- resurrects it hands back a frame with nothing interactive on it.
+--
+-- THE ONE HONEST GAP: the client offers no way to enumerate the events a frame
+-- holds (IsEventRegistered answers about a NAMED event; there is no listing),
+-- so step 2 is not exactly reversible. Mouse state is captured and restored
+-- byte-for-byte; dropped event registrations are not recoverable, and turning
+-- the option OFF prints ONE line saying so and naming /reload as the exact
+-- restore. Never a half-restored state pretending to be whole.
+----------------------------------------------------------------------
+
+-- Frame-ish children only (the client's GetChildren answers frames; textures
+-- and font strings are not children and carry no hitbox of their own).
+local function childFrames(w)
+    if type(w) ~= "table" or type(w.GetChildren) ~= "function" then return {} end
+    local ok, kids = pcall(function() return { w:GetChildren() } end)
+    if not ok or type(kids) ~= "table" then return {} end
+    local out = {}
+    for i = 1, #kids do
+        if type(kids[i]) == "table" then out[#out + 1] = kids[i] end
+    end
+    return out
+end
+
+-- The column frame and every descendant, in a stable walk order (Class 8: the
+-- disable/restore pair must visit the same widgets in the same order every
+-- time). Depth-bounded — a cycle in a client hierarchy must not hang us.
+function Skin.ColumnWidgets(frame)
+    local out, seen = {}, {}
+    local function walk(w, depth)
+        if type(w) ~= "table" or seen[w] or depth > 4 then return end
+        seen[w] = true
+        out[#out + 1] = w
+        for _, kid in ipairs(childFrames(w)) do walk(kid, depth + 1) end
+    end
+    walk(Skin.ButtonColumnOf(frame), 0)
+    return out
+end
+
+-- Take the mouse (and any events) off the column subtree. Idempotent, and
+-- cheap on a beat where everything is already disabled: a widget already in
+-- the record is only re-asserted (which is what a client re-show needs).
+-- Returns the number of widgets disabled.
+function Skin.DisableButtonColumn(frame)
+    local rec = Skin.styled[frame]
+    if not rec then return 0 end
+    rec.bfDisabled = rec.bfDisabled or {}      -- widget -> { mouse = bool|nil }
+    rec.bfDisabledOrder = rec.bfDisabledOrder or {}
+    local n = 0
+    for _, w in ipairs(Skin.ColumnWidgets(frame)) do
+        local state = rec.bfDisabled[w]
+        if not state then
+            state = {}
+            if type(w.IsMouseEnabled) == "function" then
+                local okM, on = pcall(w.IsMouseEnabled, w)
+                if okM then state.mouse = on and true or false end
+            end
+            rec.bfDisabled[w] = state
+            rec.bfDisabledOrder[#rec.bfDisabledOrder + 1] = w
+            -- Events go ONCE per widget (on first capture): re-running
+            -- UnregisterAllEvents on every client beat would be a per-beat
+            -- client call for nothing.
+            if type(w.UnregisterAllEvents) == "function" then
+                if pcall(w.UnregisterAllEvents, w) then
+                    rec.bfEventsDropped = true
+                    Skin.columnEventsDropped = Skin.columnEventsDropped + 1
+                end
+            end
+        end
+        if type(w.EnableMouse) == "function" then
+            if pcall(w.EnableMouse, w, false) then n = n + 1 end
+        end
+    end
+    Skin.columnDisables = Skin.columnDisables + (n > 0 and 1 or 0)
+    return n
+end
+
+-- The honest line, once per session, when a disabled column is handed back.
+function Skin.NoteColumnEventRestore()
+    if Skin._columnEventNoticed then return false end
+    Skin._columnEventNoticed = true
+    ns:Print("chat button column restored: its mouse is live again exactly as it was.")
+    ns:Print("  Event registrations its buttons held were dropped while it was disabled, and the")
+    ns:Print("  client cannot enumerate them to put them back - /reload restores those exactly.")
+    return true
+end
+
+-- Give the column's widgets their mouse back, precisely as each one had it.
+-- Returns the number restored.
+function Skin.EnableButtonColumn(frame, rec)
+    rec = rec or Skin.styled[frame]
+    if not (rec and rec.bfDisabledOrder) then return 0 end
+    local n = 0
+    for _, w in ipairs(rec.bfDisabledOrder) do
+        local state = rec.bfDisabled and rec.bfDisabled[w]
+        if state and type(w.EnableMouse) == "function" then
+            -- UNKNOWN prior state (a client that would not answer
+            -- IsMouseEnabled) restores to ENABLED, which is the client's own
+            -- default for a button column — never left silently dead.
+            if pcall(w.EnableMouse, w, state.mouse ~= false) then n = n + 1 end
+        end
+    end
+    rec.bfDisabled, rec.bfDisabledOrder = nil, nil
+    if rec.bfEventsDropped then
+        rec.bfEventsDropped = nil
+        Skin.NoteColumnEventRestore()
+    end
+    return n
+end
+
 function Skin.KeepButtonColumnHidden(frame)
     if not Skin.HideButtonColumn() then return false end
     local rec = Skin.styled[frame]
     if not rec then return false end
     local col = Skin.ButtonColumnOf(frame)
     if not col or type(col.Hide) ~= "function" then return false end
+    -- The hitbox goes FIRST and unconditionally — before the early return for
+    -- an already-hidden column — because a client re-show can bring back a
+    -- child button whose mouse we have never taken.
+    Skin.DisableButtonColumn(frame)
     -- The client's own visibility, remembered on the first touch so a disable
     -- hands back exactly what it had (never a blanket Show).
     if rec.bfWasShown == nil and type(col.IsShown) == "function" then
@@ -1356,6 +1598,9 @@ function Skin.RestoreButtonColumn(frame, rec)
     rec = rec or Skin.styled[frame]
     if not (rec and rec.bfForcedHidden) then return false end
     rec.bfForcedHidden = nil
+    -- The mouse comes back before the pixels do, so there is never a beat where
+    -- a visible column is dead to the pointer.
+    Skin.EnableButtonColumn(frame, rec)
     local col = Skin.ButtonColumnOf(frame)
     if not col then return false end
     if rec.bfWasShown == false then return false end   -- it was down before us
@@ -1721,6 +1966,7 @@ function Skin.StyleWindow(frame, id)
         local eb = editBoxOf(frame)
         if eb then
             Skin.ColorEditBoxHeader(eb)
+            Skin.AliasEditBoxHeader(eb)
             Skin.KeepEditBoxShown(eb)
         end
     end
@@ -1768,11 +2014,17 @@ local function restoreWindow(frame, rec)
     if rec.origFont and type(frame.SetFont) == "function" then
         pcall(frame.SetFont, frame, rec.origFont[1], rec.origFont[2], rec.origFont[3])
     end
-    if rec.origTabColor then
-        local _, text = tabText(frame)
-        if text and type(text.SetTextColor) == "function" then
-            text:SetTextColor(rec.origTabColor[1], rec.origTabColor[2], rec.origTabColor[3])
+    local _, tabLabelFS = tabText(frame)
+    if rec.origTabColor and tabLabelFS and type(tabLabelFS.SetTextColor) == "function" then
+        tabLabelFS:SetTextColor(rec.origTabColor[1], rec.origTabColor[2], rec.origTabColor[3])
+    end
+    -- An aliased tab label is the client's text again the moment we leave.
+    if rec.tabLabel ~= nil then
+        if type(rec.origTabText) == "string" and tabLabelFS and type(tabLabelFS.SetText) == "function" then
+            pcall(tabLabelFS.SetText, tabLabelFS, rec.origTabText)
         end
+        rec.tabLabel = nil
+        rec.origTabText = nil
     end
 end
 
@@ -1868,6 +2120,9 @@ local function installHooks()
         hook("ChatEdit_UpdateHeader", function(editBox)
             if not Skin.active then return end
             Skin.ColorEditBoxHeader(editBox)
+            -- The alias goes on AFTER the client wrote its own text, in the
+            -- same call — the post-hook posture the whole file uses.
+            Skin.AliasEditBoxHeader(editBox)
         end)
     end
     -- The persistent edit box's PRIMARY seam: the client deactivates (Escape,
@@ -1998,6 +2253,8 @@ ns.RegisterDebugCommand("skin", "skin state: styled windows, config, tab inks", 
         :format(tostring(c.altDragMove), tostring(c.persistentEditBox),
                 tostring(c.unclampWindows), tostring(Skin.moveMode), Skin.moves))
     local menuKind = Skin.ChatMenuSeam()
+    ns:Print(("  column: %d disable(s), %d widget event-drop(s) (OFF needs /reload for events)")
+        :format(Skin.columnDisables, Skin.columnEventsDropped))
     ns:Print(("  hideButtonColumn=%s | %d column hide(s), chat menu seam '%s', %d open(s)")
         :format(tostring(c.hideButtonColumn), Skin.columnHides,
                 tostring(menuKind or "none"), Skin.menuOpens))
@@ -2929,6 +3186,99 @@ local function testButtonColumn(fails, verbose)
     HT.flush()
     ck(Skin.columnHides == idleHides,
         "B3: five idle re-evaluation beats cost ZERO client calls (no fight loop)")
+
+    -- ── Phase B3b: THE HITBOX IS GONE (owner, 2026-08-11: "completely disable
+    -- them and remove their hitboxes"). Hiding takes the pixels; this pins that
+    -- the option ALSO takes the mouse — off the column AND off every button in
+    -- it — so a click at the column's own coordinates reaches whatever is
+    -- behind it, and that OFF gives every one of them back exactly. ──────────
+    -- A clean slate first: the option OFF hands the column back and clears our
+    -- record, so what follows is a whole capture-disable-restore cycle rather
+    -- than an assertion about leftovers.
+    local quiet = ns.Print
+    ns.Print = function() end
+    ns.db.skin.hideButtonColumn = false
+    Skin.Refresh()
+    ns.Print = quiet
+    Skin._columnEventNoticed = false
+
+    local upBtn = _G.ChatFrame1ButtonFrameUpButton
+    ck(upBtn ~= nil and upBtn:IsMouseEnabled() == true,
+        "B3b: with the option off the column's buttons are live, as the client left them")
+    upBtn:RegisterEvent("UPDATE_CHAT_WINDOWS")
+    ck(upBtn:IsEventRegistered("UPDATE_CHAT_WINDOWS") == true, "B3b: the button holds an event")
+
+    local dropsBefore = Skin.columnEventsDropped
+    ns.db.skin.hideButtonColumn = true
+    Skin.Refresh()
+    local widgets = Skin.ColumnWidgets(cf1)
+    ck(#widgets >= 4, "B3b: the walk finds the column AND its buttons (got " .. #widgets .. ")")
+    ck(widgets[1] == bf, "B3b: …starting at the column itself")
+    local allDead = true
+    for _, w in ipairs(widgets) do
+        if type(w.IsMouseEnabled) == "function" and w:IsMouseEnabled() then allDead = false end
+    end
+    ck(allDead, "B3b: EVERY widget in the column subtree has its mouse OFF")
+    ck(upBtn:IsEventRegistered("UPDATE_CHAT_WINDOWS") == false,
+        "B3b: …and the disable took its event registration (UnregisterAllEvents)")
+    ck(Skin.columnEventsDropped > dropsBefore, "B3b: the drop is COUNTED, not silent")
+
+    -- THE POINTER LEG: a probe frame parked exactly under the column's rect.
+    -- With the column live the column wins the point; with the option on the
+    -- probe does — which is the hitbox question asked literally.
+    local cl, cb, cw, chh = Sim.ColumnRect(cf1)
+    ck(cl ~= nil, "B3b: the column has a measurable rect")
+    local probe = Sim.NewWidget("Frame", nil, _G.UIParent)
+    probe._left, probe._bottom, probe._w, probe._h = cl, cb, cw, chh
+    probe._mouse, probe._shown = true, true
+    local px, py = cl + cw / 2, cb + chh / 2
+    local candidates = { upBtn, bf, probe }
+    ck(Sim.HitTest(px, py, candidates) == probe,
+        "B3b: THE PIN — a click at the column's coordinates reaches what is UNDER it")
+
+    -- The button's OWN rect, which is where a stray click actually lands.
+    local bl, bb = upBtn._left, upBtn._bottom
+    ck(bl ~= nil, "B3b: the column's button has a rect of its own")
+    ck(Sim.HitTest(bl + 2, bb + 2, candidates) == probe,
+        "B3b: …and a click on the BUTTON reaches through as well")
+
+    -- OFF RESTORES: mouse back on everything, and the click lands on the column
+    -- again. The event is NOT restored — the client cannot enumerate what a
+    -- frame holds — so the option-off path prints one honest line saying so,
+    -- which is exactly what Skin.NoteColumnEventRestore exists for.
+    local said = {}
+    local realPrint = ns.Print
+    ns.Print = function(_, ...) said[#said + 1] = table.concat({ ... }, " ") end
+    ns.db.skin.hideButtonColumn = false
+    Skin.Refresh()
+    ns.Print = realPrint
+    ck(bf._shown == true, "B3b: option OFF gives the column back")
+    local allLive = true
+    for _, w in ipairs(Skin.ColumnWidgets(cf1)) do
+        if type(w.IsMouseEnabled) == "function" and not w:IsMouseEnabled() then allLive = false end
+    end
+    ck(allLive, "B3b: …with every widget's mouse restored")
+    ck(Sim.HitTest(px, py, { bf, probe }) == bf,
+        "B3b: …so the column wins its own coordinates again")
+    local honest = false
+    for _, line in ipairs(said) do if line:find("/reload", 1, true) then honest = true end end
+    ck(honest, "B3b: THE HONESTY PIN — the restore says out loud that events need /reload")
+    ck(upBtn:IsEventRegistered("UPDATE_CHAT_WINDOWS") == false,
+        "B3b: …because they really are still gone (never a half-restored pretence)")
+    local saidAgain = {}
+    local realPrint2 = ns.Print
+    ns.Print = function(_, ...) saidAgain[#saidAgain + 1] = table.concat({ ... }, " ") end
+    ns.db.skin.hideButtonColumn = true
+    Skin.Refresh()
+    ns.db.skin.hideButtonColumn = false
+    Skin.Refresh()
+    ns.Print = realPrint2
+    ck(#saidAgain == 0, "B3b: the line is said ONCE per session, never on every toggle")
+
+    probe:Hide()
+    ns.db.skin.hideButtonColumn = true
+    Skin.Refresh()
+    ck(bf._shown == false, "B3b: back to the shipped posture for the phases below")
 
     -- ── Phase B4: THE MENU VERB — the one thing the column owned ────────────
     local kind, verb, subject = Skin.ChatMenuSeam()

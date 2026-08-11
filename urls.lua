@@ -42,6 +42,9 @@ local DEFAULTS = {
     brackets = true,   -- display the URL in [brackets]
 }
 
+-- Published for the settings pane's bind-check (see stamps.lua's note).
+Urls.DEFAULTS = DEFAULTS
+
 local LINK_PREFIX = "addon:dchaturl:"
 local POPUP_ID = "DASEEKI_CHAT_URL"
 

@@ -72,6 +72,42 @@ This entry accumulates until 1.0.0 ships. Foundation so far:
   (languages, emotes, whisper targets) is still one click away — on the icon
   rail, or by right-clicking the channel label on the input bar. Turn the
   option off and the game's column comes straight back, side-switching and all.
+- **A settings window.** Chat now has a page in the Daseeki settings window
+  alongside the rest of the suite (`/dchat options`, or open the Daseeki window
+  and pick Chat). Everything that was only reachable as a slash command is a
+  control now, in eight groups: Appearance (channel-colored tabs, the timestamp
+  divider, the colored edit-box prefix, the icon rail, the game's button column,
+  the copy button, text fading and its delay), Timestamps (on/off, four formats,
+  server time, what to do when the game's own timestamps are on, stamp color),
+  Names (class coloring, brackets, remembering classes between sessions), Links
+  (detection, brackets), History (on/off, lines kept, how old is too old),
+  Unread badges (on/off, clearing a group filter), Windows (the persistent edit
+  box and where it sits, ALT-drag, reaching the screen edge, the session unlock,
+  plus the reconciler's live status and a **Reconcile now** button), and Channel
+  names. Every change applies live; nothing needs a reload.
+- **Custom channel names.** Give a channel your own short name and chat uses it
+  everywhere: `[2. Trade - City]` becomes `[Trade]` in every chat line, on the
+  input bar's channel label when you are talking there, and on a tab that
+  belongs to that channel. One name, all three places. Channel links keep
+  working exactly as before — only the words you see change, and the game's own
+  click target is untouched down to the byte. Names are matched however they are
+  capitalized and are remembered by NAME rather than by number, because channel
+  numbers differ between characters and shift as you join and leave. Aliases are
+  account-wide and travel with the rest of your chat configuration to every
+  account on the mesh. The editor lists the channels you are in (and any you
+  have already named), with a row to add one you are not in right now; clear a
+  box to go back to the game's own name. There is one switch for whether the
+  number is kept — `[2. Trade]` — and it ships off, so the default is the clean
+  short name.
+- **The button column is disabled, not just hidden.** With the option on (still
+  the default) the game's chat button strip loses its mouse — the column frame
+  and every button in it — so there is no invisible hitbox left beside your chat
+  window for a stray click to find, and any event registrations those buttons
+  held are dropped too. Turning the option off restores the mouse on every one
+  of them exactly as the game had it; the dropped event registrations cannot be
+  put back (the game gives no way to list what a frame was listening for), so
+  the restore says so in one line and names `/reload` as the exact fix rather
+  than pretending to be complete.
 - **`/dchat debug position`** prints everything that decides where a window
   lands: the scale chain, the screen's size in both units and pixels, the clamp
   state and margins, the game's saved position, the live position, and the saved
@@ -83,5 +119,8 @@ This entry accumulates until 1.0.0 ships. Foundation so far:
   header beat, real frame geometry with a clamped drag and an unclamped
   programmatic placement, a drivable UI scale, the edit box's own show/hide
   machinery under both chat styles, the per-window button column with the
-  game's own side-flipping and its share of the drag footprint, a real pointer,
+  game's own side-flipping and its share of the drag footprint, a real pointer
+  (including a hit test that answers whether a click reaches through a disabled
+  frame to what is behind it), a recording model of the Daseeki settings hub so
+  the settings page is really built and every control really driven under test,
   and call counting throughout.

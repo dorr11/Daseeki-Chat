@@ -98,10 +98,15 @@ realprint("")
 --      doc's file map, in order — three Wave-2 agents fill these files in
 --      place and never touch the .toc.
 ----------------------------------------------------------------------
+-- FILE MAP AMENDMENT (2026-08-11, owner-requested): options.lua joins the map
+-- after skin.lua and before nexus.lua. DASEEKI_CHAT_DESIGN.md's file map was
+-- amended in the same commit with a dated note; this gate still pins the list
+-- byte-for-byte, which is the whole point of amending it here rather than
+-- loosening the check.
 local EXPECTED_FILE_MAP = {
     "core.lua", "config.lua", "reconcile.lua", "channels.lua", "decor.lua",
     "stamps.lua", "names.lua", "urls.lua", "history.lua", "badges.lua",
-    "skin.lua", "nexus.lua",
+    "skin.lua", "options.lua", "nexus.lua",
 }
 
 local function tocDirective(src, key)
@@ -306,6 +311,10 @@ _G.DaseekiChatDB.modules.urls   = false
 -- w2/reconciler suites: reconcile + channels start disabled for the same gate
 _G.DaseekiChatDB.modules.reconcile = false
 _G.DaseekiChatDB.modules.channels = false
+-- post-V1/options: the settings pane is a lifecycle module too, so it starts
+-- disabled and the inertness gate pins that a disabled pane registers NOTHING
+-- with the Daseeki hub; its own suite enables it (the skin precedent).
+_G.DaseekiChatDB.modules.options = false
 
 ----------------------------------------------------------------------
 -- ns namespace + suite-registration sentinel (Bags precedent: intercept the
@@ -412,6 +421,15 @@ do
     KNOWN_MODULES.reconcile = true
     KNOWN_MODULES.channels = true
     -- end w2/reconciler suites
+    -- post-V1/options: the settings pane module
+    KNOWN_MODULES.options = true
+    ck(ns.Options and ns.Options.active == false, "the options pane is inactive")
+    ck(ns.Options and ns.Options.registered == false,
+        "the options pane registered NOTHING with the Daseeki hub while disabled")
+    ck(_G.DaseekiUI and _G.DaseekiUI.__RegisteredAddon("chat") == nil,
+        "…and the hub really has no Chat page yet")
+    ck(ns.Options and ns.Options._built == false, "…and no pane was built")
+    -- end post-V1/options
     local knownCount = 0
     for _ in pairs(KNOWN_MODULES) do knownCount = knownCount + 1 end
     ck(#ns.ModuleOrder == knownCount,
@@ -908,6 +926,36 @@ ns:RegisterSelfTest("integration", function(verbose)
         ck(ns.Badges.counts[cf1] == 1,
             "leg 3: the live line badged exactly once (restored lines contributed zero)")
 
+        -- ── Leg 4: a CHANNEL line with an ALIAS, in the merged world. ────────
+        -- The alias decorator shares decor.lua's protect/restore engine with
+        -- stamps, names, urls, history and badges all live. This is the one
+        -- place that proves a display rename of a live hyperlink survives the
+        -- full stack: the header reads as the alias, the click payload is
+        -- byte-identical, and the item link on the same line is untouched.
+        local aliasLink = Sim.MakeItemLink()
+        C.SetAlias("World", "Glob")
+        Sim.SendChat{ event = "CHAT_MSG_CHANNEL", text = "trading " .. aliasLink,
+            sender = "Choco", guid = "Player-1-00000002",
+            channelNumber = 2, channelName = "World" }
+        HTIMER.advance(0)
+        local chanMsg = tostring((cf1.historyBuffer:GetEntryAtIndex(1) or {}).message)
+        ck(chanMsg:find("|Hchannel:channel:2|h[Glob]|h", 1, true) ~= nil,
+            "leg 4: the channel header wears the ALIAS under the full stack")
+        ck(chanMsg:find("|Hchannel:channel:2|h", 1, true) ~= nil,
+            "leg 4: …with the channel link's payload byte-identical")
+        ck(chanMsg:find(aliasLink, 1, true) ~= nil,
+            "leg 4: …and the item link beside it is still byte-intact")
+        local _, aliasStamps = chanMsg:gsub("%[%d%d:%d%d%]", "")
+        ck(aliasStamps == 1, "leg 4: the aliased line still wears exactly one stamp")
+        C.SetAlias("World", "")
+        Sim.SendChat{ event = "CHAT_MSG_CHANNEL", text = "native again",
+            sender = "Choco", guid = "Player-1-00000002",
+            channelNumber = 2, channelName = "World" }
+        HTIMER.advance(0)
+        ck(tostring((cf1.historyBuffer:GetEntryAtIndex(1) or {}).message)
+            :find("[2. World]", 1, true) ~= nil,
+            "leg 4: removing the alias returns the client's own header")
+
         -- Tidy: focused window back; stamps and the reconciler wave back to
         -- the states their own suites left (disabled); the DEFAULT window
         -- world restored (this suite authored a converged layout); timers
@@ -941,6 +989,8 @@ local EXPECTED_SUITES = { "core", "skin", "placeholders",
     "decor", "stamps", "names", "urls",
     -- w2/reconciler suites
     "config", "reconcile", "channels", "nexus",
+    -- post-V1: the settings pane + the channel-alias editor
+    "options",
     -- w2/integration: the merged-world leg (all Wave-2 modules at once)
     "integration",
 }
