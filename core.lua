@@ -336,6 +336,32 @@ function ns.GetDebugCommand(name)
     return debugCommands[tostring(name):lower()]
 end
 
+-- The TOP-LEVEL command registry, the same shape one level up: a module owns a
+-- discoverable verb (`/dchat unlock`) without core needing to know what it
+-- does. Built-in verbs always win, so a module can never shadow `status`,
+-- `enable`, `disable` or `debug`.
+local extraCommands = {}   -- name -> { help = string, fn = function(rest) }
+local extraOrder    = {}   -- stable listing order
+
+local BUILTIN_COMMANDS = {
+    [""] = true, help = true, status = true, enable = true, disable = true, debug = true,
+}
+
+function ns.RegisterCommand(name, help, fn)
+    name = tostring(name):lower()
+    if BUILTIN_COMMANDS[name] then
+        ns:Print("refusing to register '" .. name .. "': it is a built-in command")
+        return false
+    end
+    if not extraCommands[name] then extraOrder[#extraOrder + 1] = name end
+    extraCommands[name] = { help = help, fn = fn }
+    return true
+end
+
+function ns.GetCommand(name)
+    return extraCommands[tostring(name):lower()]
+end
+
 local function dispatch(msg)
     local cmd, rest = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
     cmd = (cmd or ""):lower()
@@ -344,6 +370,9 @@ local function dispatch(msg)
         ns:Print("  /dchat status              - module states")
         ns:Print("  /dchat enable <module>     - turn a module on")
         ns:Print("  /dchat disable <module>    - turn a module off (fully inert)")
+        for _, name in ipairs(extraOrder) do
+            ns:Print(("  /dchat %-19s- %s"):format(name, extraCommands[name].help or ""))
+        end
         ns:Print("  /dchat debug <what>        - diagnostics:")
         for _, name in ipairs(debugOrder) do
             ns:Print("    /dchat debug " .. name .. " - " .. (debugCommands[name].help or ""))
@@ -374,6 +403,8 @@ local function dispatch(msg)
         else
             ns:Print("unknown debug command '" .. sub .. "'. /dchat help lists them.")
         end
+    elseif extraCommands[cmd] then
+        ns:SafeCall(extraCommands[cmd].fn, rest)
     else
         ns:Print("unknown command '" .. cmd .. "'. Try /dchat help.")
     end
@@ -576,6 +607,34 @@ local function testSlash(fails)
     -- The built-ins are present (the /dchat debug selftest gate).
     ck(ns.GetDebugCommand("selftest") ~= nil, "debug selftest is registered")
     ck(ns.GetDebugCommand("modules") ~= nil, "debug modules is registered")
+
+    -- TOP-LEVEL command registry: a module's own discoverable verb routes with
+    -- its rest-args, is listed by help, and can never shadow a built-in.
+    local topGot
+    ck(ns.RegisterCommand("t_verb", "test verb", function(rest) topGot = rest end) == true,
+        "a module can register a top-level command")
+    ns.SlashDispatch("t_verb alpha beta")
+    ck(topGot == "alpha beta", "the top-level registry routes the verb with its args")
+    ck(ns.GetCommand("t_verb") ~= nil, "the registered verb is retrievable")
+
+    local refused = {}
+    local realPrint2 = ns.Print
+    ns.Print = function(_, ...) refused[#refused + 1] = table.concat({ ... }, " ") end
+    local statusHits = 0
+    local okReg = ns.RegisterCommand("status", "hijack", function() statusHits = statusHits + 1 end)
+    ns.SlashDispatch("status")
+    ns.Print = realPrint2
+    ck(okReg == false, "registering a BUILT-IN name is refused")
+    ck(statusHits == 0, "…and the built-in still runs its own body (no shadowing)")
+
+    local helped = {}
+    local realPrint3 = ns.Print
+    ns.Print = function(_, ...) helped[#helped + 1] = table.concat({ ... }, " ") end
+    ns.SlashDispatch("help")
+    ns.Print = realPrint3
+    local listed = false
+    for _, line in ipairs(helped) do if line:find("t_verb", 1, true) then listed = true end end
+    ck(listed, "the verb is DISCOVERABLE in /dchat help")
 end
 
 function ns.CoreRunSelfTests(verbose)

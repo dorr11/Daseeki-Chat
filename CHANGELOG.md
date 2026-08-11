@@ -35,7 +35,39 @@ This entry accumulates until 1.0.0 ships. Foundation so far:
   newest line. Nothing new hides behind them.
 - Every one of the four is a separate switch under `/dchat debug skin`; turning
   the tab colors off restores the previous look exactly.
+- **Move a window without an edit mode.** Hold ALT and drag anywhere on a chat
+  window to move it — no unlocking, no tab-dragging, no mode. A docked window
+  moves the whole dock, which is the only move the game keeps. Let go and the
+  new position is saved into the shared configuration and synced, so every
+  character and account lands there too. Plain clicks are untouched: chat text,
+  links and scrolling behave exactly as they always did. If you would rather not
+  hold a key, `/dchat unlock` lets a plain drag move the windows for the rest of
+  the session and `/dchat lock` puts it back.
+- **The edit box can stay put.** On by default: the input bar rests at its
+  configured position all the time, showing which channel you are about to talk
+  in ("Say:", "Guild:") in that channel's color, quiet until you use it. Click it
+  or press Enter to type; Escape stops typing without making the bar disappear.
+  Turn it off and the box behaves exactly like the game's own again.
+- **Window positions now travel between accounts correctly.** Positions are
+  stored as a fraction of the screen rather than as raw offsets, and are applied
+  through each account's own UI scale, so one configuration puts the window in
+  the same place on every account and every character — even when the accounts
+  quietly disagree about scale. Because the addon places windows directly, a
+  position saved flush against the screen edge lands flush everywhere, including
+  on an account where dragging one there is impossible.
+- **Chat windows can be dragged all the way to the screen edge.** The margin the
+  game holds windows away from the edge with is loosened on the managed windows
+  (they stay on screen, they just stop being fenced off it). On by default,
+  re-applied whenever the game re-imposes it, and postponed out of combat when
+  the game refuses the change.
+- **`/dchat debug position`** prints everything that decides where a window
+  lands: the scale chain, the screen's size in both units and pixels, the clamp
+  state and margins, the game's saved position, the live position, and the saved
+  fraction. Run it on two accounts and the diff names whatever differs between
+  them.
 - The headless harness with the unkind chat simulator: the 10-window client
   model, async server-gated channel joins, mutable per-frame ring buffers with
   uptime stamps, GUID-carrying era message events, the edit box's sticky-channel
-  header beat, and call counting throughout.
+  header beat, real frame geometry with a clamped drag and an unclamped
+  programmatic placement, a drivable UI scale, the edit box's own show/hide
+  machinery under both chat styles, and call counting throughout.

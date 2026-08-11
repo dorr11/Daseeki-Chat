@@ -284,7 +284,101 @@ function Reconcile.ConvergeWindows(cfg)
     if #changed > 0 and type(_G.FCF_DockUpdate) == "function" then
         Reconcile.SelfWrite(_G.FCF_DockUpdate)
     end
+    -- Positions land AFTER the dock settles: the store + dock decide which
+    -- frames exist and where the dock sits, and only then does the normalized
+    -- placement have a stable world to write into. Runs unconditionally —
+    -- a window can drift in position without any store field changing.
+    for _, p in ipairs(Reconcile.ApplyPositions(cfg)) do
+        changed[#changed + 1] = p
+    end
     return changed
+end
+
+----------------------------------------------------------------------
+-- SCALE-NORMALIZED PLACEMENT (the cross-account fidelity fix, apply half).
+--
+-- config.lua captures the window's corner as a FRACTION OF THE SCREEN; here it
+-- is converted back through THIS account's own effective scale and applied
+-- with ClearAllPoints + SetPoint. Two properties do the work:
+--   1. Same fraction + local scale = same on-screen corner on every account,
+--      whatever the invisible per-account CVars are set to.
+--   2. Programmatic placement is NOT drag-clamped, so a corner captured flush
+--      against the screen edge on one account lands flush on the other — the
+--      account-1 "cannot drag it to the edge" symptom stops mattering.
+-- Every write runs inside SelfWrite, so the capture layer never mistakes our
+-- placement for a player edit (echo discipline, rule 3).
+----------------------------------------------------------------------
+
+local function dockPrimary()
+    local dock = _G.GeneralDockManager
+    if type(dock) == "table" and type(dock.primary) == "table" then return dock.primary end
+    return _G.DEFAULT_CHAT_FRAME
+end
+
+-- May we place this window ourselves? A DOCKED window's placement belongs to
+-- the dock manager — moving it independently would fight the client every
+-- frame — so only the dock's PRIMARY carries the dock's position. Undocked
+-- windows place themselves. A hidden window is left alone entirely.
+function Reconcile.PlaceableWindow(id, want)
+    local frame = _G["ChatFrame" .. tostring(id)]
+    if type(frame) ~= "table" then return nil end
+    local docked = type(want) == "table" and want.docked or nil
+    if docked and docked ~= 0 and frame ~= dockPrimary() then return nil end
+    if type(frame.IsShown) == "function" then
+        local ok, shown = pcall(frame.IsShown, frame)
+        if ok and not shown then return nil end
+    end
+    return frame
+end
+
+-- Apply one normalized corner. Returns true when the placement was written.
+function Reconcile.PlacePoint(frame, npos)
+    local C = ns.Config
+    if not (C and type(npos) == "table") then return false end
+    local uiW, uiH, uiScale = C.ScreenGeometry()
+    if not uiW then return false end                    -- world not laid out: no guess
+    local fs = uiScale
+    if type(frame.GetEffectiveScale) == "function" then
+        local ok, v = pcall(frame.GetEffectiveScale, frame)
+        if ok and type(v) == "number" and v > 0 then fs = v end
+    end
+    local ox, oy = C.Denormalize(tonumber(npos[2]), tonumber(npos[3]), uiW, uiH, uiScale, fs)
+    if ox == nil then return false end
+    -- BOTTOMLEFT is the ONE anchor a capture ever writes; anything else in the
+    -- store is a foreign/older shape and is placed as a bottom-left corner
+    -- rather than guessed at.
+    if type(frame.ClearAllPoints) ~= "function" or type(frame.SetPoint) ~= "function" then
+        return false
+    end
+    return Reconcile.SelfWrite(function()
+        frame:ClearAllPoints()
+        frame:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", ox, oy)
+    end)
+end
+
+function Reconcile.ApplyPositions(cfg)
+    local applied = {}
+    local C = ns.Config
+    local want = (C and type(cfg) == "table") and cfg.windows or nil
+    if type(want) ~= "table" then return applied end
+    for id = 1, numWindows() do
+        local w = want[id]
+        local np = type(w) == "table" and w.npos or nil
+        if type(np) == "table" then
+            local frame = Reconcile.PlaceableWindow(id, w)
+            if frame then
+                local have = C.CaptureNormalizedPos(id)
+                -- Already there (within the measurement tolerance)? Then this
+                -- is not drift and writing again would only be noise.
+                if have == nil or not C.NearPos(have, np) then
+                    if Reconcile.PlacePoint(frame, np) then
+                        applied[#applied + 1] = "window " .. id .. ": npos"
+                    end
+                end
+            end
+        end
+    end
+    return applied
 end
 
 -- Colors that config wants but the client's CHANNELn slots do not show yet
@@ -527,6 +621,96 @@ ns.RegisterDebugCommand("reconcile", "the reconcile trace ring (what changed, wh
 end)
 
 ----------------------------------------------------------------------
+-- THE DIAGNOSIS SURFACE: /dchat debug position.
+--
+-- Everything that decides where a chat window actually lands, printed side by
+-- side: the scale chain, UIParent's dimensions in both units and pixels, the
+-- clamp state (which is what refuses a manual drag at the screen edge), the
+-- client's own saved-position tuple, the live corner, and the normalized
+-- corner the config holds. Run it on BOTH accounts and diff the two outputs:
+-- whatever differs IS the invisible client difference, on the record.
+----------------------------------------------------------------------
+
+local function fmtNum(v)
+    if type(v) ~= "number" then return "n/a" end
+    return string.format("%.2f", v)
+end
+
+local function fmtNPos(np)
+    if type(np) ~= "table" then return "none" end
+    return string.format("%s %.6f %.6f", tostring(np[1]),
+        tonumber(np[2]) or 0, tonumber(np[3]) or 0)
+end
+
+local function widgetNumber(w, method)
+    if type(w) ~= "table" or type(w[method]) ~= "function" then return nil end
+    local ok, v = pcall(w[method], w)
+    if ok and type(v) == "number" then return v end
+    return nil
+end
+
+ns.RegisterDebugCommand("position", "the scale/clamp/position chain per window (run on BOTH accounts and diff)", function()
+    local C = ns.Config
+    if not C then ns:Print("position: config module missing") return end
+    local getCVar = _G.GetCVar
+    local function cv(name)
+        if type(getCVar) ~= "function" then return "?" end
+        local ok, v = pcall(getCVar, name)
+        return (ok and v ~= nil) and tostring(v) or "?"
+    end
+    ns:Print(("position: build %s | CVars uiScale=%s useUiScale=%s")
+        :format(tostring(ns.VERSION), cv("uiScale"), cv("useUiScale")))
+    local uiW, uiH, uiScale = C.ScreenGeometry()
+    if not uiW then
+        ns:Print("  UIParent geometry is NOT resolvable right now (nothing else can be trusted)")
+        return
+    end
+    ns:Print(("  UIParent: %s x %s units, effective scale %.4f, %s x %s px")
+        :format(fmtNum(uiW), fmtNum(uiH), uiScale,
+                fmtNum(uiW * uiScale), fmtNum(uiH * uiScale)))
+    local cfg = select(1, C.EffectiveCfg()) or {}
+    local windows = type(cfg.windows) == "table" and cfg.windows or {}
+    for id = 1, numWindows() do
+        local frame = _G["ChatFrame" .. id]
+        local info = C.CaptureWindow(id)
+        if frame and info and (info.shown or info.docked) then
+            local eff = widgetNumber(frame, "GetEffectiveScale")
+            local own = widgetNumber(frame, "GetScale")
+            ns:Print(("  ChatFrame%d (%s): shown=%s docked=%s placeable=%s")
+                :format(id, tostring(info.name), tostring(info.shown),
+                        tostring(info.docked),
+                        tostring(Reconcile.PlaceableWindow(id, windows[id]) ~= nil)))
+            ns:Print(("      scale: own %s, effective %s (UIParent %.4f)")
+                :format(fmtNum(own), fmtNum(eff), uiScale))
+            local clamped = "?"
+            if type(frame.IsClampedToScreen) == "function" then
+                local ok, v = pcall(frame.IsClampedToScreen, frame)
+                if ok then clamped = tostring(v and true or false) end
+            end
+            local l, r, t, b = "?", "?", "?", "?"
+            if type(frame.GetClampRectInsets) == "function" then
+                local ok, a1, a2, a3, a4 = pcall(frame.GetClampRectInsets, frame)
+                if ok then l, r, t, b = fmtNum(a1), fmtNum(a2), fmtNum(a3), fmtNum(a4) end
+            end
+            ns:Print(("      clamp: clampedToScreen=%s insets L%s R%s T%s B%s")
+                :format(clamped, l, r, t, b))
+            local left, bottom = widgetNumber(frame, "GetLeft"), widgetNumber(frame, "GetBottom")
+            ns:Print(("      live:  left %s bottom %s units -> %s %s px")
+                :format(fmtNum(left), fmtNum(bottom),
+                        fmtNum(left and eff and left * eff),
+                        fmtNum(bottom and eff and bottom * eff)))
+            local p = info.pos or {}
+            ns:Print(("      saved: pos %s %s %s | npos %s")
+                :format(tostring(p[1]), fmtNum(p[2]), fmtNum(p[3]), fmtNPos(info.npos)))
+            local wantNP = type(windows[id]) == "table" and windows[id].npos or nil
+            local agree = C.NearPos(info.npos, wantNP)
+            ns:Print(("      config: npos %s (agrees with live: %s)")
+                :format(fmtNPos(wantNP), tostring(agree)))
+        end
+    end
+end)
+
+----------------------------------------------------------------------
 -- Self-tests (suite "reconcile"). Live legs drive the full module against
 -- the unkind sim; skipped in-game.
 ----------------------------------------------------------------------
@@ -750,11 +934,176 @@ local function testLadderAndTrace(fails)
     Sim.ResetCalls()
 end
 
+-- POSITION AUTHORITY: the normalized corner applied through THIS account's own
+-- scale, the dock rule, the flush-to-the-edge property that makes the owner's
+-- cross-account annoyance moot, and the diagnosis surface that names the
+-- difference for the record.
+local function testPositionAuthority(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Sim = _G.__DaseekiChatSim
+    if not Sim then return end
+    local HT = _G.__DaseekiChatHarnessTimer
+    local Config = ns.Config
+    local c = Config.Get()
+
+    local savedWindows, savedRev, savedAt = c.windows, c.rev, c.at
+    local savedScale = Sim.uiScale
+    Sim.SetUIScale(0.65)
+
+    -- A world to place into: window 1 docked (the dock's primary), window 3
+    -- shown and undocked, window 4 docked but NOT primary.
+    _G.FCF_ResetChatWindows()
+    _G.SetChatWindowShown(3, true)
+    _G.SetChatWindowDocked(3, false)
+    _G.SetChatWindowShown(4, true)
+    _G.SetChatWindowDocked(4, 3)
+    for id = 1, numWindows() do _G.FloatingChatFrame_Update(id) end
+    local f1, f3, f4 = Sim.Frame(1), Sim.Frame(3), Sim.Frame(4)
+    f1._left, f1._bottom = 200, 200
+    f3._left, f3._bottom = 200, 200
+    f4._left, f4._bottom = 200, 200
+
+    c.windows = {}
+    for id = 1, numWindows() do c.windows[id] = Config.CaptureWindow(id) end
+    -- The authored intent: window 1 FLUSH in the bottom-left corner (the exact
+    -- placement a manual drag refuses on the owner's account 1), window 3 at
+    -- three quarters across, window 4 somewhere it must NOT be moved to.
+    c.windows[1].npos = { "BOTTOMLEFT", 0, 0 }
+    c.windows[3].npos = { "BOTTOMLEFT", 0.75, 0.5 }
+    c.windows[4].npos = { "BOTTOMLEFT", 0.10, 0.10 }
+    c.rev, c.at = (tonumber(c.rev) or 0) + 1, Config.Now()
+
+    ns.SetModuleEnabled("reconcile", true)
+    local revBefore, capsBefore = Config.Rev(), Reconcile.stats.captures
+
+    -- ── PLACEMENT IS NOT DRAG-CLAMPED ────────────────────────────────────────
+    -- The frames carry the client's own clamp margin; a drag could not put
+    -- window 1 in the corner. ClearAllPoints + SetPoint does not care.
+    local insL = select(1, f1:GetClampRectInsets())
+    ck(insL > 0, "the client's clamp margin is in force (a drag cannot reach the edge)")
+    local applied = Reconcile.ApplyPositions({ windows = c.windows })
+    ck(#applied == 2, "exactly the two placeable windows were placed (got " .. #applied .. ")")
+    local np1 = Config.CaptureNormalizedPos(1)
+    ck(np1 and np1[2] == 0 and np1[3] == 0,
+        "FLUSH: the dock primary landed exactly in the screen corner, clamp or no clamp")
+    local np3 = Config.CaptureNormalizedPos(3)
+    ck(Config.NearPos(np3, { "BOTTOMLEFT", 0.75, 0.5 }),
+        "an undocked window landed on its configured fraction")
+    ck(f4._left == 200 and f4._bottom == 200,
+        "a DOCKED non-primary window was left to the dock manager (never placed)")
+
+    -- ── IDEMPOTENT: a second pass writes nothing ─────────────────────────────
+    local applied2 = Reconcile.ApplyPositions({ windows = c.windows })
+    ck(#applied2 == 0, "a converged position is not re-written (zero churn)")
+
+    -- ── ECHO CONTROL: our own placement is never captured back ───────────────
+    HT.flush()
+    ck(Config.Rev() == revBefore, "ECHO: placing positions never bumped the config rev")
+    ck(Reconcile.stats.captures == capsBefore, "ECHO: zero capture-backs fired for our placement")
+
+    -- ── A HIDDEN WINDOW IS LEFT ALONE ────────────────────────────────────────
+    _G.SetChatWindowShown(3, false)
+    _G.FloatingChatFrame_Update(3)
+    f3._left = 500
+    c.windows[3].npos = { "BOTTOMLEFT", 0.25, 0.25 }
+    ck(#Reconcile.ApplyPositions({ windows = c.windows }) == 0,
+        "a hidden window is never placed")
+    ck(f3._left == 500, "…and its geometry is untouched")
+    _G.SetChatWindowShown(3, true)
+    _G.FloatingChatFrame_Update(3)
+
+    -- ── THE CROSS-ACCOUNT LEG, end to end ────────────────────────────────────
+    -- The config above was authored on an account running uiScale 0.65. Log in
+    -- on the account running 1.0: the SAME config has to put the window on the
+    -- same part of the screen, with no per-account anything.
+    Sim.SetUIScale(1.0)
+    f1._left, f1._bottom = 300, 300           -- the other account's stale placement
+    Reconcile.ApplyPositions({ windows = c.windows })
+    local np1b = Config.CaptureNormalizedPos(1)
+    ck(np1b and np1b[2] == 0 and np1b[3] == 0,
+        "CROSS-ACCOUNT: the same config lands flush in the corner at scale 1.0 too")
+    local np3b = Config.CaptureNormalizedPos(3)
+    ck(Config.NearPos(np3b, { "BOTTOMLEFT", 0.25, 0.25 }),
+        "CROSS-ACCOUNT: and the undocked window lands on the same FRACTION, not the same offset")
+    ck(f1._left == 0, "the placement is a real anchor write, readable back through GetLeft")
+    Sim.SetUIScale(0.65)
+
+    -- ── A FRAME WITH ITS OWN SCALE (the ratio, end to end) ──────────────────
+    -- A chat window can carry a scale of its own on top of UIParent's. The
+    -- fraction is a screen fact, so it must land in the same place whatever the
+    -- frame's private scale is — which is only true if the conversion goes
+    -- through the RATIO and not through a hopeful 1:1 (Class 3).
+    local uiW = select(1, Config.ScreenGeometry())
+    local savedFrameScale = f3._scale
+    f3:SetScale(2.0)
+    f3._left, f3._bottom = 111, 111
+    c.windows[3].npos = { "BOTTOMLEFT", 0.6, 0.4 }
+    Reconcile.ApplyPositions({ windows = c.windows })
+    local npScaled = Config.CaptureNormalizedPos(3)
+    ck(Config.NearPos(npScaled, { "BOTTOMLEFT", 0.6, 0.4 }),
+        "a window with its OWN scale still lands on the configured fraction")
+    ck(math.abs(f3._left - 0.6 * uiW / 2.0) < 1e-6,
+        "…and it got there through the scale ratio, not a 1:1 offset")
+    f3:SetScale(savedFrameScale or 1)
+    c.windows[3].npos = { "BOTTOMLEFT", 0.25, 0.25 }
+    Reconcile.ApplyPositions({ windows = c.windows })
+
+    -- ── THE WHOLE RECONCILE BEAT CARRIES POSITIONS ───────────────────────────
+    f1._left, f1._bottom = 700, 700
+    Sim.EnterWorld(false, false)
+    HT.advance(0.5)
+    HT.flush()
+    local np1c = Config.CaptureNormalizedPos(1)
+    ck(np1c and np1c[2] == 0, "a normal login/zone-in reconcile re-lands the position")
+    ck(Config.Rev() == revBefore, "…and STILL never captures its own placement back")
+
+    -- ── THE DIAGNOSIS SURFACE ────────────────────────────────────────────────
+    local said = {}
+    local realPrint = ns.Print
+    ns.Print = function(_, ...)
+        local parts = {}
+        for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+        said[#said + 1] = table.concat(parts, " ")
+    end
+    local okDbg = pcall(ns.SlashDispatch, "debug position")
+    ns.Print = realPrint
+    ck(okDbg, "/dchat debug position prints without error")
+    local blob = table.concat(said, "\n")
+    local function has(needle, label)
+        ck(blob:find(needle, 1, true) ~= nil, "debug position reports " .. label)
+    end
+    has("uiScale=", "the uiScale CVar (the suspected hidden per-account difference)")
+    has("UIParent:", "UIParent's dimensions")
+    has("effective scale", "the effective scale chain")
+    has("clampedToScreen=", "the clamp state")
+    has("insets L", "the clamp rect insets")
+    has("live:", "the live corner")
+    has("saved: pos", "the client's own saved-position tuple")
+    has("npos", "the normalized corner")
+    has("agrees with live", "whether config and reality agree")
+    ck(blob:find("ChatFrame1", 1, true) ~= nil, "debug position walks the live windows")
+
+    -- ── OUT: hand the world back the way this file's other suites do ─────────
+    ns.SetModuleEnabled("reconcile", false)
+    c.windows, c.rev, c.at = savedWindows, savedRev, savedAt
+    Sim.SetUIScale(savedScale)
+    _G.FCF_ResetChatWindows()
+    for id = 1, numWindows() do _G.FloatingChatFrame_Update(id) end
+    if type(_G.FCF_DockUpdate) == "function" then _G.FCF_DockUpdate() end
+    for id = 1, numWindows() do
+        local f = Sim.Frame(id)
+        f._left, f._bottom = 32, 32
+    end
+    HT.flush()
+    Sim.ResetCalls()
+end
+
 ns:RegisterSelfTest("reconcile", function(verbose)
     local suites = {
         { name = "fresh-character materialization", fn = testConvergenceMatrix },
         { name = "drift + echo control + capture",  fn = testDriftEchoAndCapture },
         { name = "finite ladder + trace ring",      fn = testLadderAndTrace },
+        { name = "position authority + diagnosis",  fn = testPositionAuthority },
     }
     local allPass = true
     for _, suite in ipairs(suites) do

@@ -36,6 +36,27 @@
 --      copy-chat (Skin.OpenCopy), settings (ns.SlashDispatch) and the client's
 --      own frame:ScrollToBottom. No new features hide behind these buttons.
 --
+-- SKIN V2.1 — the "do I have to use edit mode to move this" trio, all ON:
+--
+--   5. ALT-DRAG MOVE (altDragMove). ALT-drag anywhere on a window's panel
+--      region moves it; a DOCKED window moves the dock (its primary frame),
+--      because that is the only move the dock manager will keep. The release
+--      captures the new position back into the authoritative config through
+--      the reconciler's own debounced path, so echo discipline, rev bumping
+--      and mesh sync are unchanged. UNMODIFIED CLICKS ARE NEVER INTERCEPTED —
+--      chat text, links and scrolling stay exactly native — and /dchat unlock
+--      is the discoverable fallback for anyone who does not know the gesture.
+--   6. PERSISTENT EDIT BOX (persistentEditBox). The attached bar never hides:
+--      it rests at its configured position wearing the CLIENT's own sticky
+--      prefix ("Say:", "Guild:") in that channel's color, quiet while
+--      unfocused, full strength while focused. Escape unfocuses; it does not
+--      hide. The send path is untouched.
+--   7. LOOSENED CLAMP (unclampWindows). Zeroed clamp rect insets on the
+--      managed windows so a MANUAL drag can reach the screen edge — the frame
+--      stays clamped ON screen, it just stops being held a margin away.
+--      Re-asserted on every re-evaluation beat (the client re-clamps) and
+--      deferred to the regen beat when the write is refused in combat.
+--
 -- Everything visual reads Daseeki-Core theme tokens at render (DaseekiUI.Color/
 -- Token / FLAT_BACKDROP / UI.Skin / UI.fonts / UI.FontFile) — ZERO hardcoded
 -- colors anywhere in this file; alpha/measure constants only. The one family
@@ -59,6 +80,11 @@ local Skin = {
     hooked  = false,   -- one-time hooksecurefunc installs done
     styled  = {},      -- frame -> per-frame rig record
     order   = {},      -- styled frames in style order (stable iteration)
+    -- skin v2.1 state
+    moveMode = false,  -- /dchat unlock: plain drag moves (session-scoped)
+    moves    = 0,      -- completed drags (the harness reads this)
+    _ebDepth = 0,      -- persistent-edit-box re-entrancy latch (Class 9)
+    _clampPending = {},-- frames whose clamp write was refused in combat
 }
 ns.Skin = Skin
 
@@ -80,6 +106,8 @@ local RAIL_WIDTH  = 16     -- icon rail strip width
 local RAIL_BTN    = 16     -- one rail button's square edge
 local RAIL_GAP    = 2      -- gap between the rail and the window
 local RAIL_IDLE   = 0.35   -- rail alpha until hovered
+local EB_IDLE     = 0.55   -- persistent edit box alpha while unfocused (placeholder)
+local EB_ACTIVE   = 1.0    -- …and while it holds focus
 
 -- Skin v2 config fields, declared ADDITIVELY from this module (the badges.lua
 -- precedent) so core.lua's DEFAULTS block stays this module's business only.
@@ -88,6 +116,12 @@ ns.DEFAULTS.skin.channelTabs         = true   -- tab ink from the window's chann
 ns.DEFAULTS.skin.stampDivider        = true   -- hairline between stamps and text
 ns.DEFAULTS.skin.editBoxChannelColor = true   -- edit-box header in channel color
 ns.DEFAULTS.skin.iconRail            = false  -- left-edge affordance rail (opt-in)
+-- skin v2.1 (the move / persistent-edit-box / clamp trio, all default ON per
+-- the owner's ask; each is an independent gate and OFF means byte-identical
+-- native behavior).
+ns.DEFAULTS.skin.altDragMove         = true   -- ALT-drag anywhere on a window moves it
+ns.DEFAULTS.skin.persistentEditBox   = true   -- the edit box never hides
+ns.DEFAULTS.skin.unclampWindows      = true   -- drags may reach the screen edge
 
 local function UIKit() return _G.DaseekiUI end
 
@@ -843,6 +877,145 @@ function Skin.RecolorEditBoxHeaders()
     end
 end
 
+----------------------------------------------------------------------
+-- THE PERSISTENT EDIT BOX (skin v2.1, default ON).
+--
+-- WHAT THE CLIENT DOES, and therefore what the honest seam is: the client owns
+-- the box's visibility and HIDES it on every deactivate — pressing Escape,
+-- sending a line, clicking away. (The client's own persistent-box mode is the
+-- `chatStyle='im'` CVar, but two of the three surveyed skin-over addons force
+-- 'classic' precisely because an attached, re-anchored bar assumes it, and
+-- forcing a CVar to buy a look would silently rewrite a player setting we do
+-- not own. So we do not touch chatStyle.)
+--
+-- The seam we take instead is the last word rather than a fight:
+--   1. a POST-hook on ChatEdit_DeactivateChat — the client makes its hide
+--      decision, then we re-show. Post-hooks run synchronously inside the
+--      client's call (the Class 9 posture), so there is no window where the
+--      box is visibly gone;
+--   2. an OnHide WATCH on the box itself, deferred one beat — because a hide
+--      can arrive from a path the function hook never sees (Class 2: watch the
+--      OBJECT, not only the event). The defer keeps us out of a Show-inside-
+--      OnHide re-entry, and a depth latch makes the whole thing safe to nest.
+-- The box keeps the client's own sticky prefix ("Say:", "Guild:") — we re-run
+-- the client's ChatEdit_UpdateHeader rather than writing text ourselves, so the
+-- prefix is always the client's truth and skin v2's channel ink lands on it
+-- through the existing hook.
+--
+-- NOT TOUCHED, deliberately: the send path. We never hook OnEnterPressed,
+-- never call SendChatMessage, never wrap ChatEdit_SendText. Show/Hide/SetAlpha
+-- on an insecure frame taints nothing.
+----------------------------------------------------------------------
+
+function Skin.EditBoxPersistent()
+    return (Skin.active and cfg().persistentEditBox) and true or false
+end
+
+-- The chat frame an edit box belongs to (the client's own field first, the
+-- parent second — both shapes defended like the header lookup above).
+local function editBoxOwner(eb)
+    if type(eb) ~= "table" then return nil end
+    if type(eb.chatFrame) == "table" then return eb.chatFrame end
+    if type(eb.GetParent) == "function" then
+        local ok, p = pcall(eb.GetParent, eb)
+        if ok and type(p) == "table" then return p end
+    end
+    return nil
+end
+
+-- Focus-lost styling IS the placeholder treatment: the bar quiets down to a
+-- hint carrying nothing but the channel prefix, and comes back to full
+-- strength the moment it holds focus.
+function Skin.StyleEditBoxFocus(eb, focused)
+    if type(eb) ~= "table" then return end
+    local alpha = focused and EB_ACTIVE or EB_IDLE
+    if type(eb.SetAlpha) == "function" then pcall(eb.SetAlpha, eb, alpha) end
+    local frame = editBoxOwner(eb)
+    local rec = frame and Skin.styled[frame]
+    if rec and rec.ebSkin and type(rec.ebSkin.SetAlpha) == "function" then
+        pcall(rec.ebSkin.SetAlpha, rec.ebSkin, alpha)
+    end
+end
+
+-- Keep the box (and its prefix) visible. Returns true when it did something.
+function Skin.KeepEditBoxShown(eb)
+    if not Skin.EditBoxPersistent() then return false end
+    if type(eb) ~= "table" then return false end
+    local frame = editBoxOwner(eb)
+    -- Only for a window we actually dressed, and only while that window is on
+    -- screen: forcing an edit box onto a closed window would be a bug wearing
+    -- a feature's clothes.
+    if not (frame and Skin.styled[frame]) then return false end
+    if type(frame.IsShown) == "function" then
+        local ok, shown = pcall(frame.IsShown, frame)
+        if ok and not shown then return false end
+    end
+    -- Class 9 discipline: the latch is armed BEFORE the first client call of
+    -- the sequence and released when the sequence returns, pcall-protected so
+    -- an error can never wedge it.
+    if Skin._ebDepth > 0 then return false end
+    Skin._ebDepth = Skin._ebDepth + 1
+    local ok, err = pcall(function()
+        local header = editBoxHeader(eb)
+        local function isShown(w)
+            if type(w) ~= "table" or type(w.IsShown) ~= "function" then return true end
+            local okS, v = pcall(w.IsShown, w)
+            return okS and v and true or false
+        end
+        -- Only the RESTORE costs a client call. If the box and its prefix are
+        -- already up, re-running the client's header pass would be pure noise
+        -- on every beat that touches us — and would overwrite the channel ink
+        -- that our own listeners just applied.
+        local restoring = (not isShown(eb)) or (header and not isShown(header))
+        if type(eb.Show) == "function" then eb:Show() end
+        if header and type(header.Show) == "function" then header:Show() end
+        if restoring then
+            local upd = _G.ChatEdit_UpdateHeader
+            if type(upd) == "function" then upd(eb) end
+        end
+        local focused = (type(eb.HasFocus) == "function") and eb:HasFocus() or false
+        Skin.StyleEditBoxFocus(eb, focused)
+    end)
+    Skin._ebDepth = Skin._ebDepth - 1
+    if not ok and ns.RouteError then ns.RouteError(err) end
+    local rec = Skin.styled[frame]
+    if rec then rec.ebForcedShown = true end
+    return ok
+end
+
+-- The per-box rig: the focus scripts and the object watcher, installed once
+-- per edit box (HookScript is additive — the client's own handlers keep
+-- running, we only ever run after them).
+local function ensureEditBoxRig(frame, rec)
+    local eb = editBoxOf(frame)
+    if not eb or rec.ebRig then return end
+    if type(eb.HookScript) ~= "function" then return end
+    rec.ebRig = true
+    eb:HookScript("OnEditFocusGained", function(self)
+        if not Skin.active then return end
+        Skin.StyleEditBoxFocus(self, true)
+    end)
+    eb:HookScript("OnEditFocusLost", function(self)
+        if not Skin.active then return end
+        Skin.StyleEditBoxFocus(self, false)
+    end)
+    eb:HookScript("OnHide", function(self)
+        if not Skin.EditBoxPersistent() then return end
+        -- Deferred by one beat: re-showing from inside a hide handler is the
+        -- re-entrancy this defers away from. Without a timer (headless without
+        -- C_Timer) the watch simply does not fire — the function post-hook is
+        -- the primary seam and still covers the client's own path.
+        local CT = _G.C_Timer
+        if not (CT and type(CT.After) == "function") then return end
+        if self._dchatReshowQueued then return end
+        self._dchatReshowQueued = true
+        CT.After(0, function()
+            self._dchatReshowQueued = false
+            Skin.KeepEditBoxShown(self)
+        end)
+    end)
+end
+
 local function restoreEditBox(frame, rec)
     local eb = editBoxOf(frame)
     if not eb then return end
@@ -857,6 +1030,164 @@ local function restoreEditBox(frame, rec)
     end
     restorePoints(eb, rec.ebPoints)
     if rec.ebSkin then rec.ebSkin:Hide() end
+    -- Hand the client's own visibility rule back: a box we forced open, that
+    -- nobody is typing in, goes away again exactly as it would have natively.
+    if rec.ebForcedShown then
+        rec.ebForcedShown = nil
+        local focused = (type(eb.HasFocus) == "function") and eb:HasFocus() or false
+        if not focused and type(eb.Hide) == "function" then pcall(eb.Hide, eb) end
+        if type(eb.SetAlpha) == "function" then pcall(eb.SetAlpha, eb, EB_ACTIVE) end
+    end
+end
+
+----------------------------------------------------------------------
+-- MOVING A WINDOW WITHOUT AN EDIT MODE (skin v2.1, default ON).
+--
+-- The client's own answer to "how do I move this" is: unlock the window, then
+-- drag its TAB. This adds the direct affordance the owner asked for — ALT-drag
+-- anywhere on the window's panel region — without taking anything away:
+--
+--   * UNMODIFIED CLICKS ARE NEVER INTERCEPTED. The drag-start body returns
+--     immediately unless ALT is held (or the session is unlocked via
+--     /dchat unlock), so chat text, hyperlinks, scrolling and the tab's own
+--     drag behave exactly as they always did. We never enable mouse on a frame
+--     that did not have it, so `wholeChatWindowClickable` still decides
+--     click-through.
+--   * DOCKED WINDOWS FOLLOW THE DOCK. A docked window's placement belongs to
+--     the dock manager, so ALT-dragging one moves the DOCK — i.e. its primary
+--     frame — which is the only move that means anything. An undocked window
+--     moves itself.
+--   * THE CLIENT'S LOCK FLAG IS NOT FOUGHT, IT IS ANSWERED. `locked` in the
+--     per-character store governs the client's own tab-drag; a deliberate
+--     modified gesture is a different act, and refusing it would just be the
+--     edit-mode question again. What the store says is printed by
+--     /dchat debug position, so the state is never a mystery.
+--   * RELEASE CAPTURES BACK through the reconciler's existing debounced path
+--     (NoteExternalChange), so the new position lands in the authoritative
+--     config, gets rev-bumped and syncs — and the reconciler, which marks its
+--     own writes, cannot fight it.
+----------------------------------------------------------------------
+
+-- The clamp rect is what refuses a manual drag at the screen edge. Zeroing the
+-- insets lets a drag reach the edge while the frame stays clamped ON screen —
+-- a window dragged off the world entirely is not a feature. The call is
+-- PROTECTED IN COMBAT (the survey's frame-treatment note), so a combat refusal
+-- is remembered and replayed on the regen beat rather than thrown away.
+function Skin.LoosenClamp(frame, rec)
+    if not cfg().unclampWindows then return false end
+    if type(frame) ~= "table" or type(frame.SetClampRectInsets) ~= "function" then
+        return false
+    end
+    local icl = _G.InCombatLockdown
+    if type(icl) == "function" then
+        local ok, inCombat = pcall(icl)
+        if ok and inCombat then
+            Skin._clampPending[frame] = true
+            return false
+        end
+    end
+    -- Save the client's own insets once, so a disable hands them back.
+    rec = rec or Skin.styled[frame]
+    if rec and not rec.clampInsets and type(frame.GetClampRectInsets) == "function" then
+        local ok, l, r, t, b = pcall(frame.GetClampRectInsets, frame)
+        if ok and type(l) == "number" then rec.clampInsets = { l, r, t, b } end
+    end
+    pcall(frame.SetClampRectInsets, frame, 0, 0, 0, 0)
+    Skin._clampPending[frame] = nil
+    return true
+end
+
+function Skin.DrainPendingClamps()
+    if not Skin.active then return 0 end
+    local n = 0
+    for frame in pairs(Skin._clampPending) do
+        Skin._clampPending[frame] = nil
+        if Skin.LoosenClamp(frame) then n = n + 1 end
+    end
+    return n
+end
+
+-- Is a drag gesture a MOVE gesture right now?
+function Skin.MoveAllowed()
+    if not Skin.active or not cfg().altDragMove then return false end
+    if Skin.moveMode then return true end
+    local alt = _G.IsAltKeyDown
+    if type(alt) ~= "function" then return false end
+    local ok, down = pcall(alt)
+    return (ok and down) and true or false
+end
+
+-- Which frame actually moves: the dock's primary for anything docked, the
+-- frame itself otherwise. Second return says whether the dock was the answer.
+function Skin.MoveTarget(frame, id)
+    local docked
+    local gcwi = _G.GetChatWindowInfo
+    if type(gcwi) == "function" and id then
+        local ok, _, _, _, _, _, _, _, _, d = pcall(gcwi, id)
+        if ok then docked = d end
+    end
+    if docked and docked ~= 0 then
+        local dock = _G.GeneralDockManager
+        local primary = (type(dock) == "table" and type(dock.primary) == "table")
+            and dock.primary or _G.DEFAULT_CHAT_FRAME
+        if type(primary) == "table" then return primary, true end
+    end
+    return frame, false
+end
+
+function Skin.OnMoveStart(frame, id)
+    if not Skin.MoveAllowed() then return false end
+    local target, viaDock = Skin.MoveTarget(frame, id)
+    if type(target) ~= "table" or type(target.StartMoving) ~= "function" then return false end
+    if type(target.SetMovable) == "function" then pcall(target.SetMovable, target, true) end
+    -- Re-assert the loosened clamp at the moment it matters: the client
+    -- re-clamps periodically, and the drag about to happen is exactly when a
+    -- stale clamp would refuse the screen edge.
+    Skin.LoosenClamp(target)
+    local ok = pcall(target.StartMoving, target)
+    if not ok then return false end
+    Skin._moving = { frame = frame, target = target, id = id, viaDock = viaDock }
+    return true
+end
+
+function Skin.OnMoveStop()
+    local mv = Skin._moving
+    if not mv then return false end          -- a drag we did not start: not ours
+    Skin._moving = nil
+    if type(mv.target.StopMovingOrSizing) == "function" then
+        pcall(mv.target.StopMovingOrSizing, mv.target)
+    end
+    Skin.moves = Skin.moves + 1
+    -- CAPTURE-BACK through the reconciler's own debounced surface: the config
+    -- learns the position the same way it learns every other player edit, so
+    -- echo discipline, rev bumping and sync are unchanged by this feature.
+    local R = ns.Reconcile
+    if R and R.NoteExternalChange then R.NoteExternalChange("move: alt-drag") end
+    return true
+end
+
+local function ensureMoveRig(frame, rec)
+    if type(frame.SetMovable) ~= "function" or type(frame.HookScript) ~= "function" then
+        return
+    end
+    -- The irreversible half — the script hooks — installs exactly once, and its
+    -- bodies gate on Skin.active (the same discipline as hooksecurefunc above).
+    if not rec.moveRig then
+        rec.moveRig = true
+        if type(frame.IsMovable) == "function" then
+            local ok, was = pcall(frame.IsMovable, frame)
+            if ok then rec.wasMovable = was and true or false end
+        end
+        if type(frame.RegisterForDrag) == "function" then
+            pcall(frame.RegisterForDrag, frame, "LeftButton")
+        end
+        local id = rec.id
+        frame:HookScript("OnDragStart", function(self) Skin.OnMoveStart(self, id) end)
+        frame:HookScript("OnDragStop",  function() Skin.OnMoveStop() end)
+    end
+    -- The reversible half is RE-ASSERTED on every style pass: a disable gives
+    -- movability back to the client, so a re-enable has to take it again.
+    pcall(frame.SetMovable, frame, true)
 end
 
 ----------------------------------------------------------------------
@@ -1085,16 +1416,41 @@ function Skin.StyleWindow(frame, id)
     Skin.ApplyFading(frame)
     if not isCombatLog(frame, id) then
         styleEditBox(frame, rec)
+        ensureEditBoxRig(frame, rec)
         local eb = editBoxOf(frame)
-        if eb then Skin.ColorEditBoxHeader(eb) end
+        if eb then
+            Skin.ColorEditBoxHeader(eb)
+            Skin.KeepEditBoxShown(eb)
+        end
     end
     ensureCopyButton(frame, rec)
     ensureRail(frame, rec)
+    ensureMoveRig(frame, rec)
+    Skin.LoosenClamp(frame, rec)
     Skin.UpdateDivider(frame)
 end
 
 local function restoreWindow(frame, rec)
     restoreStock(frame, rec)
+    -- Movability and the clamp rect go back to whatever the client had: with
+    -- SetMovable restored, our (permanent) drag-script hooks are inert bodies
+    -- over a frame the client alone decides about.
+    if rec.wasMovable ~= nil and type(frame.SetMovable) == "function" then
+        pcall(frame.SetMovable, frame, rec.wasMovable)
+    end
+    if rec.clampInsets and type(frame.SetClampRectInsets) == "function" then
+        local icl = _G.InCombatLockdown
+        local inCombat = false
+        if type(icl) == "function" then
+            local okC, v = pcall(icl)
+            inCombat = okC and v and true or false
+        end
+        if not inCombat then
+            pcall(frame.SetClampRectInsets, frame, rec.clampInsets[1], rec.clampInsets[2],
+                  rec.clampInsets[3], rec.clampInsets[4])
+        end
+    end
+    Skin._clampPending[frame] = nil
     if rec.backdrop then rec.backdrop:Hide() end
     if rec.copyBtn then rec.copyBtn:Hide() end
     if rec.rail then rec.rail:Hide() end
@@ -1130,8 +1486,19 @@ function Skin.Refresh()
     if not Skin.active then return end
     for _, frame in ipairs(Skin.order) do
         local rec = Skin.styled[frame]
-        if rec then ensureRail(frame, rec) end
+        if rec then
+            ensureRail(frame, rec)
+            -- The client re-clamps periodically (the survey's frame-treatment
+            -- note), so the loosened insets are re-asserted on every cheap
+            -- re-evaluation beat instead of once at style time.
+            Skin.LoosenClamp(frame, rec)
+        end
     end
+    -- NOT here: the persistent edit box. Refresh is the cheap re-evaluation
+    -- beat (selection, recolor, CVar), and re-running the client's header pass
+    -- on it would both cost a client call per beat and overwrite the ink this
+    -- very beat exists to apply. Visibility is restored where it is actually
+    -- lost: the deactivate post-hook, the OnHide watch, and style time.
     Skin.UpdateTabColors()
     Skin.UpdateDividers()
 end
@@ -1192,6 +1559,15 @@ local function installHooks()
             Skin.ColorEditBoxHeader(editBox)
         end)
     end
+    -- The persistent edit box's PRIMARY seam: the client deactivates (Escape,
+    -- a sent line, a click away) and makes its own hide decision; we get the
+    -- last word, synchronously, inside the same call.
+    if type(_G.ChatEdit_DeactivateChat) == "function" then
+        hook("ChatEdit_DeactivateChat", function(editBox)
+            if not Skin.EditBoxPersistent() then return end
+            Skin.KeepEditBoxShown(editBox)
+        end)
+    end
 end
 
 -- Our OWN gated listeners (never coupled to another module's subscription).
@@ -1201,6 +1577,13 @@ Skin._colorHandler = function()
     -- edit-box prefix that derives from the client table re-reads it now.
     Skin.Refresh()
     Skin.RecolorEditBoxHeaders()
+end
+
+-- The clamp write is protected in combat, so a refusal is replayed the moment
+-- combat drops (never dropped on the floor, never retried in a spin).
+Skin._regenHandler = function()
+    if not Skin.active then return end
+    Skin.DrainPendingClamps()
 end
 
 Skin._cvarHandler = function(event, name)
@@ -1237,13 +1620,17 @@ function Skin.OnEnable()
     end
     ns:RegisterEvent("UPDATE_CHAT_COLOR", Skin._colorHandler)
     ns:RegisterEvent("CVAR_UPDATE", Skin._cvarHandler)
+    ns:RegisterEvent("PLAYER_REGEN_ENABLED", Skin._regenHandler)
     Skin.StyleAll()
 end
 
 function Skin.OnDisable()
     Skin.active = false
+    Skin.moveMode = false
+    Skin._moving = nil
     ns:UnregisterEvent("UPDATE_CHAT_COLOR", Skin._colorHandler)
     ns:UnregisterEvent("CVAR_UPDATE", Skin._cvarHandler)
+    ns:UnregisterEvent("PLAYER_REGEN_ENABLED", Skin._regenHandler)
     for _, frame in ipairs(Skin.order) do
         local rec = Skin.styled[frame]
         if rec then restoreWindow(frame, rec) end
@@ -1252,6 +1639,24 @@ function Skin.OnDisable()
 end
 
 ns.RegisterModule("skin", Skin)
+
+----------------------------------------------------------------------
+-- The discoverable fallback for "how do I move this window": a lock pair.
+-- SESSION-SCOPED on purpose — an unlocked state that survived a login would
+-- turn every stray drag into a moved window, and the whole point of the ALT
+-- gesture is that it needs no mode at all.
+----------------------------------------------------------------------
+
+ns.RegisterCommand("unlock", "let a plain drag move the chat windows (this session)", function()
+    Skin.moveMode = true
+    ns:Print("chat windows UNLOCKED for this session: drag anywhere on a window to move it.")
+    ns:Print("  (ALT-drag always works, locked or not. /dchat lock when you are done.)")
+end)
+
+ns.RegisterCommand("lock", "stop plain drags from moving the chat windows", function()
+    Skin.moveMode = false
+    ns:Print("chat windows locked. ALT-drag still moves them.")
+end)
 
 ns.RegisterDebugCommand("skin", "skin state: styled windows, config, tab inks", function()
     ns:Print(("skin: %s, %d window(s) styled"):format(
@@ -1262,6 +1667,9 @@ ns.RegisterDebugCommand("skin", "skin state: styled windows, config, tab inks", 
     ns:Print(("  channelTabs=%s stampDivider=%s editBoxChannelColor=%s iconRail=%s"):format(
         tostring(c.channelTabs), tostring(c.stampDivider),
         tostring(c.editBoxChannelColor), tostring(c.iconRail)))
+    ns:Print(("  altDragMove=%s persistentEditBox=%s unclampWindows=%s | moveMode=%s, %d move(s)")
+        :format(tostring(c.altDragMove), tostring(c.persistentEditBox),
+                tostring(c.unclampWindows), tostring(Skin.moveMode), Skin.moves))
     ns:Print(("  tab dim factor %.3f (token-derived), stamps showing: %s, stamp sample '%s'")
         :format(Skin.DimFactor(), tostring(Skin.StampsShowing()), Skin.StampSample()))
     for _, frame in ipairs(Skin.order) do
@@ -1820,6 +2228,260 @@ local function testCopyAndSkin(fails, verbose)
     Sim.ResetCalls()
 end
 
+-- skin v2.1: the move affordance and the persistent edit box, driven through
+-- the client's own surfaces (drag scripts, ChatEdit_* functions) against the
+-- unkind sim — where a drag is clamped, the edit box starts hidden and the
+-- client hides it again on every deactivate.
+local function testMoveAndEditBox(fails, verbose)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Sim = _G.__DaseekiChatSim
+    local UI  = UIKit()
+    if not (Sim and UI) then return end
+    local HT  = _G.__DaseekiChatHarnessTimer
+    local C   = ns.Config
+
+    local cf1, cf2, cf3 = _G.ChatFrame1, _G.ChatFrame2, _G.ChatFrame3
+    local rec1 = Skin.styled[cf1]
+    local function fireDrag(frame, script)
+        local fn = frame:GetScript(script)
+        if fn then fn(frame) end
+    end
+    local savedAlt = Sim.altDown
+
+    -- ── Phase M1: the rig exists, and an UNMODIFIED drag is never intercepted ─
+    ck(rec1 and rec1.moveRig == true, "M1: the styled window carries a move rig")
+    ck(cf1:IsMovable() == true, "M1: …and the client's frame was made movable")
+    ck(rec1.wasMovable == false, "M1: the client's own movable state was saved for restore")
+    Sim.altDown = false
+    Skin.moveMode = false
+    Sim.ResetCalls()
+    fireDrag(cf1, "OnDragStart")
+    ck(Sim.CallCount("StartMoving") == 0,
+        "M1: THE GUARD — a plain drag starts nothing (chat text and links stay native)")
+    ck(Skin._moving == nil, "M1: …and no move is in flight")
+    fireDrag(cf1, "OnDragStop")
+    ck(Sim.CallCount("StopMovingOrSizing") == 0, "M1: a stop we did not start is not ours either")
+
+    -- ── Phase M2: ALT-drag moves, and the CLAMP is the thing in the way ──────
+    -- With the client's own clamp margin restored, the drag cannot reach the
+    -- screen edge — the owner's account-1 symptom, reproduced on demand.
+    local movesBefore = Skin.moves
+    ns.db.skin.unclampWindows = false
+    cf1._clampInsets = nil                       -- back to the client's margin
+    Sim.altDown = true
+    fireDrag(cf1, "OnDragStart")
+    ck(Sim.CallCount("StartMoving") == 1, "M2: ALT-drag starts the move")
+    ck(Skin._moving ~= nil and Skin._moving.target == cf1, "M2: the window itself is the target")
+    local lx, ly = Sim.DragTo(cf1, -80, -80)     -- shove it past the corner
+    ck(lx > 0 and ly > 0,
+        "M2: THE SYMPTOM — with the client's clamp the drag CANNOT reach the screen edge")
+    fireDrag(cf1, "OnDragStop")
+    ck(Sim.CallCount("StopMovingOrSizing") == 1, "M2: the drop released the frame")
+    ck(Skin.moves == movesBefore + 1, "M2: the move was counted")
+    ck(Skin._moving == nil, "M2: nothing is left in flight")
+
+    -- ── Phase M3: the loosened clamp is the direct fix for the symptom ───────
+    ns.db.skin.unclampWindows = true
+    fireDrag(cf1, "OnDragStart")                 -- re-asserts the loosened clamp
+    local lx2, ly2 = Sim.DragTo(cf1, -80, -80)
+    ck(lx2 == 0 and ly2 == 0,
+        "M3: THE FIX — with the insets loosened the very same drag lands flush in the corner")
+    ck(cf1:IsClampedToScreen() == true,
+        "M3: …and the window is still clamped ON screen (never draggable into the void)")
+    fireDrag(cf1, "OnDragStop")
+
+    -- ── Phase M4: a DOCKED window moves the DOCK, not itself ─────────────────
+    local dockPrimary = _G.GeneralDockManager.primary
+    ck(dockPrimary == cf1, "M4: ChatFrame1 is the dock's primary in this world")
+    local before2 = cf2._left
+    fireDrag(cf2, "OnDragStart")
+    ck(Skin._moving ~= nil and Skin._moving.target == dockPrimary and Skin._moving.viaDock,
+        "M4: alt-dragging a docked window moves the DOCK's primary frame")
+    Sim.DragTo(Skin._moving.target, 400, 300)
+    fireDrag(cf2, "OnDragStop")
+    ck(cf1._left == 400, "M4: …so the dock moved")
+    ck(cf2._left == before2, "M4: …and the docked child was never repositioned behind the client's back")
+
+    -- An UNDOCKED window moves itself.
+    _G.SetChatWindowShown(3, true)
+    _G.SetChatWindowDocked(3, false)
+    _G.FloatingChatFrame_Update(3)
+    Skin.StyleWindow(cf3, 3)
+    fireDrag(cf3, "OnDragStart")
+    ck(Skin._moving ~= nil and Skin._moving.target == cf3 and not Skin._moving.viaDock,
+        "M4: an undocked window is its own move target")
+    Sim.DragTo(cf3, 900, 600)
+    fireDrag(cf3, "OnDragStop")
+    ck(cf3._left == 900, "M4: …and it moved")
+
+    -- ── Phase M5: RELEASE CAPTURES BACK, echo-clean, exactly once ────────────
+    local cfg = C.Get()
+    local savedWindows, savedRev, savedAt = cfg.windows, cfg.rev, cfg.at
+    cfg.windows = {}
+    for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do cfg.windows[id] = C.CaptureWindow(id) end
+    cfg.rev, cfg.at = (tonumber(cfg.rev) or 0) + 1, C.Now()
+    ns.SetModuleEnabled("reconcile", true)
+    local R = ns.Reconcile
+    HT.flush()
+    local revBefore, capsBefore = C.Rev(), R.stats.captures
+
+    fireDrag(cf3, "OnDragStart")
+    Sim.DragTo(cf3, 0, 0)                        -- flush into the corner
+    fireDrag(cf3, "OnDragStop")
+    ck(C.Rev() == revBefore, "M5: the capture is DEBOUNCED (nothing has landed yet)")
+    HT.advance(0.3)                              -- past the capture debounce
+    ck(C.Rev() == revBefore + 1, "M5: the drop captured back exactly once")
+    ck(R.stats.captures == capsBefore + 1, "M5: …through the reconciler's own capture path")
+    local capturedNP = cfg.windows[3] and cfg.windows[3].npos
+    ck(C.NearPos(capturedNP, { "BOTTOMLEFT", 0, 0 }),
+        "M5: the config learned the NORMALIZED corner the player dragged to")
+
+    -- THE RECONCILER MUST NOT FIGHT IT: the next beat converges toward the
+    -- captured truth and captures nothing of its own.
+    local revAfter, capsAfter = C.Rev(), R.stats.captures
+    Sim.EnterWorld(false, false)
+    HT.advance(0.5)
+    HT.flush()
+    ck(C.Rev() == revAfter, "M5: ECHO — the following reconcile never re-bumped the rev")
+    ck(R.stats.captures == capsAfter, "M5: ECHO — and captured none of its own writes")
+    local stillNP = C.CaptureNormalizedPos(3)
+    ck(C.NearPos(stillNP, { "BOTTOMLEFT", 0, 0 }),
+        "M5: the player's dragged position SURVIVED the reconcile (it is the new truth)")
+    ns.SetModuleEnabled("reconcile", false)
+    cfg.windows, cfg.rev, cfg.at = savedWindows, savedRev, savedAt
+
+    -- ── Phase M6: /dchat unlock and /dchat lock, the discoverable fallback ───
+    Sim.altDown = false
+    fireDrag(cf3, "OnDragStart")
+    ck(Skin._moving == nil, "M6: locked and unmodified, a drag still does nothing")
+    ns.SlashDispatch("unlock")
+    ck(Skin.moveMode == true, "M6: /dchat unlock turns plain drags into moves")
+    fireDrag(cf3, "OnDragStart")
+    ck(Skin._moving ~= nil, "M6: …and now a plain drag moves the window")
+    fireDrag(cf3, "OnDragStop")
+    ns.SlashDispatch("lock")
+    ck(Skin.moveMode == false, "M6: /dchat lock puts it back")
+    fireDrag(cf3, "OnDragStart")
+    ck(Skin._moving == nil, "M6: …and a plain drag is inert again")
+    Sim.altDown = savedAlt
+
+    -- ── Phase E1: THE PERSISTENT EDIT BOX, against a client that hides it ────
+    local eb = editBoxOf(cf1)
+    ck(eb ~= nil, "E1: the window has an attached edit box")
+    ck(ns.DEFAULTS.skin.persistentEditBox == true, "E1: the option ships ON (the owner's ask)")
+    eb:SetAttribute("chatType", "SAY")
+
+    _G.ChatEdit_ActivateChat(eb)
+    ck(eb._shown == true and eb._focused == true, "E1: activating shows and focuses, as ever")
+    ck(math.abs((eb._alpha or 1) - EB_ACTIVE) < 1e-6, "E1: a focused box is at full strength")
+
+    -- The client's own deactivate: it hides. We get the last word, in-call.
+    _G.ChatEdit_DeactivateChat(eb)
+    ck(eb._shown == true, "E1: THE ASK — the box is STILL SHOWN after the client deactivated it")
+    ck(eb._focused == false, "E1: …but it holds no focus")
+    ck(eb.header._shown == true, "E1: the sticky-channel prefix stayed visible with it")
+    ck(eb.header._text == "SAY:", "E1: …and the CLIENT still authors that prefix text")
+    ck(math.abs((eb._alpha or 1) - EB_IDLE) < 1e-6,
+        "E1: an empty, unfocused box wears the quiet placeholder treatment")
+    ck(eb._text == "", "E1: the client's own text clear is untouched")
+
+    -- ESCAPE: the client's escape handler is a deactivate, so the same rule
+    -- holds — unfocus, never hide.
+    _G.ChatEdit_ActivateChat(eb)
+    _G.ChatEdit_OnEscapePressed(eb)
+    ck(eb._shown == true and eb._focused == false,
+        "E1: ESCAPE unfocuses the box and does NOT hide it")
+
+    -- ENTER re-focuses the box that is already sitting there.
+    _G.ChatFrame_OpenChat(nil, cf1)
+    ck(eb._focused == true and eb._shown == true, "E1: Enter focuses the persistent box")
+    ck(math.abs((eb._alpha or 1) - EB_ACTIVE) < 1e-6, "E1: …and it brightens on focus")
+    _G.ChatEdit_DeactivateChat(eb)
+
+    -- The prefix keeps skin v2's channel ink while it sits there unfocused.
+    eb:SetAttribute("chatType", "CHANNEL")
+    eb:SetAttribute("channelTarget", 1)
+    _G.ChatEdit_ActivateChat(eb)
+    _G.ChatEdit_DeactivateChat(eb)
+    local chInfo = _G.ChatTypeInfo["CHANNEL1"]
+    ck(eb.header._shown == true and tostring(eb.header._text):find(":", 1, true) ~= nil,
+        "E1: a channel sticky keeps its prefix on the resting bar")
+    if chInfo then
+        local tc = eb.header._textColor
+        ck(tc and math.abs(tc[1] - chInfo.r) < 1e-6,
+            "E1: …wearing that channel's client color (skin v2's ink, on the resting bar)")
+    end
+    eb:SetAttribute("chatType", "SAY")
+    eb:SetAttribute("channelTarget", nil)
+
+    -- ── Phase E2: BOTH POSTURES. The function hook is synchronous and in-call;
+    -- the OBJECT watch covers a hide that never went through that function. ──
+    ck(Skin._ebDepth == 0, "E2: the re-entrancy latch is back at rest")
+    eb:Hide()                                     -- a hide from nowhere in particular
+    ck(eb._shown == false, "E2: the object path does NOT re-show inside the hide handler")
+    HT.advance(0)                                 -- one beat later
+    ck(eb._shown == true, "E2: …the OnHide watch put it back one beat later (Class 2)")
+    ck(Skin._ebDepth == 0, "E2: the latch is released after the deferred restore")
+
+    -- ── Phase E3: option OFF = native behavior, byte for byte ───────────────
+    ns.db.skin.persistentEditBox = false
+    local headerBeats = Sim.CallCount("ChatEdit_UpdateHeader")
+    local showBeats   = Sim.CallCount("widget:Show")
+    _G.ChatEdit_ActivateChat(eb)
+    _G.ChatEdit_DeactivateChat(eb)
+    ck(eb._shown == false, "E3: with the option off the client's hide stands")
+    ck(eb.header._shown == false, "E3: …and the prefix goes with it")
+    eb:Hide()
+    HT.advance(0)
+    ck(eb._shown == false, "E3: the OnHide watch is a real gate too")
+    ck(Sim.CallCount("ChatEdit_UpdateHeader") == headerBeats + 1,
+        "E3: exactly the CLIENT's own header pass ran — we added none")
+    ns.db.skin.persistentEditBox = true
+    Skin.KeepEditBoxShown(eb)
+    ck(eb._shown == true, "E3: turning it back on restores the box immediately")
+
+    -- ── Phase C1: the clamp write is PROTECTED IN COMBAT ────────────────────
+    cf1._clampInsets = nil
+    Sim.inCombat = true
+    ck(Skin.LoosenClamp(cf1, rec1) == false, "C1: the clamp write refuses in combat")
+    ck(Skin._clampPending[cf1] == true, "C1: …and remembers that it owes one")
+    ck(select(1, cf1:GetClampRectInsets()) > 0, "C1: the client's margin is untouched meanwhile")
+    Sim.inCombat = false
+    Sim.DispatchEvent("PLAYER_REGEN_ENABLED")
+    ck(Skin._clampPending[cf1] == nil, "C1: the regen beat drained the debt")
+    ck(select(1, cf1:GetClampRectInsets()) == 0, "C1: …and the loosened clamp finally landed")
+
+    -- ── Phase C2: disable hands EVERYTHING back ─────────────────────────────
+    local regenBase = ns.EventHandlerCount("PLAYER_REGEN_ENABLED")
+    ck(regenBase >= 1, "C2: the regen listener is registered while active")
+    ns.SetModuleEnabled("skin", false)
+    ck(ns.EventHandlerCount("PLAYER_REGEN_ENABLED") == regenBase - 1,
+        "C2: the regen listener was given back")
+    ck(select(1, cf1:GetClampRectInsets()) == rec1.clampInsets[1],
+        "C2: the client's own clamp insets were restored")
+    ck(cf1:IsMovable() == rec1.wasMovable, "C2: …and so was its movable state")
+    ck(eb._shown == false, "C2: an edit box we forced open goes quiet again on disable")
+    Sim.altDown = true
+    Sim.ResetCalls()
+    fireDrag(cf1, "OnDragStart")
+    ck(Sim.CallCount("StartMoving") == 0, "C2: a disabled skin moves nothing (hook bodies inert)")
+    Sim.altDown = savedAlt
+
+    -- ── OUT: back to the world the suites after us expect ───────────────────
+    ns.SetModuleEnabled("skin", true)
+    Skin.moveMode = false
+    _G.FCF_ResetChatWindows()
+    for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do _G.FloatingChatFrame_Update(id) end
+    for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do
+        local f = Sim.Frame(id)
+        f._left, f._bottom = 32, 32
+    end
+    _G.FCF_SelectDockFrame(cf1)
+    Skin.Refresh()
+    HT.flush()
+    Sim.ResetCalls()
+end
+
 ns:RegisterSelfTest("skin", function(verbose)
     local fails = {}
     local ok, err = pcall(testDefang, fails)
@@ -1828,6 +2490,8 @@ ns:RegisterSelfTest("skin", function(verbose)
     if not ok then fails[#fails + 1] = "dominance error: " .. tostring(err) end
     ok, err = pcall(testCopyAndSkin, fails, verbose)
     if not ok then fails[#fails + 1] = "live error: " .. tostring(err) end
+    ok, err = pcall(testMoveAndEditBox, fails, verbose)
+    if not ok then fails[#fails + 1] = "move/editbox error: " .. tostring(err) end
     for _, f in ipairs(fails) do ns:Print("  FAIL skin :: " .. f) end
     if #fails == 0 and verbose then ns:Print("  PASS skin") end
     return #fails == 0
