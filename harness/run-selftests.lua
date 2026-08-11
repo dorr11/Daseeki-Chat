@@ -633,6 +633,55 @@ do
     local darkList = { _G.GetChannelList() }
     ck(#darkList == 0, "…and the channel list is DARK again until the world populates")
 
+    -- 9. GEOMETRY, CLAMP AND THE EDIT BOX (the w2/move surfaces). A drag is
+    --    clamped and a SetPoint is not; the edit box starts hidden and the
+    --    client hides it again on deactivate; changing uiScale moves UIParent's
+    --    UNIT size while the PIXEL screen stays put.
+    local geo = Sim.Frame(6)                  -- a quiet window
+    local gL, gB, gScale = geo._left, geo._bottom, Sim.uiScale
+    ck(geo:GetEffectiveScale() == Sim.uiScale,
+        "a chat frame's effective scale is its own times UIParent's")
+    ck(select(1, geo:GetClampRectInsets()) > 0,
+        "frames carry a clamp margin by default (a drag cannot reach the edge)")
+    geo:SetMovable(true)
+    geo:StartMoving()
+    local dl, db = Sim.DragTo(geo, -200, -200)
+    ck(dl > 0 and db > 0, "DRAGGING IS CLAMPED: the corner is out of reach")
+    geo:StopMovingOrSizing()
+    geo:ClearAllPoints()
+    geo:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", 0, 0)
+    ck(geo:GetLeft() == 0 and geo:GetBottom() == 0,
+        "PROGRAMMATIC PLACEMENT IS NOT: SetPoint lands flush, clamp and all")
+    geo:SetClampRectInsets(0, 0, 0, 0)
+    geo:StartMoving()
+    local dl2 = Sim.DragTo(geo, -200, -200)
+    ck(dl2 == 0, "…and a loosened clamp lets the very same drag reach the edge")
+    geo:StopMovingOrSizing()
+
+    local pxW = _G.UIParent:GetWidth() * _G.UIParent:GetEffectiveScale()
+    Sim.SetUIScale(1.0)
+    ck(math.abs(_G.UIParent:GetWidth() * _G.UIParent:GetEffectiveScale() - pxW) < 1e-6,
+        "changing uiScale leaves the PIXEL screen identical")
+    ck(_G.UIParent:GetWidth() ~= 1920 / gScale, "…while UIParent's UNIT width really moved")
+    Sim.SetUIScale(gScale)
+    geo._left, geo._bottom, geo._clampInsets = gL, gB, nil
+
+    local geb = _G.ChatFrame6EditBox
+    ck(geb and geb._shown == false, "the attached edit box starts HIDDEN (chatStyle 'classic')")
+    _G.ChatEdit_ActivateChat(geb)
+    ck(geb._shown == true and geb._focused == true and geb.header._shown == true,
+        "activating shows it, focuses it and raises the sticky prefix")
+    _G.ChatEdit_DeactivateChat(geb)
+    ck(geb._shown == false and geb.header._shown == false,
+        "THE CLIENT HIDES IT AGAIN on deactivate (what a persistent box must beat)")
+    Sim.cvars.chatStyle = "im"
+    _G.ChatEdit_ActivateChat(geb)
+    _G.ChatEdit_DeactivateChat(geb)
+    ck(geb._shown == true, "…except under chatStyle 'im', the client's OWN persistent mode")
+    Sim.cvars.chatStyle = "classic"
+    geb:Hide()
+    ck(_G.IsAltKeyDown() == false, "the ALT modifier reads false until a test holds it")
+
     -- Restore the world for the suites: fresh session, logged in, in world.
     probe:UnregisterEvent("CHAT_MSG_SAY")
     probe:UnregisterEvent("CHAT_MSG_CHANNEL_NOTICE")

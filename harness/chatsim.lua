@@ -32,6 +32,17 @@
 --   * NO ChatFrame_AddChannel global: the 11509 API catalog does not list it
 --     (only ChatFrame_RemoveChannel + the C-side AddChatWindowChannel pair).
 --     Code must use AddChatWindowChannel(id, name) or runtime-detect.
+--   * A DRAG IS CLAMPED, A SetPoint IS NOT: dragging a frame (StartMoving +
+--     Sim.DragTo) lands inside the clamp rect, so a frame carrying the client's
+--     default clamp margin CANNOT be dragged flush to the screen edge;
+--     programmatic placement ignores the clamp entirely. Code that only ever
+--     drags inherits the owner's account-1 symptom.
+--   * THE EDIT BOX STARTS HIDDEN and the client HIDES IT AGAIN on every
+--     deactivate (chatStyle 'classic', the default; 'im' is the client's own
+--     persistent-box mode). A persistent-edit-box feature must earn the shown
+--     state against the hiding posture, every time.
+--   * UIParent's UNIT size moves with uiScale while the PIXEL screen does not
+--     (Sim.SetUIScale) — the cross-account scale difference, made drivable.
 --
 -- Timestamps: ring-buffer entries carry UPTIME (GetTime) stamps; GetServerTime
 -- is a separate epoch clock. Sim.NewSession() resets the uptime base (a fresh
@@ -149,7 +160,25 @@ function WIDGET_API.IsShown(self) return self._shown end
 function WIDGET_API.IsVisible(self) return self._shown end
 function WIDGET_API.SetAlpha(self, a) self._alpha = a end
 function WIDGET_API.GetAlpha(self) return self._alpha end
-function WIDGET_API.SetPoint(self, ...) self._points[#self._points + 1] = { ... } end
+function WIDGET_API.SetPoint(self, point, rel, relPoint, x, y)
+    self._points[#self._points + 1] = { point, rel, relPoint, x, y }
+    -- w2/move sim extension: the CANONICAL anchor the position reconciler uses
+    -- (BOTTOMLEFT of the frame to BOTTOMLEFT of a relative frame) is modeled
+    -- for real, so programmatic placement is READABLE BACK through
+    -- GetLeft/GetBottom — and, unlike a drag, is never clamped. Offsets are
+    -- read in the ANCHORED frame's units, so the relative frame's corner is
+    -- converted through the effective-scale ratio (the Class 3 discipline:
+    -- convert into the compared frame's space).
+    if point == "BOTTOMLEFT" and relPoint == "BOTTOMLEFT" and type(rel) == "table"
+       and type(rel.GetEffectiveScale) == "function" then
+        local mine = (type(self.GetEffectiveScale) == "function") and self:GetEffectiveScale() or 1
+        if mine ~= 0 then
+            local ratio = rel:GetEffectiveScale() / mine
+            self._left   = (rel._left or 0) * ratio + (tonumber(x) or 0)
+            self._bottom = (rel._bottom or 0) * ratio + (tonumber(y) or 0)
+        end
+    end
+end
 function WIDGET_API.ClearAllPoints(self) self._points = {} end
 function WIDGET_API.GetNumPoints(self) return #self._points end
 function WIDGET_API.GetPoint(self, i)
@@ -238,8 +267,28 @@ function WIDGET_API.GetJustifyH(self) return self._justifyH or "LEFT" end
 -- EditBox surface.
 function WIDGET_API.SetMultiLine(self, on) self._multiLine = on end
 function WIDGET_API.SetAutoFocus(self, on) self._autoFocus = on end
-function WIDGET_API.SetFocus(self) self._focused = true end
-function WIDGET_API.ClearFocus(self) self._focused = false end
+-- w2/move sim extension: focus is a real TRANSITION (like Show/Hide above), so
+-- the client's OnEditFocusGained / OnEditFocusLost scripts fire exactly once
+-- per genuine change — the beat a persistent edit box styles itself on.
+function WIDGET_API.SetFocus(self)
+    record("SetFocus")
+    local was = self._focused
+    self._focused = true
+    if not was then
+        local fn = self._scripts and self._scripts.OnEditFocusGained
+        if fn then fn(self) end
+    end
+end
+function WIDGET_API.ClearFocus(self)
+    record("ClearFocus")
+    local was = self._focused
+    self._focused = false
+    if was then
+        local fn = self._scripts and self._scripts.OnEditFocusLost
+        if fn then fn(self) end
+    end
+end
+function WIDGET_API.HasFocus(self) return self._focused and true or false end
 function WIDGET_API.HighlightText(self) record("HighlightText") self._highlighted = true end
 function WIDGET_API.SetTextInsets(self) end
 function WIDGET_API.SetMaxLetters(self, n) self._maxLetters = n end
@@ -247,16 +296,109 @@ function WIDGET_API.SetCursorPosition(self, n) end
 function WIDGET_API.SetNumeric(self, on) end
 -- ScrollFrame surface.
 function WIDGET_API.SetScrollChild(self, child) self._scrollChild = child end
--- Movement.
-function WIDGET_API.SetMovable(self, on) end
-function WIDGET_API.RegisterForDrag(self) end
-function WIDGET_API.StartMoving(self) end
-function WIDGET_API.StopMovingOrSizing(self) end
-function WIDGET_API.SetClampedToScreen(self) end
-function WIDGET_API.SetClampRectInsets(self) end
+-- ── GEOMETRY + MOVEMENT (w2/move sim extension, additive) ────────────────────
+-- Frames carry a REAL bottom-left corner (in their own units) and a scale, so
+-- the scale chain (frame -> UIParent -> effective) is honest and a normalized
+-- position can be round-tripped. Two placement paths exist and they are NOT
+-- equivalent — which is the whole point of the position work:
+--   * DRAGGING (StartMoving + Sim.DragTo + StopMovingOrSizing) is CLAMPED by
+--     the frame's clamp rect insets, so a frame with the client's default
+--     margin CANNOT be dragged flush to the screen edge;
+--   * PROGRAMMATIC placement (ClearAllPoints + SetPoint) is NOT clamped, so it
+--     lands wherever it is told.
+-- The default insets below are modeled from the OWNER-OBSERVED symptom (one
+-- account's chat window refuses to sit flush against the edge while another's
+-- does), not claimed from the API catalog: the catalog verifies the CALLS
+-- (SetClampRectInsets / GetClampRectInsets / IsClampedToScreen /
+-- GetEffectiveScale / StartMoving / StopMovingOrSizing), the sim supplies an
+-- unkind default so code that never loosens the clamp fails the flush pin.
+Sim.DEFAULT_CLAMP_INSETS = { 8, 8, 8, 8 }   -- left, right, top, bottom
+
+local function insetsOf(self)
+    return self._clampInsets or Sim.DEFAULT_CLAMP_INSETS
+end
+
+function WIDGET_API.SetScale(self, s) self._scale = tonumber(s) or 1 end
+function WIDGET_API.GetScale(self) return self._scale or 1 end
+function WIDGET_API.GetEffectiveScale(self)
+    record("GetEffectiveScale")
+    local s = self._scale or 1
+    local p = self._parent
+    if type(p) == "table" and type(p.GetEffectiveScale) == "function" then
+        return s * p:GetEffectiveScale()
+    end
+    return s
+end
+function WIDGET_API.GetLeft(self)   return self._left end
+function WIDGET_API.GetBottom(self) return self._bottom end
+function WIDGET_API.GetRight(self)
+    if self._left == nil then return nil end
+    return self._left + (self._w or 0)
+end
+function WIDGET_API.GetTop(self)
+    if self._bottom == nil then return nil end
+    return self._bottom + (self._h or 0)
+end
+function WIDGET_API.GetCenter(self)
+    if self._left == nil or self._bottom == nil then return nil end
+    return self._left + (self._w or 0) / 2, self._bottom + (self._h or 0) / 2
+end
+function WIDGET_API.SetMovable(self, on) record("SetMovable") self._movable = on and true or false end
+function WIDGET_API.IsMovable(self) return self._movable and true or false end
+function WIDGET_API.RegisterForDrag(self, ...) self._dragButtons = { ... } end
+function WIDGET_API.StartMoving(self)
+    record("StartMoving")
+    if not self._movable then return end
+    self._moving = true
+end
+function WIDGET_API.StopMovingOrSizing(self)
+    record("StopMovingOrSizing")
+    self._moving = false
+end
+function WIDGET_API.IsDragging(self) return self._moving and true or false end
+function WIDGET_API.SetClampedToScreen(self, on)
+    record("SetClampedToScreen")
+    self._clamped = on and true or false
+end
+function WIDGET_API.IsClampedToScreen(self)
+    return self._clamped ~= false
+end
+function WIDGET_API.SetClampRectInsets(self, l, r, t, b)
+    record("SetClampRectInsets")
+    self._clampInsets = { tonumber(l) or 0, tonumber(r) or 0, tonumber(t) or 0, tonumber(b) or 0 }
+end
+function WIDGET_API.GetClampRectInsets(self)
+    record("GetClampRectInsets")
+    local c = insetsOf(self)
+    return c[1], c[2], c[3], c[4]
+end
+function WIDGET_API.IsMouseEnabled(self) return self._mouse ~= false end
 function WIDGET_API.SetResizeBounds(self) end
 function WIDGET_API.SetHitRectInsets(self) end
 function WIDGET_API.EnableMouseWheel(self) end
+
+-- Drag the frame's bottom-left corner to (left, bottom) IN THE FRAME'S OWN
+-- UNITS. Only works while the frame is actually moving (StartMoving), and the
+-- client's clamp decides where it is allowed to land. Returns the landed
+-- corner so a test can pin "the drag could not reach the edge".
+function Sim.DragTo(frame, left, bottom)
+    if type(frame) ~= "table" or not frame._moving then return nil end
+    local l, b = tonumber(left) or 0, tonumber(bottom) or 0
+    if frame:IsClampedToScreen() then
+        local P = _G.UIParent
+        local ratio = P:GetEffectiveScale() / frame:GetEffectiveScale()
+        local pw, ph = P:GetWidth() * ratio, P:GetHeight() * ratio
+        local ins = insetsOf(frame)
+        local minL, maxL = ins[1], pw - (frame._w or 0) - ins[2]
+        local minB, maxB = ins[4], ph - (frame._h or 0) - ins[3]
+        if maxL < minL then maxL = minL end
+        if maxB < minB then maxB = minB end
+        if l < minL then l = minL elseif l > maxL then l = maxL end
+        if b < minB then b = minB elseif b > maxB then b = maxB end
+    end
+    frame._left, frame._bottom = l, b
+    return l, b
+end
 -- Chat-frame display knobs (recorded; the skin fading tests read these).
 function WIDGET_API.SetFading(self, on) record("SetFading") self._fading = on and true or false end
 function WIDGET_API.SetTimeVisible(self, secs) record("SetTimeVisible") self._timeVisible = secs end
@@ -414,6 +556,12 @@ local function makeChatFrame(id)
     f._id = id
     f._font = { "Fonts\\FRIZQT__.TTF", 14, "" }
     f._fading, f._timeVisible = true, 120
+    -- w2/move sim extension: a chat frame has real geometry (the client's
+    -- stock 430x120 parked near the bottom-left corner) and a live mouse, so
+    -- drag, clamp and scale reads all answer honestly.
+    f._w, f._h = 430, 120
+    f._left, f._bottom = 32, 32
+    f._mouse = true
     f.historyBuffer = newBuffer(DEFAULT_BUFFER_CAP)
     f.AddMessage      = chatAddMessage
     f.GetNumMessages  = chatGetNumMessages
@@ -435,6 +583,13 @@ local function makeChatFrame(id)
     -- that defends either shape is exercised honestly.
     eb.header = newWidget("FontString", name .. "EditBoxHeader", eb)
     eb:SetAttribute("chatType", "SAY")
+    eb.chatFrame = f
+    -- w2/move sim extension: the client's DEFAULT posture under chatStyle
+    -- 'classic' — the edit box (and its prefix) exist but are HIDDEN until
+    -- something activates them. A persistent-edit-box feature has to earn the
+    -- shown state against this default, never inherit it.
+    eb._shown, eb.header._shown = false, false
+    eb._mouse = true
     for _, suffix in ipairs({ "Left", "Mid", "Right", "FocusLeft", "FocusMid", "FocusRight" }) do
         newWidget("Texture", name .. "EditBox" .. suffix, eb)
     end
@@ -462,8 +617,37 @@ end
 
 function Sim.Frame(id) return _G["ChatFrame" .. id] end
 
+-- ── THE SCREEN (w2/move sim extension) ───────────────────────────────────────
+-- UIParent covers the physical screen: its own-unit size is the pixel size
+-- divided by its scale, exactly like the client. Sim.SetUIScale models the
+-- per-account uiScale difference the cross-account position work exists to
+-- make irrelevant — the PIXEL screen never changes, the UNIT screen does.
+Sim.screenPixels = { 1920, 1080 }
+Sim.uiScale      = 0.65            -- the owner's shared Config.wtf value
+
 -- Build the world once at load.
 _G.UIParent = newWidget("Frame", "UIParent", nil)
+_G.UIParent._left, _G.UIParent._bottom = 0, 0
+
+function Sim.SetUIScale(s)
+    s = tonumber(s) or 1
+    if s <= 0 then s = 1 end
+    Sim.uiScale = s
+    _G.UIParent._scale = s
+    _G.UIParent._w = Sim.screenPixels[1] / s
+    _G.UIParent._h = Sim.screenPixels[2] / s
+end
+Sim.SetUIScale(Sim.uiScale)
+
+_G.GetScreenWidth  = function() return _G.UIParent:GetWidth() end
+_G.GetScreenHeight = function() return _G.UIParent:GetHeight() end
+
+-- Modifier state (the ALT-drag gesture's gate).
+Sim.altDown = false
+_G.IsAltKeyDown     = function() record("IsAltKeyDown") return Sim.altDown and true or false end
+_G.IsShiftKeyDown   = function() return Sim.shiftDown and true or false end
+_G.IsControlKeyDown = function() return Sim.ctrlDown and true or false end
+
 Sim.windows = defaultWindows()
 _G.CHAT_FRAMES = {}
 for i = 1, _G.NUM_CHAT_WINDOWS do
@@ -853,6 +1037,54 @@ _G.ChatEdit_UpdateHeader = function(editBox)
     end
     header:SetText(text)
     if info then header:SetTextColor(info.r, info.g, info.b) end
+end
+
+-- ── THE EDIT BOX's OWN SHOW/HIDE MACHINERY (w2/move sim extension) ───────────
+-- The client owns whether the attached edit box is visible, and it HIDES the
+-- box on deactivate under the default 'classic' chat style ('im' is the
+-- client's own persistent-box mode — the survey's §7.5 fact). Both postures
+-- are modeled, because a feature that keeps the box shown must work against
+-- the hiding one and must not double-show under the other.
+Sim._activeEditBox = nil
+
+_G.ChatEdit_ActivateChat = function(editBox)
+    record("ChatEdit_ActivateChat")
+    if type(editBox) ~= "table" then return end
+    editBox:Show()
+    if editBox.header then editBox.header:Show() end
+    _G.ChatEdit_UpdateHeader(editBox)
+    editBox:SetFocus()
+    Sim._activeEditBox = editBox
+end
+
+_G.ChatEdit_DeactivateChat = function(editBox)
+    record("ChatEdit_DeactivateChat")
+    if type(editBox) ~= "table" then return end
+    editBox:SetText("")
+    editBox:ClearFocus()
+    if editBox.header then editBox.header:Hide() end
+    if Sim.cvars.chatStyle ~= "im" then editBox:Hide() end
+    if Sim._activeEditBox == editBox then Sim._activeEditBox = nil end
+end
+
+_G.ChatEdit_GetActiveWindow = function() return Sim._activeEditBox end
+
+-- The ENTER path: the client opens (or re-focuses) the frame's edit box.
+_G.ChatFrame_OpenChat = function(text, frame)
+    record("ChatFrame_OpenChat")
+    local f = frame or _G.DEFAULT_CHAT_FRAME
+    local n = (type(f) == "table" and f.GetName and f:GetName()) or "ChatFrame1"
+    local eb = _G[n .. "EditBox"]
+    if not eb then return nil end
+    _G.ChatEdit_ActivateChat(eb)
+    if text then eb:SetText(text) end
+    return eb
+end
+
+-- The ESCAPE path, exactly as the client wires it: escape deactivates.
+_G.ChatEdit_OnEscapePressed = function(editBox)
+    record("ChatEdit_OnEscapePressed")
+    _G.ChatEdit_DeactivateChat(editBox)
 end
 
 -- CVars: hostile defaults on purpose (see header).

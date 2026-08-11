@@ -192,6 +192,119 @@ function Config.NearColor(a, b)
 end
 
 ----------------------------------------------------------------------
+-- SCALE-NORMALIZED POSITIONS (the cross-account fidelity fix).
+--
+-- THE PROBLEM, stated honestly: the client's saved position is expressed in
+-- the account's own UI units. Two accounts on one machine sharing one
+-- Config.wtf can still carry DIFFERENT effective scales (uiScale and friends
+-- are per-account, server-synced, and invisible on disk), and a raw offset
+-- that means "flush against the left edge" on one account means "24 units in"
+-- on the other. Worse, a MANUAL DRAG is clamped by the frame's clamp rect,
+-- so the edge may be unreachable by dragging on one account and reachable on
+-- the other — the owner's long-standing annoyance, pre-dating this addon.
+--
+-- THE FIX: store the window's bottom-left corner as a FRACTION OF THE SCREEN.
+--   capture  : live geometry -> pixels -> fraction   (this file)
+--   reconcile: fraction -> the LOCAL account's units -> ClearAllPoints+SetPoint
+--              (reconcile.lua; programmatic placement is not drag-clamped)
+-- Same config -> same on-screen placement on every account, whatever the
+-- hidden CVars say.
+--
+-- WIRE-COMPAT (additive, with a deprecation window): the legacy `pos` tuple
+-- (the client's own saved-position triple) keeps being captured and written
+-- exactly as before, so an OLD build reading a NEW config still reads `pos`
+-- and behaves as it always did. `npos` rides alongside; new builds prefer it
+-- and fall back to `pos` when it is absent. Nothing about LWW changes — `at`
+-- and `rev` still stamp the whole config, and a mixed-build mesh converges on
+-- the same winner it would have before.
+--
+-- UNKNOWN IS NOT ZERO (Class 4/6, made mechanical): before the client has laid
+-- a frame out, GetLeft/GetBottom answer nil. A nil read captures as NO npos —
+-- never as 0,0 — and every comparator treats a missing npos as "no opinion",
+-- so a dark read can neither wipe a stored position nor spin the retry ladder.
+----------------------------------------------------------------------
+
+-- Compared as a fraction of the screen: 0.002 is 0.2% of the screen edge
+-- (~4 px across 1920). Below that, two positions ARE the same position, and
+-- treating float round-trip noise as drift would fight the player forever.
+Config.NPOS_EPSILON = 0.002
+
+local function widgetNum(w, method)
+    if type(w) ~= "table" then return nil end
+    local f = w[method]
+    if type(f) ~= "function" then return nil end
+    local ok, v = pcall(f, w)
+    if ok and type(v) == "number" then return v end
+    return nil
+end
+
+-- UIParent's live geometry: width, height (its OWN units) and its effective
+-- scale. nil when the client has not laid the world out (never a zero).
+function Config.ScreenGeometry()
+    local P = _G.UIParent
+    local w = widgetNum(P, "GetWidth")
+    local h = widgetNum(P, "GetHeight")
+    local s = widgetNum(P, "GetEffectiveScale") or 1
+    if not w or not h or w <= 0 or h <= 0 or s <= 0 then return nil end
+    return w, h, s
+end
+
+-- PURE. Screen-space pixels -> fraction of the screen. Rounded to 6 places so
+-- the emission stays byte-stable across captures (Class 8 lives downstream of
+-- this: a jittering last digit would change every serialization).
+function Config.Normalize(px, py, screenW, screenH)
+    if type(px) ~= "number" or type(py) ~= "number" then return nil end
+    if type(screenW) ~= "number" or type(screenH) ~= "number"
+       or screenW <= 0 or screenH <= 0 then return nil end
+    local function round6(v) return math.floor(v * 1e6 + 0.5) / 1e6 end
+    return round6(px / screenW), round6(py / screenH)
+end
+
+-- PURE. Fraction of the screen -> SetPoint offsets. Offsets are read in the
+-- ANCHORED frame's own coordinate space, so the UIParent-units answer is
+-- converted through the scale RATIO (Class 3: convert into the compared
+-- frame's space, never assume the chains match).
+function Config.Denormalize(fx, fy, uiW, uiH, uiScale, frameScale)
+    if type(fx) ~= "number" or type(fy) ~= "number" then return nil end
+    if type(uiW) ~= "number" or type(uiH) ~= "number" then return nil end
+    frameScale = tonumber(frameScale)
+    uiScale    = tonumber(uiScale)
+    if not frameScale or frameScale <= 0 or not uiScale or uiScale <= 0 then return nil end
+    local ratio = uiScale / frameScale
+    return fx * uiW * ratio, fy * uiH * ratio
+end
+
+-- One window's normalized position, read from LIVE geometry (the store's own
+-- tuple is in units we do not control and cannot compare across accounts).
+-- Returns { "BOTTOMLEFT", fx, fy } or nil for UNKNOWN.
+function Config.CaptureNormalizedPos(id)
+    local frame = _G["ChatFrame" .. tostring(id)]
+    if type(frame) ~= "table" then return nil end
+    local uiW, uiH, uiScale = Config.ScreenGeometry()
+    if not uiW then return nil end
+    local left   = widgetNum(frame, "GetLeft")
+    local bottom = widgetNum(frame, "GetBottom")
+    local fs     = widgetNum(frame, "GetEffectiveScale") or uiScale
+    if left == nil or bottom == nil or fs <= 0 then return nil end
+    local fx, fy = Config.Normalize(left * fs, bottom * fs, uiW * uiScale, uiH * uiScale)
+    if fx == nil then return nil end
+    return { "BOTTOMLEFT", fx, fy }
+end
+
+-- Do two normalized positions mean the same placement? A nil on EITHER side is
+-- UNKNOWN and therefore agreement — the same discipline the dark channel list
+-- gets. Anchors must match exactly; the fractions compare with tolerance.
+function Config.NearPos(a, b)
+    if a == nil or b == nil then return true end
+    if type(a) ~= "table" or type(b) ~= "table" then return false end
+    if tostring(a[1]) ~= tostring(b[1]) then return false end
+    local function near(x, y)
+        return math.abs((tonumber(x) or 0) - (tonumber(y) or 0)) <= Config.NPOS_EPSILON
+    end
+    return near(a[2], b[2]) and near(a[3], b[3])
+end
+
+----------------------------------------------------------------------
 -- CAPTURE: client store -> config-shaped snapshot.
 ----------------------------------------------------------------------
 
@@ -249,6 +362,9 @@ function Config.CaptureWindow(id)
         local p, x, y = _G.GetChatWindowSavedPosition(id)
         w.pos = { tostring(p or ""), tonumber(x) or 0, tonumber(y) or 0 }
     end
+    -- The scale-normalized corner rides ALONGSIDE the legacy tuple (additive,
+    -- deprecation window). Absent when the geometry is not resolvable yet.
+    w.npos = Config.CaptureNormalizedPos(id)
     return w
 end
 
@@ -307,13 +423,32 @@ function Config.Bump()
     return true
 end
 
+-- Windows land wholesale from a capture — EXCEPT that a window whose npos the
+-- capture could not read (dark geometry) keeps the one the config already
+-- holds. An unreadable corner is an unknown, and an unknown must never delete
+-- a position the player (or a peer account) set (Class 4).
+local function mergeWindows(prev, snapWindows)
+    local out = copyCfg(snapWindows or {})
+    if type(prev) ~= "table" then return out end
+    for id, w in pairs(out) do
+        if type(w) == "table" and w.npos == nil then
+            local old = prev[id]
+            if type(old) == "table" and type(old.npos) == "table" then
+                w.npos = copyCfg(old.npos)
+            end
+        end
+    end
+    return out
+end
+Config.MergeWindows = mergeWindows
+
 -- FIRST-RUN ADOPT (reconciler rule 5's second half): the current client state
 -- BECOMES the initial config. Never a default layout, never a wizard.
 function Config.AdoptClient(snap)
     local c = Config.Get()
     if not c then return false end
     snap = snap or Config.CaptureClient()
-    c.windows = copyCfg(snap.windows or {})
+    c.windows = mergeWindows(c.windows, snap.windows)
     if snap.join then c.join = copyCfg(snap.join) end
     if snap.colors then
         for k, v in pairs(snap.colors) do c.colors[k] = copyCfg(v) end
@@ -322,11 +457,34 @@ function Config.AdoptClient(snap)
     return true
 end
 
+-- The window fields a capture speaks about, compared EXACTLY (deterministic
+-- serialization). `npos` is deliberately not here: it is a measurement, so it
+-- compares with tolerance through NearPos — see WindowDiffers.
+local WINDOW_EXACT_FIELDS = {
+    "name", "fontSize", "r", "g", "b", "alpha", "shown", "locked", "docked",
+    "uninteractable", "dim", "pos", "groups", "channels",
+}
+
+-- ONE rule for "did this window change", used by both the capture-back gate
+-- and the reconciler's verify, so the two can never disagree about drift.
+-- A capture with no entry at all says NOTHING (it is not a deletion).
+function Config.WindowDiffers(snapW, cfgW)
+    if type(snapW) ~= "table" then return false end
+    if type(cfgW) ~= "table" then return true end
+    for _, f in ipairs(WINDOW_EXACT_FIELDS) do
+        if not serEq(snapW[f], cfgW[f]) then return true end
+    end
+    return not Config.NearPos(snapW.npos, cfgW.npos)
+end
+
 -- Would a capture change the stored config? (The capture-back gate.)
 function Config.SectionsDiffer(snap)
     local c = Config.Get()
     if not c or type(snap) ~= "table" then return false end
-    if not serEq(snap.windows, c.windows) then return true end
+    local sw, cw = snap.windows or {}, c.windows or {}
+    for id = 1, numWindows() do
+        if Config.WindowDiffers(sw[id], cw[id]) then return true end
+    end
     if snap.join and not serEq(snap.join, c.join) then return true end
     if snap.colors then
         for name, col in pairs(snap.colors) do
@@ -349,7 +507,7 @@ function Config.CaptureBack(reason)
     local snap = Config.CaptureClient()
     if not Config.SectionsDiffer(snap) then return false end
     Config.AdoptEffective()
-    c.windows = copyCfg(snap.windows or {})
+    c.windows = mergeWindows(c.windows, snap.windows)
     if snap.join then c.join = copyCfg(snap.join) end
     if snap.colors then
         for k, v in pairs(snap.colors) do c.colors[k] = copyCfg(v) end
@@ -463,10 +621,7 @@ end
 -- the config does not speak about are not drift.
 ----------------------------------------------------------------------
 
-local WINDOW_FIELDS = {
-    "name", "fontSize", "r", "g", "b", "alpha", "shown", "locked", "docked",
-    "uninteractable", "dim", "pos", "groups", "channels",
-}
+local WINDOW_FIELDS = WINDOW_EXACT_FIELDS
 
 function Config.DiffList(want, have)
     local diffs = {}
@@ -482,6 +637,13 @@ function Config.DiffList(want, have)
                     if a[f] ~= nil and not serEq(a[f], b[f]) then
                         diffs[#diffs + 1] = "window " .. id .. " " .. f
                     end
+                end
+                -- The normalized corner is a MEASUREMENT: it converges within
+                -- a tolerance, and a snapshot that could not read the geometry
+                -- says nothing at all (never a retry-ladder spin on a dark
+                -- read).
+                if type(a.npos) == "table" and not Config.NearPos(a.npos, b.npos) then
+                    diffs[#diffs + 1] = "window " .. id .. " npos"
                 end
             end
         end
@@ -670,11 +832,152 @@ local function testLWW(fails)
     ck(c.windows[1].name == "W", "the snapshot is a copy, not a reference")
 end
 
+-- SCALE-NORMALIZED POSITIONS: the pure conversions, the round trip at two
+-- different UI scales (THE cross-account leg), the unknown-is-not-zero rule,
+-- and the tolerance that keeps a measurement from reading as drift forever.
+local function testNormalizedPositions(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+
+    -- ── The conversions, pure ────────────────────────────────────────────────
+    local fx, fy = Config.Normalize(192, 108, 1920, 1080)
+    ck(fx == 0.1 and fy == 0.1, "Normalize: pixels over the pixel screen = a fraction")
+    ck(Config.Normalize(0, 0, 1920, 1080) == 0, "Normalize: the screen corner is 0")
+    ck(Config.Normalize(1, 1, 0, 1080) == nil, "Normalize: a zero screen answers nil, never a division")
+    ck(Config.Normalize(nil, 1, 1920, 1080) == nil, "Normalize: a missing coordinate answers nil")
+
+    -- Denormalize converts into the ANCHORED FRAME's units, so the scale ratio
+    -- is part of the answer (Class 3).
+    local ox, oy = Config.Denormalize(0.5, 0.25, 1000, 800, 0.65, 0.65)
+    ck(math.abs(ox - 500) < 1e-9 and math.abs(oy - 200) < 1e-9,
+        "Denormalize: equal scales = plain fraction of UIParent's units")
+    ox = Config.Denormalize(0.5, 0.25, 1000, 800, 0.65, 1.3)
+    ck(math.abs(ox - 250) < 1e-9,
+        "Denormalize: a frame at twice UIParent's scale needs half the offset")
+    ck(Config.Denormalize(0.5, 0.5, 1000, 800, 0.65, 0) == nil,
+        "Denormalize: a zero frame scale answers nil, never infinity")
+
+    -- ── NearPos: the comparison rule everything else leans on ────────────────
+    local NP = Config.NearPos
+    ck(NP({ "BOTTOMLEFT", 0.5, 0.5 }, { "BOTTOMLEFT", 0.5, 0.5 }), "NearPos: identical agrees")
+    ck(NP({ "BOTTOMLEFT", 0.5, 0.5 }, { "BOTTOMLEFT", 0.5008, 0.4995 }),
+        "NearPos: sub-tolerance jitter is the SAME position")
+    ck(not NP({ "BOTTOMLEFT", 0.5, 0.5 }, { "BOTTOMLEFT", 0.52, 0.5 }),
+        "NearPos: a real move is a real difference")
+    ck(not NP({ "BOTTOMLEFT", 0.5, 0.5 }, { "TOPRIGHT", 0.5, 0.5 }),
+        "NearPos: a different anchor is a different position")
+    ck(NP(nil, { "BOTTOMLEFT", 0.5, 0.5 }) and NP({ "BOTTOMLEFT", 0.5, 0.5 }, nil),
+        "NearPos: an UNKNOWN side never manufactures a difference (Class 6 discipline)")
+
+    local Sim = _G.__DaseekiChatSim
+    if not Sim then return end
+    local frame = Sim.Frame(1)
+    local savedScale, savedLeft, savedBottom = Sim.uiScale, frame._left, frame._bottom
+
+    -- ── THE CROSS-ACCOUNT LEG ────────────────────────────────────────────────
+    -- Account A runs at uiScale 0.65 and parks the window flush in the screen's
+    -- bottom-left corner. Account B runs at 1.0. The SAME normalized config has
+    -- to put the window in the same place on the screen — which is the whole
+    -- reason the field exists.
+    Sim.SetUIScale(0.65)
+    frame._left, frame._bottom = 0, 0
+    local npA = Config.CaptureNormalizedPos(1)
+    ck(type(npA) == "table" and npA[1] == "BOTTOMLEFT",
+        "capture: the normalized corner is written against BOTTOMLEFT")
+    ck(npA[2] == 0 and npA[3] == 0, "capture: flush in the corner normalizes to 0,0")
+
+    -- A quarter of the way across and a fifth of the way up, on account A.
+    local uiW, uiH, uiScale = Config.ScreenGeometry()
+    frame._left   = 0.25 * uiW
+    frame._bottom = 0.20 * uiH
+    npA = Config.CaptureNormalizedPos(1)
+    ck(math.abs(npA[2] - 0.25) < 1e-6 and math.abs(npA[3] - 0.20) < 1e-6,
+        "capture: a quarter across the screen captures as 0.25 regardless of the units")
+
+    -- Account B: a DIFFERENT effective scale, same config, same fraction.
+    Sim.SetUIScale(1.0)
+    local uiW2, uiH2, uiScale2 = Config.ScreenGeometry()
+    ck(uiW2 ~= uiW, "the scale change really did change UIParent's unit width")
+    ck(math.abs(uiW2 * uiScale2 - uiW * uiScale) < 1e-6,
+        "…while the PIXEL screen is identical (the thing both accounts share)")
+    local ox2, oy2 = Config.Denormalize(npA[2], npA[3], uiW2, uiH2, uiScale2,
+        frame:GetEffectiveScale())
+    frame:ClearAllPoints()
+    frame:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", ox2, oy2)
+    local npB = Config.CaptureNormalizedPos(1)
+    ck(Config.NearPos(npA, npB),
+        "THE CROSS-ACCOUNT LEG: the same normalized config lands on the same fraction at scale 1.0")
+    ck(math.abs(npB[2] - 0.25) < 1e-6, "…and it is still exactly a quarter across")
+
+    -- The raw offsets are NOT the same number — which is exactly why storing
+    -- them was the bug.
+    local oxA = Config.Denormalize(npA[2], npA[3], uiW, uiH, uiScale, 0.65)
+    ck(math.abs(oxA - ox2) > 1,
+        "the RAW offset differs between the two accounts (the defect the fraction retires)")
+
+    Sim.SetUIScale(savedScale)
+    frame._left, frame._bottom = savedLeft, savedBottom
+
+    -- ── UNKNOWN IS NOT ZERO ──────────────────────────────────────────────────
+    local hidLeft = frame._left
+    frame._left = nil                       -- the pre-layout world
+    ck(Config.CaptureNormalizedPos(1) == nil,
+        "an unresolved corner captures as UNKNOWN (nil), never as 0,0")
+    local w = Config.CaptureWindow(1)
+    ck(w.npos == nil, "…and the window entry simply carries no npos")
+    frame._left = hidLeft
+
+    -- A capture that could not read the geometry must not DELETE a position
+    -- the config holds (merge, not replace).
+    local prev = { [1] = { npos = { "BOTTOMLEFT", 0.4, 0.4 } } }
+    local snapWindows = { [1] = { name = "W" } }
+    local merged = Config.MergeWindows(prev, snapWindows)
+    ck(Config.SerEq(merged[1].npos, { "BOTTOMLEFT", 0.4, 0.4 }),
+        "a dark capture keeps the stored npos (an unknown never deletes)")
+    merged[1].npos[2] = 0.9
+    ck(prev[1].npos[2] == 0.4, "…and the merge handed back a copy, not a reference")
+    local snapWithPos = { [1] = { name = "W", npos = { "BOTTOMLEFT", 0.7, 0.7 } } }
+    ck(Config.MergeWindows(prev, snapWithPos)[1].npos[2] == 0.7,
+        "a capture that DID read the geometry wins over the stored value")
+
+    -- ── TOLERANCE, where it matters: the capture-back gate ───────────────────
+    local cfgW  = { name = "W", npos = { "BOTTOMLEFT", 0.500000, 0.500000 } }
+    local snapW = { name = "W", npos = { "BOTTOMLEFT", 0.500400, 0.499700 } }
+    ck(Config.WindowDiffers(snapW, cfgW) == false,
+        "WindowDiffers: float round-trip noise is NOT an edit (no rev-bump storm)")
+    snapW.npos = { "BOTTOMLEFT", 0.55, 0.5 }
+    ck(Config.WindowDiffers(snapW, cfgW) == true, "WindowDiffers: a real move IS an edit")
+    snapW.npos = nil
+    ck(Config.WindowDiffers(snapW, cfgW) == false,
+        "WindowDiffers: a dark geometry read says nothing about the position")
+    snapW.name = "Renamed"
+    ck(Config.WindowDiffers(snapW, cfgW) == true,
+        "WindowDiffers: every other field still compares EXACTLY")
+    ck(Config.WindowDiffers(nil, cfgW) == false,
+        "WindowDiffers: no capture at all is not a deletion")
+
+    -- ── WIRE-COMPAT: additive, both fields, old shapes still read ────────────
+    local c = Config.Get()
+    local savedWindows, savedRev, savedAt = c.windows, c.rev, c.at
+    c.windows = { [1] = { name = "Old", pos = { "BOTTOMLEFT", 32, 32 } } }   -- a pre-npos config
+    c.rev, c.at = 5, 1000
+    ck(Config.DiffList({ windows = c.windows }, { windows = { [1] = { name = "Old",
+        pos = { "BOTTOMLEFT", 32, 32 } } } })[1] == nil,
+        "a config written by an OLDER build (no npos) still reconciles clean")
+    c.windows[1].npos = { "BOTTOMLEFT", 0.1, 0.2 }
+    local snapshot = Config.Snapshot()
+    ck(Config.SerEq(snapshot.cfg.windows[1].npos, { "BOTTOMLEFT", 0.1, 0.2 }),
+        "npos rides the wire payload alongside the legacy pos tuple")
+    ck(Config.SerEq(snapshot.cfg.windows[1].pos, { "BOTTOMLEFT", 32, 32 }),
+        "…and the legacy tuple is still published for older readers")
+    c.windows, c.rev, c.at = savedWindows, savedRev, savedAt
+end
+
 ns:RegisterSelfTest("config", function(verbose)
     local suites = {
         { name = "deterministic serialization", fn = testSerialization },
         { name = "capture + first-run adopt",   fn = testCaptureAndAdopt },
         { name = "LWW + wire payload",          fn = testLWW },
+        { name = "scale-normalized positions",  fn = testNormalizedPositions },
     }
     local allPass = true
     for _, suite in ipairs(suites) do
