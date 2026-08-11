@@ -3,6 +3,7 @@
 ## Author: Daseeki
 ## Category: Chat & Communication
 ## X-License: All Rights Reserved
+## X-Curse-Project-ID: 1648776
 ## Dependencies: Daseeki-Core
 ## OptionalDeps: Daseeki-Nexus
 ## Interface: 11507, 11508, 11509
