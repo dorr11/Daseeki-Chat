@@ -294,6 +294,52 @@ function Config.CaptureNormalizedPos(id)
     return { "BOTTOMLEFT", fx, fy }
 end
 
+-- ── THE SAME DISCIPLINE, APPLIED TO SIZE (`ndim`, 2026-08-11) ────────────────
+--
+-- The owner asked for a resizable chat box, and a size stored in raw UI units
+-- has EXACTLY the cross-account problem the position had: two accounts sharing
+-- one Config.wtf can carry different effective scales, so "430 units wide"
+-- covers different amounts of screen on each. `ndim` is the window's size as a
+-- FRACTION OF THE PIXEL SCREEN — the same measurement `npos` makes of the
+-- corner, made of the extent — and it rides in exactly the same places:
+--   * captured here, alongside npos, from LIVE geometry;
+--   * carried inside `windows`, which Candidates / Snapshot / AdoptEffective
+--     already name — so it syncs for the same reason `tabColor` does, and the
+--     aliases lesson ("a section not named in all three is silently
+--     account-local forever") is satisfied without a new section;
+--   * preserved through a capture-back that could not read it (mergeWindows);
+--   * compared with TOLERANCE rather than exactly (a measurement, not a token);
+--   * replayed by the reconciler at login (Reconcile.ApplySizes).
+-- No anchor token: an extent has no anchor. `{ fw, fh }`, and nothing else.
+--
+-- UNKNOWN IS NOT ZERO, again: a frame the client has not laid out answers nil
+-- for its width, and a nil read captures as NO ndim — never as a zero-sized
+-- window, which is the one value that would make a box the player cannot find.
+function Config.CaptureNormalizedDim(id)
+    local frame = _G["ChatFrame" .. tostring(id)]
+    if type(frame) ~= "table" then return nil end
+    local uiW, uiH, uiScale = Config.ScreenGeometry()
+    if not uiW then return nil end
+    local w  = widgetNum(frame, "GetWidth")
+    local h  = widgetNum(frame, "GetHeight")
+    local fs = widgetNum(frame, "GetEffectiveScale") or uiScale
+    if w == nil or h == nil or w <= 0 or h <= 0 or fs <= 0 then return nil end
+    local fw, fh = Config.Normalize(w * fs, h * fs, uiW * uiScale, uiH * uiScale)
+    if fw == nil or fw <= 0 or fh <= 0 then return nil end
+    return { fw, fh }
+end
+
+-- Do two normalized sizes mean the same extent? nil on EITHER side is UNKNOWN
+-- and therefore agreement — the npos rule, verbatim, for the same reason.
+function Config.NearDim(a, b)
+    if a == nil or b == nil then return true end
+    if type(a) ~= "table" or type(b) ~= "table" then return false end
+    local function near(x, y)
+        return math.abs((tonumber(x) or 0) - (tonumber(y) or 0)) <= Config.NPOS_EPSILON
+    end
+    return near(a[1], b[1]) and near(a[2], b[2])
+end
+
 -- Do two normalized positions mean the same placement? A nil on EITHER side is
 -- UNKNOWN and therefore agreement — the same discipline the dark channel list
 -- gets. Anchors must match exactly; the fractions compare with tolerance.
@@ -368,6 +414,9 @@ function Config.CaptureWindow(id)
     -- The scale-normalized corner rides ALONGSIDE the legacy tuple (additive,
     -- deprecation window). Absent when the geometry is not resolvable yet.
     w.npos = Config.CaptureNormalizedPos(id)
+    -- …and so does the scale-normalized SIZE, for the same reasons and with the
+    -- same absent-when-unreadable rule.
+    w.ndim = Config.CaptureNormalizedDim(id)
     return w
 end
 
@@ -447,6 +496,12 @@ local function mergeWindows(prev, snapWindows)
             if w.npos == nil and type(old) == "table" and type(old.npos) == "table" then
                 w.npos = copyCfg(old.npos)
             end
+            -- ndim rides the identical rule: an unreadable SIZE is an unknown,
+            -- and an unknown must never delete the one the player (or a peer
+            -- account) set.
+            if w.ndim == nil and type(old) == "table" and type(old.ndim) == "table" then
+                w.ndim = copyCfg(old.ndim)
+            end
             if type(old) == "table" then
                 for _, f in ipairs(WINDOW_CONFIG_ONLY_FIELDS) do
                     if w[f] == nil and old[f] ~= nil then
@@ -482,8 +537,9 @@ function Config.AdoptClient(snap)
 end
 
 -- The window fields a capture speaks about, compared EXACTLY (deterministic
--- serialization). `npos` is deliberately not here: it is a measurement, so it
--- compares with tolerance through NearPos — see WindowDiffers.
+-- serialization). `npos` and `ndim` are deliberately not here: they are
+-- measurements, so they compare with tolerance through NearPos / NearDim —
+-- see WindowDiffers.
 local WINDOW_EXACT_FIELDS = {
     "name", "fontSize", "r", "g", "b", "alpha", "shown", "locked", "docked",
     "uninteractable", "dim", "pos", "groups", "channels",
@@ -498,7 +554,8 @@ function Config.WindowDiffers(snapW, cfgW)
     for _, f in ipairs(WINDOW_EXACT_FIELDS) do
         if not serEq(snapW[f], cfgW[f]) then return true end
     end
-    return not Config.NearPos(snapW.npos, cfgW.npos)
+    if not Config.NearPos(snapW.npos, cfgW.npos) then return true end
+    return not Config.NearDim(snapW.ndim, cfgW.ndim)
 end
 
 -- Would a capture change the stored config? (The capture-back gate.)
@@ -917,6 +974,10 @@ function Config.DiffList(want, have)
                 -- read).
                 if type(a.npos) == "table" and not Config.NearPos(a.npos, b.npos) then
                     diffs[#diffs + 1] = "window " .. id .. " npos"
+                end
+                -- …and the normalized SIZE, on the identical footing.
+                if type(a.ndim) == "table" and not Config.NearDim(a.ndim, b.ndim) then
+                    diffs[#diffs + 1] = "window " .. id .. " ndim"
                 end
             end
         end
