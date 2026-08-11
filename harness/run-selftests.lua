@@ -678,18 +678,25 @@ end)
 
 ----------------------------------------------------------------------
 -- Harness-registered suite: INTEGRATION — the "it all runs at once" reality
--- no per-branch suite ever saw. Every Wave-2 module merged so far (decor,
--- stamps, names, urls, history, badges) is enabled TOGETHER, then one message
--- flows, a cross-session restore happens, and badges count — pinning that the
--- stacked AddMessage wraps (decor seam + history shadow + badges delivery),
--- the post-add observers and the restore path do not corrupt each other under
--- the merged enable permutation:
+-- no per-branch suite ever saw. EVERY Wave-2 lifecycle module (decor, stamps,
+-- names, urls, history, badges, skin, channels, reconcile — config.lua and
+-- nexus.lua are passive/bridge files exercised through them) is enabled
+-- TOGETHER, a reconcile CONVERGES an authored config (leg 0), then one
+-- message flows, a cross-session restore happens, and badges count — all in
+-- the converged world — pinning that the stacked AddMessage wraps (decor seam
+-- + history shadow + badges delivery), the post-add observers, the restore
+-- path AND the reconciler's window/channel convergence do not corrupt each
+-- other under the merged enable permutation:
+--   * the reconciler converges windows, the join list (deterministic
+--     numbers, paced — zero dropped ops) and channel colors by name while
+--     the whole pipeline is live;
 --   * protection holds under full decoration load (item link byte-intact);
 --   * exactly ONE stamp per stored line (no double-processing across wraps);
 --   * history captures the line; restore backfills via PushFront ONLY (zero
 --     AddMessage re-entry), the divider sits strictly before live content;
 --   * restored lines never badge (they bypass the delivery seam); a live line
---     after the restore badges exactly once.
+--     after the restore badges exactly once; the reconciler's re-login
+--     converge adds no lines and re-lands the join list.
 -- Runs last (after every module suite), against the world exactly as the
 -- suites left it — which IS the point.
 ----------------------------------------------------------------------
@@ -701,17 +708,73 @@ ns:RegisterSelfTest("integration", function(verbose)
     local ok, err = pcall(function()
         local cf1  = _G.ChatFrame1
         local dock = _G.GeneralDockManager
+        local C    = ns.Config
 
-        -- All Wave-2-so-far modules up together (explicit, not inherited:
-        -- stamps' own suite deliberately leaves itself disabled for skin).
-        for _, name in ipairs({ "decor", "stamps", "names", "urls", "history", "badges" }) do
-            ns.SetModuleEnabled(name, true)
+        local ALL_MODULES = { "decor", "stamps", "names", "urls", "history",
+                              "badges", "skin", "channels", "reconcile" }
+
+        -- Every module up together (explicit, not inherited: stamps' suite
+        -- deliberately leaves itself disabled for skin; the reconciler wave's
+        -- suites leave reconcile/channels disabled). Order matters twice:
+        -- channels before reconcile (the warm gate), and reconcile LAST —
+        -- after the config below is authored — so even its enable-path run
+        -- converges toward THIS config, never a predecessor suite's leftover.
+        for _, name in ipairs(ALL_MODULES) do
+            if name ~= "reconcile" then ns.SetModuleEnabled(name, true) end
         end
-        ck(ns.Decor.active and ns.Stamps.active and ns.Names.active
-            and ns.Urls.active and ns.History.active and ns.Badges.active,
-            "all six Wave-2 modules are active together")
 
-        -- ── Leg 1: one message through the full stack. ───────────────────────
+        -- ── Leg 0: author a config, then a reconcile converges it with the
+        -- whole stack live. The authored intent: window 1 renamed + resized,
+        -- the current routing kept (captured), "World" routed and joined at a
+        -- deterministic number, its color held by name. ──────────────────────
+        local c = C.Get()
+        c.windows = {}
+        for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do
+            c.windows[id] = C.CaptureWindow(id)
+        end
+        c.windows[1].name = "Merged"
+        c.windows[1].fontSize = 15
+        local hasWorld = false
+        for _, nm in ipairs(c.windows[1].channels) do
+            if nm == "World" then hasWorld = true end
+        end
+        if not hasWorld then
+            c.windows[1].channels[#c.windows[1].channels + 1] = "World"
+            table.sort(c.windows[1].channels)
+        end
+        c.join   = { { 1, "General" }, { 2, "World" } }
+        c.colors = { world = { r = 0.9, g = 0.3, b = 0.2 } }
+        c.rev = (tonumber(c.rev) or 0) + 1
+        c.at  = C.Now()
+
+        ns.SetModuleEnabled("reconcile", true)
+        local allUp = true
+        for _, name in ipairs(ALL_MODULES) do
+            local m = ns.Modules[name]
+            if not (m and m.__active) then allUp = false end
+        end
+        ck(allUp, "leg 0: every Wave-2 lifecycle module is active together")
+
+        local drops0 = Sim.droppedJoins
+        Sim.EnterWorld(false, false)   -- plain zone-in: the reconcile beat, no restore
+        HTIMER.flush()                 -- warm poll + paced joins + verify ladder settle
+        ck(select(1, _G.GetChatWindowInfo(1)) == "Merged",
+            "leg 0: the reconciler renamed window 1 from the authored config")
+        local _, fs0 = _G.GetChatWindowInfo(1)
+        ck(fs0 == 15, "leg 0: window 1 font size converged")
+        ck(select(1, _G.GetChannelName("World")) == 2,
+            "leg 0: the join list landed World on its configured number")
+        ck(C.NearColor(_G.ChatTypeInfo["CHANNEL2"], c.colors.world),
+            "leg 0: the channel color imposed at the converged number, by name")
+        ck(Sim.droppedJoins == drops0,
+            "leg 0: pacing held through the merged-world converge (zero dropped ops)")
+        local w1cap = C.CaptureWindow(1)
+        local routed = false
+        for _, nm in ipairs(w1cap.channels) do if nm == "World" then routed = true end end
+        ck(routed, "leg 0: window 1 routes the configured channel")
+        ck(ns.Reconcile._runInFlight == false, "leg 0: the reconcile run ENDED (finite ladder)")
+
+        -- ── Leg 1: one message through the full stack, in the CONVERGED world.
         _G.FCF_SelectDockFrame(_G.ChatFrame2)   -- window 1 docked-unselected: badgeable
         ns.Badges.Clear(cf1)
         Sim.ResetCalls()
@@ -766,6 +829,11 @@ ns:RegisterSelfTest("integration", function(verbose)
         ck(not doubleStamped, "leg 2: no restored line wears more than one stamp")
         ck(ns.Badges.counts[cf1] == 0,
             "leg 2: restored lines badge NOTHING (they bypass the delivery seam)")
+        -- The reconciler rode the same login beat: the fresh session's empty
+        -- server list was re-converged (joins are server ops, never lines).
+        ck(select(1, _G.GetChannelName("World")) == 2,
+            "leg 2: the reconciler re-landed the join list on the fresh session")
+        ck(ns.Reconcile._runInFlight == false, "leg 2: the login reconcile run ended")
 
         -- ── Leg 3: live traffic after the restore, full stack still up. ──────
         Sim.SendChat{ event = "CHAT_MSG_SAY", text = "back-live",
@@ -782,10 +850,18 @@ ns:RegisterSelfTest("integration", function(verbose)
         ck(ns.Badges.counts[cf1] == 1,
             "leg 3: the live line badged exactly once (restored lines contributed zero)")
 
-        -- Tidy: focused window back, stamps back to the state its own suite
-        -- left (disabled), timers drained, counters clean.
+        -- Tidy: focused window back; stamps and the reconciler wave back to
+        -- the states their own suites left (disabled); the DEFAULT window
+        -- world restored (this suite authored a converged layout); timers
+        -- drained, counters clean.
         _G.FCF_SelectDockFrame(cf1)
         ns.SetModuleEnabled("stamps", false)
+        ns.SetModuleEnabled("reconcile", false)
+        ns.SetModuleEnabled("channels", false)
+        _G.FCF_ResetChatWindows()
+        for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do
+            _G.FloatingChatFrame_Update(id)
+        end
         HTIMER.flush()
         Sim.ResetCalls()
     end)

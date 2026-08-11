@@ -4,9 +4,12 @@
 -- The mechanism, in the game-facts register's terms (spec §7.1/§7.6):
 --   * CAPTURE at the delivery seam: every window's AddMessage is wrapped (our
 --     own wrapper, gated on History.active) and each line is shadowed into a
---     bounded per-window ring with the text, its colors, and a GetServerTime()
---     EPOCH stamp per line — the ring buffer's own `timestamp` is GetTime()
---     uptime and dies across sessions (the register's rule).
+--     bounded per-window ring with the FINAL STORED text (read back from the
+--     buffer's newest entry after the client stored it — never the raw
+--     AddMessage argument, so capture is independent of wrapper install
+--     order), its colors, and a GetServerTime() EPOCH stamp per line — the
+--     ring buffer's own `timestamp` is GetTime() uptime and dies across
+--     sessions (the register's rule).
 --   * SNAPSHOT the shadow rings into the per-character store (ns.chardb —
 --     DaseekiChatCharDB, never synced) on the LOGOUT bus beat, plus an
 --     opportunistic batched write on a timer so a crash loses little. NEVER a
@@ -216,7 +219,24 @@ local function installFrameWrapper(id)
     History.hookedFrames[frame] = true
     frame.AddMessage = function(self, text, r, g, b, ...)
         local r1, r2, r3, r4 = orig(self, text, r, g, b, ...)
-        onLine(id, text, r, g, b)
+        -- Capture from the STORED entry, never the raw argument: sibling
+        -- wrappers (decor's seam and its post-adds) can sit on either side of
+        -- this one depending on enable order, so the `text` argument is pre-
+        -- or post-decoration by install-order accident. The newest buffer
+        -- entry AFTER orig() returned is the line as the player sees it — the
+        -- final displayed text — which makes capture order-independent by
+        -- construction. The argument is only the fallback for a frame whose
+        -- buffer cannot be read.
+        local storedText, sr, sg, sb = text, r, g, b
+        local buf = self.historyBuffer
+        if type(buf) == "table" and type(buf.GetEntryAtIndex) == "function" then
+            local okE, e = pcall(buf.GetEntryAtIndex, buf, 1)
+            if okE and type(e) == "table" and type(e.message) == "string" then
+                storedText = e.message
+                sr, sg, sb = e.r or r, e.g or g, e.b or b
+            end
+        end
+        onLine(id, storedText, sr, sg, sb)
         return r1, r2, r3, r4
     end
 end
@@ -456,7 +476,18 @@ local function testLive(fails, verbose)
                                 sender = "Puu-Whitemane", guid = "Player-1-00000001" }
     local ring1 = History.rings[1]
     ck(ring1 and #ring1 == 1, "phase 1: a routed line was captured into the shadow ring")
-    ck(ring1 and ring1[1].m == line1, "phase 1: captured text is the client-formatted line")
+    -- Composition-honest restatement of the round-1 pin: sibling pipeline
+    -- modules are legitimately live in the merged world, so byte-equality
+    -- with the sim's RAW formatted line encoded a single-module assumption.
+    -- The capture's contract is the STORED displayed line, substance intact
+    -- (phase 1b below pins the raw-vs-decorated branches explicitly).
+    local stored1 = cf1.historyBuffer:GetEntryAtIndex(1)
+    ck(ring1 and stored1 and ring1[1].m == stored1.message,
+        "phase 1: captured text is the STORED displayed line (capture source = the buffer)")
+    ck(ring1 and ring1[1].m:find("first", 1, true) ~= nil
+        and ring1[1].m:find("|Hplayer:Puu-Whitemane", 1, true) ~= nil
+        and line1 ~= nil,
+        "phase 1: the line's substance (text + click payload) survived to the capture")
     ck(ring1 and ring1[1].t == _G.GetServerTime(),
         "phase 1: the capture stamp is EPOCH server time, not uptime")
     cf1:AddMessage("secret |Kq7|k here", 0.2, 0.4, 0.6)
@@ -475,6 +506,31 @@ local function testLive(fails, verbose)
     ns.db.history.optOut[3] = nil
     cf3:AddMessage("wanted", 1, 1, 1)
     ck(History.rings[3] and #History.rings[3] == 1, "phase 1: clearing the opt-out resumes capture")
+
+    -- ── Phase 1b: CAPTURE SOURCE — the store, not the argument (the wrapper-
+    -- order defect, fixed and pinned). With decoration live, the stored line
+    -- differs from the AddMessage argument, and the capture must equal the
+    -- STORED text whichever wrapper sat outermost — order-independent by
+    -- construction. With the engine off, stored == raw and capture equals
+    -- both. ──────────────────────────────────────────────────────────────────
+    ns.Decor.RegisterDecorator("t_hist_capture", 50, function(text)
+        return text .. " ~deco~"
+    end)
+    cf1:AddMessage("capture-source probe", 1, 1, 1)
+    local ring1b = History.rings[1]
+    local stored1b = cf1.historyBuffer:GetEntryAtIndex(1)
+    ck(stored1b and stored1b.message == "capture-source probe ~deco~",
+        "phase 1b: the decorator demonstrably changed the stored line")
+    ck(stored1b and ring1b[#ring1b].m == stored1b.message,
+        "phase 1b: decor ON — history captured the DECORATED stored text, regardless of enable order")
+    ck(ring1b[#ring1b].m ~= "capture-source probe",
+        "phase 1b RED CONTROL: the raw AddMessage argument was NOT what got captured")
+    ns.Decor.UnregisterDecorator("t_hist_capture")
+    ns.SetModuleEnabled("decor", false)
+    cf1:AddMessage("raw probe", 1, 1, 1)
+    ck(ring1b[#ring1b].m == "raw probe",
+        "phase 1b: decor OFF — the capture equals the raw line")
+    ns.SetModuleEnabled("decor", true)
 
     -- ── Phase 2: batch-write budget — NEVER a per-message SV write. ──────────
     local store = ns.chardb.history

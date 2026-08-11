@@ -732,6 +732,21 @@ local function testLadderAndTrace(fails)
     HT.flush()
     ck(ns.Config.Get().windows[3].name == "My Rename",
         "a disabled reconciler captures NOTHING (hook bodies are inert)")
+
+    -- Tidy (the wave convention: every suite leaves a world the suites after
+    -- it can stand on). This suite re-based the client window store wholesale
+    -- (NewSession + FCF_ResetChatWindows + converged layouts that tightened
+    -- window 1's routing); hand back the DEFAULT window world before leaving.
+    -- Both modules are disabled above, so these writes capture nothing and
+    -- converge nothing.
+    _G.FCF_ResetChatWindows()
+    if type(_G.FloatingChatFrame_Update) == "function" then
+        for id = 1, numWindows() do
+            _G.FloatingChatFrame_Update(id)
+        end
+    end
+    if type(_G.FCF_DockUpdate) == "function" then _G.FCF_DockUpdate() end
+    HT.flush()
     Sim.ResetCalls()
 end
 
