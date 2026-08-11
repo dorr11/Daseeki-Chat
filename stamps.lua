@@ -54,6 +54,12 @@ local DEFAULTS = {
     windows     = {},          -- [windowId] = false to turn a window off (absent = on)
 }
 
+-- Published so the settings pane can bind controls against the REAL default
+-- shape (and so a control naming a field this module does not have fails a
+-- test rather than writing a key nothing reads). The branch itself is still
+-- created in OnEnable, exactly as before.
+Stamps.DEFAULTS = DEFAULTS
+
 local FORMATS = {
     ["HH:MM"]    = "%H:%M",
     ["HH:MM:SS"] = "%H:%M:%S",

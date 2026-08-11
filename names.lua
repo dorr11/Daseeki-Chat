@@ -44,6 +44,9 @@ local DEFAULTS = {
     persist  = false,      -- realm-scoped class cache in the per-character store
 }
 
+-- Published for the settings pane's bind-check (see stamps.lua's note).
+Names.DEFAULTS = DEFAULTS
+
 local function cfg()
     return (ns.db and ns.db.names) or DEFAULTS
 end

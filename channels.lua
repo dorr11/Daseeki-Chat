@@ -228,6 +228,84 @@ function Channels.ImposeAllColors()
 end
 
 ----------------------------------------------------------------------
+-- CHANNEL ALIASES ON THE CHAT LINE (the owner's Prat ask: "custom channel
+-- names"). The client writes a channel's header as the DISPLAY TEXT of a
+-- hyperlink — |Hchannel:channel:2|h[2. Trade - City]|h — so renaming it is a
+-- display edit over a live link, which is the single most dangerous shape in
+-- this whole addon (the Prat coupling bug's home ground).
+--
+-- WHICH IS WHY IT IS A LINK DECORATOR, not a text substitution: decor.lua's
+-- link-decorator class parses the link STRUCTURALLY, hands a decorator the
+-- display text ONLY, and rebuilds the link from the original type and payload
+-- itself. The payload is therefore untouchable BY CONSTRUCTION rather than by
+-- our care, and a return carrying link markup is rejected wholesale by the
+-- engine. Nothing here can corrupt a channel link even if it tries.
+--
+-- The lookup is BY NAME, case-folded (config.lua owns the seam). The number in
+-- the header is display, never identity — it moves between characters and
+-- sessions, which is the entire reason channels.lua exists.
+----------------------------------------------------------------------
+
+function Channels.AliasLinkDecorator(linkType, payload, display)
+    if linkType ~= "channel" then return nil end          -- every other link: untouched
+    local C = ns.Config
+    if not (C and C.ParseChannelDisplay and C.AliasLabel) then return nil end
+    local num, name = C.ParseChannelDisplay(display)
+    if not name then return nil end                        -- unusual shape: never guess
+    local label = C.AliasLabel(num, name)
+    if not label then return nil end                       -- unaliased: render native
+    return "[" .. label .. "]"
+end
+
+-- Channel names the alias editor can offer: everything the LIVE list knows,
+-- unioned with the configured join list and with any name that already carries
+-- an alias (so a channel you are not in right now never vanishes from its own
+-- setting). Sorted, de-duplicated by folded name; our own pins never appear.
+function Channels.KnownChannelNames()
+    local seen, out = {}, {}
+    local function add(name)
+        if type(name) ~= "string" or name == "" or isPin(name) then return end
+        local key = name:lower()
+        if seen[key] then return end
+        seen[key] = true
+        out[#out + 1] = name
+    end
+    local byNum = listRead()
+    if byNum then
+        local nums = {}
+        for n in pairs(byNum) do nums[#nums + 1] = n end
+        table.sort(nums)
+        for _, n in ipairs(nums) do add(byNum[n]) end
+    end
+    local C = ns.Config
+    if C and C.EffectiveCfg then
+        local ok, eff = pcall(C.EffectiveCfg)
+        if ok and type(eff) == "table" and type(eff.join) == "table" then
+            for _, pair in ipairs(eff.join) do
+                if type(pair) == "table" then add(pair[2]) end
+            end
+        end
+    end
+    if C and C.AliasList then
+        for _, a in ipairs(C.AliasList()) do add(a.key) end
+    end
+    table.sort(out, function(a, b) return a:lower() < b:lower() end)
+    return out
+end
+
+-- The channel number the client currently has for a name (nil = not joined).
+function Channels.NumberOf(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local f = _G.GetChannelName
+    if type(f) ~= "function" then return nil end
+    local ok, num = pcall(f, name)
+    if not ok then return nil end
+    num = tonumber(num)
+    if not num or num <= 0 then return nil end
+    return num
+end
+
+----------------------------------------------------------------------
 -- The notice handler: the ONE standing client subscription. On every join /
 -- renumber the color is re-imposed by name (rule 6, permanently). A notice we
 -- did not cause is a PLAYER edit — the reconciler is told so capture-back can
@@ -546,6 +624,13 @@ function Channels.OnEnable()
         if Channels.active then Channels.BeginWarmPoll() end
     end
     ns:On("ENTERING_WORLD", Channels._ewListener)
+    -- The alias decorator rides decor.lua's certified link path. Registered
+    -- here and given back in OnDisable, exactly like names.lua's own link
+    -- decorator: with this module inert, channels render the client's text.
+    local D = ns.Decor
+    if D and D.RegisterLinkDecorator then
+        D.RegisterLinkDecorator("chanalias", 20, Channels.AliasLinkDecorator)
+    end
     -- Enabled after world-enter (login order / a live /dchat enable): warm now.
     if ns.state.inWorld then Channels.BeginWarmPoll() end
 end
@@ -558,6 +643,8 @@ function Channels.OnDisable()
     if Channels._ewListener then
         ns:Off("ENTERING_WORLD", Channels._ewListener)
     end
+    local D = ns.Decor
+    if D and D.UnregisterLinkDecorator then D.UnregisterLinkDecorator("chanalias") end
     Channels._warmToken = Channels._warmToken + 1   -- cancels any in-flight poll
     Channels._convToken = Channels._convToken + 1   -- orphans any in-flight converge
     Channels._converge = nil
@@ -757,11 +844,108 @@ local function testColorsAndRefusal(fails)
     Sim.ResetCalls()
 end
 
+-- CHANNEL ALIASES on the chat line. The decorator is exercised through the
+-- REAL engine (Decor.Process — decorators run there whether or not the seam is
+-- installed), so every claim below is the shipping path, not a shim. The pins
+-- extend decor.lua's own protect/reject pins onto this decorator specifically:
+-- the payload must be byte-identical across a display rename, and a decorator
+-- that tries to emit link markup must be refused by the engine.
+local function testAliasDecorator(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Decor, C = ns.Decor, ns.Config
+    if not (Decor and C) then ck(false, "decor/config missing") return end
+
+    local cfg = C.Get()
+    local savedAliases, savedKeep = cfg.aliases, cfg.aliasKeepNumber
+    local savedRev, savedAt = cfg.rev, cfg.at
+    cfg.aliases, cfg.aliasKeepNumber = {}, false
+    cfg.rev, cfg.at = 1, C.Now()
+
+    local wasActive = Channels.active
+    ns.SetModuleEnabled("channels", true)
+
+    local TRADE = "|Hchannel:channel:2|h[2. Trade - City]|h"
+    local ITEM  = "|cffa335ee|Hitem:19019|h[Thunderfury, Blessed Blade]|h|r"
+    local PLAYER = "|Hplayer:Puu-Whitemane:101|h[Puu]|h"
+    local line = TRADE .. " " .. PLAYER .. ": look " .. ITEM .. " www.example.com"
+
+    -- ── Unaliased: the client's own bytes, untouched ─────────────────────────
+    ck(Decor.Process(line) == line,
+        "an UNALIASED channel renders the client's line byte-identical")
+
+    -- ── Aliased: display swapped, payload byte-identical ─────────────────────
+    C.SetAlias("Trade - City", "Trade")
+    local out = Decor.Process(line)
+    ck(out:find("|Hchannel:channel:2|h[Trade]|h", 1, true) ~= nil,
+        "the channel header displays the ALIAS (got: " .. tostring(out:match("|Hchannel:.-|h.-|h")) .. ")")
+    ck(out:find("|Hchannel:channel:2|h", 1, true) ~= nil,
+        "THE PAYLOAD IS BYTE-IDENTICAL across the rename (the link still clicks)")
+    ck(out:find("[2. Trade - City]", 1, true) == nil, "the client's own header text is gone")
+    ck(out:find(ITEM, 1, true) ~= nil, "a NON-CHANNEL link on the same line is untouched")
+    ck(out:find(PLAYER, 1, true) ~= nil, "…and so is the player link")
+    ck(out:find("www.example.com", 1, true) ~= nil, "…and the body text is not this decorator's business")
+
+    -- ── Case folding, both directions ────────────────────────────────────────
+    local upper = "|Hchannel:channel:2|h[2. TRADE - CITY]|h"
+    ck(Decor.Process(upper):find("[Trade]", 1, true) ~= nil,
+        "the lookup folds case: a SHOUTED channel name still aliases")
+    C.SetAlias("world", "W")
+    ck(Decor.Process("|Hchannel:channel:5|h[5. World]|h"):find("[W]", 1, true) ~= nil,
+        "…and an alias stored under a folded key matches the client's capitalization")
+
+    -- ── The number-keep toggle, both ways ────────────────────────────────────
+    C.SetAliasKeepNumber(true)
+    ck(Decor.Process(TRADE):find("[2. Trade]", 1, true) ~= nil,
+        "keep-number ON renders '[2. Trade]'")
+    ck(Decor.Process(TRADE):find("|Hchannel:channel:2|h", 1, true) ~= nil,
+        "…with the payload still byte-identical")
+    C.SetAliasKeepNumber(false)
+    ck(Decor.Process(TRADE):find("[Trade]", 1, true) ~= nil
+        and Decor.Process(TRADE):find("[2. Trade]", 1, true) == nil,
+        "keep-number OFF renders the clean '[Trade]' again")
+
+    -- ── An unnumbered channel header still aliases by name ───────────────────
+    C.SetAlias("Guild", "G")
+    ck(Decor.Process("|Hchannel:GUILD|h[Guild]|h"):find("|Hchannel:GUILD|h[G]|h", 1, true) ~= nil,
+        "an unnumbered channel header aliases by name (payload untouched)")
+    C.SetAlias("Guild", "")
+
+    -- ── THE REJECT PIN, on THIS decorator: the engine refuses markup ─────────
+    -- An alias is player-typed text. If someone types link markup into the
+    -- alias field, the engine's own reject rule must throw the whole return
+    -- away rather than emit it — decor.lua's phase-4 red control, reached
+    -- through the alias path instead of a test decorator.
+    C.SetAlias("Trade - City", "|Hboom:1|hgotcha|h")
+    ck(Decor.Process(TRADE) == TRADE,
+        "AN ALIAS CARRYING LINK MARKUP IS REJECTED WHOLESALE (the line is untouched)")
+    C.SetAlias("Trade - City", "|TInterface\\Icons\\Foo:16|t")
+    ck(Decor.Process(TRADE) == TRADE, "…and a texture escape is refused the same way")
+    C.SetAlias("Trade - City", "Trade")
+
+    -- ── Protection still belongs to the engine, not to us ────────────────────
+    local hostileDisplay = "|Hchannel:channel:9|h[9. www.evil.com]|h"
+    ck(Decor.Process(hostileDisplay) == hostileDisplay,
+        "a URL-ish channel display with no alias is left exactly alone")
+
+    -- ── Inertness: disable the module and the aliases stop rendering ─────────
+    ns.SetModuleEnabled("channels", false)
+    ck(Decor.Process(TRADE) == TRADE,
+        "with the module inert the decorator is GONE (client text returns)")
+    local _, nl = Decor.DecoratorCount()
+    ck(nl == 0 or Decor.Process(TRADE) == TRADE,
+        "…because the registration was given back, not merely gated")
+
+    if wasActive then ns.SetModuleEnabled("channels", true) end
+    cfg.aliases, cfg.aliasKeepNumber = savedAliases, savedKeep
+    cfg.rev, cfg.at = savedRev, savedAt
+end
+
 ns:RegisterSelfTest("channels", function(verbose)
     local suites = {
         { name = "warmth gate + capture",       fn = testWarmthAndCapture },
         { name = "converge: pacing + numbering", fn = testConvergeAndPacing },
         { name = "colors by name + refusal",     fn = testColorsAndRefusal },
+        { name = "alias link decorator",         fn = testAliasDecorator },
     }
     local allPass = true
     for _, suite in ipairs(suites) do

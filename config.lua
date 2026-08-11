@@ -72,6 +72,8 @@ local CFG_DEFAULTS = {
     windows = {},     -- [id] = window entry (see CaptureWindow)
     colors  = {},     -- [channel name, lowercased] = { r, g, b }
     join    = {},     -- array of { number, name } pairs, sorted by number
+    aliases = {},     -- [channel name, lowercased] = display alias (see below)
+    aliasKeepNumber = false,   -- "[2. Trade]" instead of "[Trade]"
 }
 
 function Config.Get()
@@ -563,7 +565,13 @@ function Config.Candidates()
             at    = tonumber(c.at) or 0,
             rev   = tonumber(c.rev) or 0,
             owner = Config.LocalOwnerKey(),
-            cfg   = { windows = c.windows, colors = c.colors, join = c.join },
+            -- ALIASES RIDE THE SAME CANDIDATE as every other section. They are
+            -- named EXPLICITLY here (and in Snapshot / AdoptEffective) rather
+            -- than riding "for free": this assembly is a whitelist, not a copy
+            -- of the store, so a new section that is not listed is silently
+            -- account-local forever. The suite pins all three sites.
+            cfg   = { windows = c.windows, colors = c.colors, join = c.join,
+                      aliases = c.aliases, aliasKeepNumber = c.aliasKeepNumber },
         }
     end
     local Nx = ns.Nexus
@@ -596,7 +604,150 @@ function Config.AdoptEffective()
     c.windows = copyCfg(cfg.windows or {})
     c.colors  = copyCfg(cfg.colors or {})
     c.join    = copyCfg(cfg.join or {})
+    c.aliases = copyCfg(cfg.aliases or {})
+    c.aliasKeepNumber = cfg.aliasKeepNumber and true or false
     return true
+end
+
+----------------------------------------------------------------------
+-- CHANNEL ALIASES — the ONE seam every surface renders a channel through.
+--
+-- THE PROBLEM (the owner's ask, Prat's "custom channel names"): the client
+-- writes a channel's header as "[2. Trade - City]" and that string is DISPLAY
+-- TEXT inside the |Hchannel:...|h[...]|h hyperlink. Renaming it is a display
+-- concern and must never touch the payload — which is exactly what decor.lua's
+-- LINK DECORATOR class guarantees by construction (a decorator is handed the
+-- display text only and the engine rebuilds the link itself).
+--
+-- KEYED BY NAME, case-folded, NEVER by number: channel numbers are a per-
+-- character, per-session accident (channels.lua exists because of it), so an
+-- alias keyed by number would follow the wrong channel the first time the
+-- list renumbers — the same lesson the color-by-name rule above is built on.
+--
+-- ACCOUNT-WIDE and mesh-synced: aliases live in the config alongside colors,
+-- resolve through EffectiveCfg (so a peer account's winning copy shows here
+-- without a local write), and edits go through the adopt-effective-then-bump
+-- path every other edit uses.
+--
+-- Three surfaces render an aliased channel — the chat line (decor link
+-- decorator), the edit box's sticky prefix and the channel-colored tab label —
+-- and all three call AliasLabel below. That single-seam property is pinned by
+-- the suite: there is no second place that knows how an alias is spelled.
+----------------------------------------------------------------------
+
+-- The storage key for a channel name: trimmed, lower-cased. nil for anything
+-- that is not a usable name (Class 5: an empty string is not a channel).
+local function aliasKey(name)
+    if type(name) ~= "string" then return nil end
+    name = name:gsub("^%s+", ""):gsub("%s+$", "")
+    if name == "" then return nil end
+    return name:lower()
+end
+Config.AliasKey = aliasKey
+
+-- An alias as it is STORED: trimmed; empty means "no alias" (the remove verb).
+local function aliasValue(alias)
+    if type(alias) ~= "string" then return nil end
+    alias = alias:gsub("^%s+", ""):gsub("%s+$", "")
+    if alias == "" then return nil end
+    return alias
+end
+Config.AliasValue = aliasValue
+
+-- The EFFECTIVE alias table (cross-account winner first, local store second) —
+-- the same read discipline channel colors use.
+function Config.Aliases()
+    local eff = Config.EffectiveCfg()
+    if type(eff) == "table" and type(eff.aliases) == "table" then return eff.aliases end
+    local c = Config.Get()
+    if c and type(c.aliases) == "table" then return c.aliases end
+    return {}
+end
+
+function Config.GetAlias(name)
+    local key = aliasKey(name)
+    if not key then return nil end
+    return aliasValue(Config.Aliases()[key])
+end
+
+-- Set (or, with an empty/nil alias, REMOVE) one channel's alias. An unchanged
+-- write is a no-op and never bumps rev (no sync storm from re-typing the same
+-- text). Returns true when the config actually moved.
+function Config.SetAlias(name, alias)
+    local key = aliasKey(name)
+    if not key then return false end
+    local want = aliasValue(alias)
+    if Config.GetAlias(key) == want then return false end
+    Config.AdoptEffective()
+    local c = Config.Get()
+    if not c then return false end
+    if type(c.aliases) ~= "table" then c.aliases = {} end
+    c.aliases[key] = want
+    Config.Bump()
+    return true
+end
+
+function Config.AliasKeepNumber()
+    local eff = Config.EffectiveCfg()
+    if type(eff) == "table" and eff.aliasKeepNumber ~= nil then
+        return eff.aliasKeepNumber == true
+    end
+    local c = Config.Get()
+    return (c and c.aliasKeepNumber == true) or false
+end
+
+function Config.SetAliasKeepNumber(on)
+    on = on and true or false
+    if Config.AliasKeepNumber() == on then return false end
+    Config.AdoptEffective()
+    local c = Config.Get()
+    if not c then return false end
+    c.aliasKeepNumber = on
+    Config.Bump()
+    return true
+end
+
+-- Every alias the config holds, sorted by key (Class 8: a listing anything
+-- iterates must be deterministic). Entries: { key = , alias = }.
+function Config.AliasList()
+    local keys = {}
+    for k, v in pairs(Config.Aliases()) do
+        if type(k) == "string" and aliasValue(v) then keys[#keys + 1] = k end
+    end
+    table.sort(keys)
+    local out = {}
+    local t = Config.Aliases()
+    for _, k in ipairs(keys) do
+        out[#out + 1] = { key = k, alias = aliasValue(t[k]) }
+    end
+    return out
+end
+
+-- PURE. Split a channel link's DISPLAY text into its number and its name:
+--   "[2. Trade - City]" -> "2", "Trade - City"
+--   "[Guild]"           -> nil, "Guild"
+-- Anything that is not the bracketed shape answers nothing (never a guess).
+function Config.ParseChannelDisplay(display)
+    if type(display) ~= "string" then return nil, nil end
+    local inner = display:match("^%[(.*)%]$")
+    if not inner or inner == "" then return nil, nil end
+    local num, name = inner:match("^(%d+)%.%s*(.+)$")
+    if num then return num, name end
+    return nil, inner
+end
+
+-- THE SEAM. Given a channel number (may be nil/unknown) and its NAME, answer
+-- the display core every surface renders — "Trade", or "2. Trade" when the
+-- keep-number option is on — or nil when this channel has no alias, which is
+-- every surface's instruction to render the client's own text untouched.
+function Config.AliasLabel(number, name)
+    local alias = Config.GetAlias(name)
+    if not alias then return nil end
+    local n = number ~= nil and tostring(number) or ""
+    if n ~= "" and Config.AliasKeepNumber() then
+        return n .. ". " .. alias
+    end
+    return alias
 end
 
 ----------------------------------------------------------------------
@@ -611,7 +762,8 @@ function Config.Snapshot()
     return {
         v   = Config.VER,
         at  = tonumber(c.at) or 0,
-        cfg = copyCfg({ windows = c.windows, colors = c.colors, join = c.join }),
+        cfg = copyCfg({ windows = c.windows, colors = c.colors, join = c.join,
+                        aliases = c.aliases, aliasKeepNumber = c.aliasKeepNumber }),
     }
 end
 
@@ -674,6 +826,12 @@ ns.RegisterDebugCommand("config", "authoritative config: rev, stamp, sections", 
     for _ in pairs(c.colors or {}) do cn = cn + 1 end
     ns:Print(("  %d window entr(ies), %d channel color(s), %d join entr(ies)")
         :format(wn, cn, #(c.join or {})))
+    local aliases = Config.AliasList()
+    ns:Print(("  %d channel alias(es), numbers %s"):format(
+        #aliases, Config.AliasKeepNumber() and "KEPT" or "dropped"))
+    for _, a in ipairs(aliases) do
+        ns:Print(("    %s -> %s"):format(a.key, a.alias))
+    end
     local eff, owner = Config.EffectiveCfg()
     if eff then
         ns:Print("  effective winner: " .. ((owner == Config.LocalOwnerKey()) and "this account" or ("account " .. tostring(owner))))
@@ -972,12 +1130,116 @@ local function testNormalizedPositions(fails)
     c.windows, c.rev, c.at = savedWindows, savedRev, savedAt
 end
 
+-- CHANNEL ALIASES: the storage rules (case-folding, remove-on-empty, the
+-- no-op guard), the pure display parse/label seam, and the WIRE leg — the one
+-- that would silently rot, because the candidate/snapshot assembly is a
+-- whitelist and a new section that is not named there never leaves the account.
+local function testAliases(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local c = Config.Get()
+    if not c then ck(false, "no config store attached") return end
+    local savedAliases, savedKeep = c.aliases, c.aliasKeepNumber
+    local savedRev, savedAt = c.rev, c.at
+    c.aliases, c.aliasKeepNumber = {}, false
+    c.rev, c.at = 1, Config.Now()   -- local candidate wins over an absent mesh
+
+    -- ── Storage: case-folded key, trimmed value, empty removes ───────────────
+    ck(Config.GetAlias("Trade - City") == nil, "an un-aliased channel answers nothing")
+    ck(Config.SetAlias("Trade - City", "Trade") == true, "setting an alias reports the edit")
+    ck(Config.GetAlias("Trade - City") == "Trade", "the alias reads back")
+    ck(Config.GetAlias("trade - city") == "Trade", "lookup is CASE-FOLDED")
+    ck(Config.GetAlias("TRADE - CITY") == "Trade", "…in both directions")
+    ck(c.aliases["trade - city"] == "Trade", "the stored key is the folded name")
+    ck(Config.SetAlias("  Trade - City  ", "  Trade  ") == false,
+        "a whitespace-only difference is the SAME write (no-op, no bump)")
+    local revBefore = Config.Rev()
+    ck(Config.SetAlias("Trade - City", "Trade") == false, "an unchanged write is a no-op")
+    ck(Config.Rev() == revBefore, "…and never bumps rev (no sync storm)")
+    ck(Config.SetAlias("Trade - City", "Commerce") == true, "a real change writes")
+    ck(Config.Rev() == revBefore + 1, "…and bumps rev exactly once")
+    ck(Config.SetAlias("Trade - City", "") == true, "an EMPTY alias is the remove verb")
+    ck(Config.GetAlias("Trade - City") == nil, "…and the channel renders native again")
+    ck(c.aliases["trade - city"] == nil, "…with the key gone from the store")
+    ck(Config.SetAlias("", "x") == false and Config.SetAlias(nil, "x") == false,
+        "a nameless channel is not an alias (Class 5: empty is not a name)")
+
+    -- ── The pure display parse ───────────────────────────────────────────────
+    local n, nm = Config.ParseChannelDisplay("[2. Trade - City]")
+    ck(n == "2" and nm == "Trade - City", "parse: the numbered client shape splits")
+    n, nm = Config.ParseChannelDisplay("[Guild]")
+    ck(n == nil and nm == "Guild", "parse: an unnumbered channel header has no number")
+    n, nm = Config.ParseChannelDisplay("[10. World]")
+    ck(n == "10" and nm == "World", "parse: two-digit numbers split too")
+    ck(select(2, Config.ParseChannelDisplay("2. Trade")) == nil,
+        "parse: an UNBRACKETED string is not the shape (never a guess)")
+    ck(select(2, Config.ParseChannelDisplay("[]")) == nil, "parse: an empty bracket answers nothing")
+    ck(select(2, Config.ParseChannelDisplay(nil)) == nil, "parse: a non-string answers nothing")
+
+    -- ── AliasLabel: the single seam, both number postures ────────────────────
+    Config.SetAlias("Trade - City", "Trade")
+    ck(Config.AliasKeepNumber() == false, "the shipped default DROPS the number (the clean alias)")
+    ck(Config.AliasLabel("2", "Trade - City") == "Trade", "label: default is the bare alias")
+    ck(Config.AliasLabel(nil, "Trade - City") == "Trade", "label: an unknown number changes nothing")
+    ck(Config.SetAliasKeepNumber(true) == true, "the keep-number option writes")
+    ck(Config.AliasLabel("2", "Trade - City") == "2. Trade", "label: keep-number restores the prefix")
+    ck(Config.AliasLabel(nil, "Trade - City") == "Trade",
+        "label: keep-number with NO number is still the bare alias (never '. Trade')")
+    ck(Config.SetAliasKeepNumber(true) == false, "an unchanged option write is a no-op")
+    Config.SetAliasKeepNumber(false)
+    ck(Config.AliasLabel(2, "General") == nil,
+        "label: an UNALIASED channel answers nothing (the render-native instruction)")
+
+    -- ── Deterministic listing ────────────────────────────────────────────────
+    Config.SetAlias("World", "W")
+    Config.SetAlias("General", "Gen")
+    local list = Config.AliasList()
+    ck(#list == 3, "the listing holds every alias (got " .. #list .. ")")
+    ck(list[1].key == "general" and list[2].key == "trade - city" and list[3].key == "world",
+        "the listing is SORTED by key (Class 8)")
+
+    -- ── THE WIRE LEG: aliases ride the payload and the candidate ─────────────
+    local snap = Config.Snapshot()
+    ck(type(snap) == "table" and type(snap.cfg.aliases) == "table",
+        "the wire payload carries the alias table")
+    ck(snap.cfg.aliases["trade - city"] == "Trade", "…with the aliases in it")
+    ck(snap.cfg.aliasKeepNumber == false, "…and the number posture beside them")
+    snap.cfg.aliases["trade - city"] = "mutated"
+    ck(Config.GetAlias("Trade - City") == "Trade", "the payload is a COPY, not a reference")
+    local cands = Config.Candidates()
+    local mineHasAliases = false
+    for _, cand in ipairs(cands) do
+        if type(cand.cfg) == "table" and type(cand.cfg.aliases) == "table"
+            and cand.cfg.aliases["world"] == "W" then mineHasAliases = true end
+    end
+    ck(mineHasAliases, "the LOCAL candidate carries aliases (so LWW can resolve them)")
+
+    -- A peer's winning copy is what the read seam answers, WITHOUT a local
+    -- write — the same receive-never-adopts rule every other section has.
+    local Nx = ns.Nexus
+    local savedRemote = Nx and Nx.RemoteCandidates
+    if Nx then
+        Nx.RemoteCandidates = function()
+            return { { at = Config.Now() + 500, rev = 0, owner = "peer",
+                       cfg = { aliases = { ["world"] = "PEER-W" }, aliasKeepNumber = true } } }
+        end
+        ck(Config.GetAlias("World") == "PEER-W",
+            "a peer's newer alias is the EFFECTIVE one (read-time resolution)")
+        ck(Config.AliasKeepNumber() == true, "…including its number posture")
+        ck(c.aliases["world"] == "W", "…and the local store was NOT written (receive never adopts)")
+        Nx.RemoteCandidates = savedRemote
+    end
+
+    c.aliases, c.aliasKeepNumber = savedAliases, savedKeep
+    c.rev, c.at = savedRev, savedAt
+end
+
 ns:RegisterSelfTest("config", function(verbose)
     local suites = {
         { name = "deterministic serialization", fn = testSerialization },
         { name = "capture + first-run adopt",   fn = testCaptureAndAdopt },
         { name = "LWW + wire payload",          fn = testLWW },
         { name = "scale-normalized positions",  fn = testNormalizedPositions },
+        { name = "channel aliases",             fn = testAliases },
     }
     local allPass = true
     for _, suite in ipairs(suites) do

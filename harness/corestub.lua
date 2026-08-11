@@ -137,4 +137,131 @@ function UI.MakeButton(parent, opts)
     return btn
 end
 
+----------------------------------------------------------------------
+-- w2/options: THE HUB + THE FLOW API (additive).
+--
+-- Daseeki-Core's hub is where every suite addon's settings page lives
+-- (DaseekiSuite:RegisterAddon{ flow = true }, sections with build(flow) /
+-- refresh, and Core:ShowAddon driving them inside its Begin/EndShow latch).
+-- The pane cannot be BUILT headless with real frames, so this stub models the
+-- two things a test actually needs to be honest about:
+--   1. REGISTRATION — the def an addon hands the hub, recorded verbatim, so a
+--      suite can assert the id/title/flow/sections contract;
+--   2. THE FLOW API — a recording implementation of the widget factories, so
+--      build(flow) runs the REAL page builder and every control's get/set
+--      closure is captured and drivable. A control that reads or writes the
+--      wrong config field then fails a test instead of failing a player.
+-- Deliberately NOT modeled: layout, scroll, geometry. Those are Core's, they
+-- are pinned in Core's own repo, and pretending to have them here would only
+-- invite assertions that prove nothing.
+----------------------------------------------------------------------
+
+local Suite = { sections = {}, regOrder = {} }
+_G.DaseekiSuite = Suite
+
+function Suite:RegisterAddon(def)
+    if type(def) ~= "table" or not def.id then return nil end
+    if not self.sections[def.id] then self.regOrder[#self.regOrder + 1] = def.id end
+    self.sections[def.id] = def
+    return def
+end
+function Suite:RegisterCorePage(def) return self:RegisterAddon(def) end
+function Suite:Open(id) self._opened = id end
+function Suite:ShowAddon(id, sectionId) self._shown = { id, sectionId } end
+
+function UI.__RegisteredAddon(id) return Suite.sections[id] end
+function UI.__ClearRegistry() Suite.sections, Suite.regOrder = {}, {} end
+
+-- A recording widget. `_opts` is the exact table the page builder handed the
+-- factory, so a test drives the control by calling _opts.set / _opts.get.
+local function recWidget(kind, opts, pane, section)
+    local w = { _kind = kind, _opts = opts or {}, _section = section }
+    w.Refresh = function()
+        local get = w._opts.get
+        if type(get) == "function" then
+            local ok, v = pcall(get)
+            w._value = ok and v or nil
+        end
+        w._refreshes = (w._refreshes or 0) + 1
+        return w._value
+    end
+    w.Refresh()
+    pane.controls[#pane.controls + 1] = w
+    return w
+end
+
+local function newRecFlow(pane, section)
+    local flow = { _section = section }
+    local function adder(kind)
+        return function(self, opts) return recWidget(kind, opts, pane, self._section) end
+    end
+    flow.Checkbox        = adder("checkbox")
+    flow.Slider          = adder("slider")
+    flow.Dropdown        = adder("dropdown")
+    flow.EditBox         = adder("editbox")
+    flow.Button          = adder("button")
+    flow.SegmentedChoice = adder("segmented")
+    flow.List            = adder("list")
+    function flow:Label(text)
+        local w = recWidget("label", { text = text }, pane, self._section)
+        w._text = text
+        return w
+    end
+    function flow:Hint(text)
+        local w = recWidget("hint", { text = text }, pane, self._section)
+        w._text = text
+        w._label = { SetText = function(_, t) w._text = t end,
+                     GetText = function() return w._text end }
+        pane.hints[#pane.hints + 1] = w
+        return w
+    end
+    function flow:AddSeparator()
+        return recWidget("separator", {}, pane, self._section)
+    end
+    function flow:AddRow(opts)
+        local row = newRecFlow(pane, self._section)
+        row._isRow = true
+        pane.rows[#pane.rows + 1] = row
+        return row
+    end
+    function flow:AddSection(title)
+        pane.sections[#pane.sections + 1] = title
+        return newRecFlow(pane, title)
+    end
+    return flow
+end
+
+-- Build (and refresh) one registered section, returning the recording pane.
+-- Mirrors Core's own order: build once, then refresh — the sequence hub.lua
+-- runs inside its show latch.
+function UI.__BuildPane(addonId, sectionId)
+    local def = Suite.sections[addonId]
+    if not def then return nil end
+    local section
+    for _, s in ipairs(def.sections or {}) do
+        if not sectionId or s.id == sectionId then section = s break end
+    end
+    if not section then return nil end
+    local pane = { controls = {}, sections = {}, rows = {}, hints = {},
+                   addonId = addonId, sectionId = section.id }
+    local flow = newRecFlow(pane, nil)
+    if section.build then section.build(flow) end
+    if section.refresh then section.refresh(pane) end
+    section._pane = pane
+    return pane
+end
+
+-- Re-run a built section's refresh (the beat Core runs on every re-show).
+function UI.__RefreshPane(addonId, sectionId)
+    local def = Suite.sections[addonId]
+    if not def then return nil end
+    for _, s in ipairs(def.sections or {}) do
+        if (not sectionId or s.id == sectionId) and s.refresh then
+            s.refresh(s._pane)
+            return s._pane
+        end
+    end
+    return nil
+end
+
 return UI

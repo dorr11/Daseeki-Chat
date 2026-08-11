@@ -226,7 +226,44 @@ end
 function WIDGET_API.SetFrameLevel(self, l) self._frameLevel = l end
 function WIDGET_API.GetFrameLevel(self) return self._frameLevel or 1 end
 function WIDGET_API.SetFrameStrata(self, s) self._strata = s end
-function WIDGET_API.EnableMouse(self, on) self._mouse = on end
+function WIDGET_API.EnableMouse(self, on) record("EnableMouse") self._mouse = on end
+-- w2/options sim extension (additive): the client's own child walk. Answers
+-- FRAMES only — textures and font strings are regions, not children, and carry
+-- no hitbox of their own, which is precisely the distinction a "remove the
+-- hitboxes" feature has to get right.
+local FRAME_KINDS = {
+    Frame = true, Button = true, EditBox = true, CheckButton = true,
+    Slider = true, ScrollFrame = true, ScrollingMessageFrame = true,
+    StatusBar = true, GameTooltip = true,
+}
+function WIDGET_API.GetChildren(self)
+    record("GetChildren")
+    local out = {}
+    for _, kid in ipairs(self._children or {}) do
+        if FRAME_KINDS[kid._kind] then out[#out + 1] = kid end
+    end
+    return unpack(out)
+end
+-- w2/options sim extension (additive): the client's blanket unregister. The
+-- sim tracks which events a frame holds so a test can pin "it held some, and
+-- afterwards it holds none" — the client itself offers no such listing, which
+-- is the whole reason the restore path has to be honest about /reload.
+function WIDGET_API.UnregisterAllEvents(self)
+    record("frame:UnregisterAllEvents")
+    for event, list in pairs(Sim._eventTargets) do
+        for i = #list, 1, -1 do
+            if list[i] == self then table.remove(list, i) end
+        end
+        if #list == 0 then Sim._eventTargets[event] = nil end
+    end
+    self._events = nil
+end
+function WIDGET_API.IsEventRegistered(self, event)
+    local list = Sim._eventTargets[event]
+    if not list then return false end
+    for i = 1, #list do if list[i] == self then return true end end
+    return false
+end
 function WIDGET_API.CreateTexture(self, name, layer)
     return newWidget("Texture", name, self)
 end
@@ -355,6 +392,35 @@ function Sim.ColumnFootprint(frame)
     local w = bf._w or 0
     if frame._buttonSide == "right" then return 0, w end
     return w, 0
+end
+
+-- w2/options sim extension (additive): POINTER HIT TESTING, the one fact a
+-- "remove the hitboxes" feature stands or falls on. A widget is a hit only
+-- when it is SHOWN, MOUSE-ENABLED and its rect contains the point; the first
+-- candidate that qualifies wins (callers pass their candidates topmost-first,
+-- which is the client's own front-to-back order). A widget that fails any of
+-- the three is not a hit and whatever is behind it is — which is exactly the
+-- question "is the invisible column still eating my clicks?" asks.
+function Sim.HitTest(x, y, candidates)
+    for _, w in ipairs(candidates or {}) do
+        if type(w) == "table" and w._shown and w._mouse ~= false then
+            local l, b = w._left, w._bottom
+            if l and b then
+                local r, t = l + (w._w or 0), b + (w._h or 0)
+                if x >= l and x <= r and y >= b and y <= t then return w end
+            end
+        end
+    end
+    return nil
+end
+
+-- The column's rect right now, in the window's own units (nil when it has no
+-- column or the geometry is unreadable).
+function Sim.ColumnRect(frame)
+    if type(frame) ~= "table" then return nil end
+    local bf = frame.buttonFrame
+    if type(bf) ~= "table" or bf._left == nil or bf._bottom == nil then return nil end
+    return bf._left, bf._bottom, bf._w or 0, bf._h or 0
 end
 
 function WIDGET_API.SetScale(self, s) self._scale = tonumber(s) or 1 end
@@ -634,8 +700,16 @@ local function makeChatFrame(id)
     bf._shown = true
     f.buttonFrame = bf
     f._buttonSide = "left"
-    for _, suffix in ipairs({ "UpButton", "DownButton", "BottomButton" }) do
-        newWidget("Button", name .. "ButtonFrame" .. suffix, bf)
+    -- The column's own buttons carry REAL rects inside it (stacked from the
+    -- column's top), so a pointer test can ask about a BUTTON rather than only
+    -- about the strip it sits in — the hitbox question is asked of the thing
+    -- that actually holds the hitbox.
+    for i, suffix in ipairs({ "UpButton", "DownButton", "BottomButton" }) do
+        local b = newWidget("Button", name .. "ButtonFrame" .. suffix, bf)
+        b._w, b._h = bf._w, 20
+        b._left = bf._left
+        b._bottom = bf._bottom + bf._h - i * 20
+        b._mouse = true
     end
     -- Edit box + its stock art regions, parked below the frame like the client.
     local eb = newWidget("EditBox", name .. "EditBox", f)
@@ -863,6 +937,16 @@ _G.FCF_SetButtonSide = function(frame, side, forceUpdate)
         bf._left = (frame._buttonSide == "right")
             and ((frame._left or 0) + (frame._w or 0))
             or  ((frame._left or 0) - (bf._w or 0))
+        -- The column's buttons travel with it (they are anchored to it in the
+        -- client; the sim keeps their rects coherent so a pointer test is honest).
+        local i = 0
+        for _, kid in ipairs(bf._children or {}) do
+            if kid._kind == "Button" and kid._w then
+                i = i + 1
+                kid._left = bf._left
+                kid._bottom = bf._bottom + (bf._h or 0) - i * (kid._h or 20)
+            end
+        end
         bf:Show()                       -- THE RE-SHOW
     end
     return frame._buttonSide
