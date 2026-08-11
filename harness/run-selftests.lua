@@ -1,0 +1,661 @@
+-- =====================================================================
+-- Daseeki-Chat headless self-test harness  (REAL Lua 5.1)
+--
+-- Loads the whole shipping load list under the UNKIND chat simulator
+-- (harness/chatsim.lua) and the Daseeki-Core sentinel stub
+-- (harness/corestub.lua), runs the release gates (toc parse / toc identity /
+-- inertness / chat-sim rig), then every ns:RegisterSelfTest suite.
+--
+-- Usage:  lua5.1 run-selftests.lua [CHAT_DIR]
+--   CHAT_DIR defaults to the repo root one level up from this file.
+--   Exit code 0 = ALL PASS.
+-- =====================================================================
+
+local HARNESS_DIR = (arg[0]:match("^(.*)[\\/][^\\/]+$")) or "."
+local function slash(p) return (p:gsub("\\", "/")) end
+HARNESS_DIR = slash(HARNESS_DIR)
+local CHAT_DIR = slash(arg[1] or (HARNESS_DIR .. "/.."))
+
+local function P(rel) return CHAT_DIR .. "/" .. rel end
+local function H(rel) return HARNESS_DIR .. "/" .. rel end
+
+local ADDON = "Daseeki-Chat"
+
+----------------------------------------------------------------------
+-- Captured print log
+----------------------------------------------------------------------
+local realprint = print
+local LOG = {}
+local function logline(s) LOG[#LOG + 1] = s end
+local function flushlog() for i = 1, #LOG do realprint(LOG[i]) end LOG = {} end
+
+local function readFile(path)
+    local fh = io.open(path, "r")
+    if not fh then return nil end
+    local s = fh:read("*a")
+    fh:close()
+    return s
+end
+
+----------------------------------------------------------------------
+-- 0) TOC PARSE GATE (the Bags/Nexus silent-green lesson: loadfile-assert
+--    EVERY .lua the .toc ships, before anything runs — a file that does not
+--    compile never registers its suites, and the runner only iterates suites
+--    that DID register).
+----------------------------------------------------------------------
+local TOC_FILE = "Daseeki-Chat.toc"
+
+local function readTocLuaFiles(tocPath)
+    local fh, oerr = io.open(tocPath, "r")
+    if not fh then return nil, "cannot open " .. tocPath .. ": " .. tostring(oerr) end
+    local files = {}
+    for line in fh:lines() do
+        line = line:gsub("^\239\187\191", "")          -- strip UTF-8 BOM
+        line = line:gsub("^%s+", ""):gsub("%s+$", "")
+        if line ~= "" and line:sub(1, 1) ~= "#" and line:lower():sub(-4) == ".lua" then
+            files[#files + 1] = (line:gsub("\\", "/"))
+        end
+    end
+    fh:close()
+    return files
+end
+
+realprint("=== toc parse gate :: loadfile() every .lua in " .. TOC_FILE .. " ===")
+local TOC_LUA, tocErr = readTocLuaFiles(P(TOC_FILE))
+if not TOC_LUA or #TOC_LUA == 0 then
+    realprint("  [FAIL] " .. (tocErr or (TOC_FILE .. " listed no .lua files")))
+    realprint("=== toc parse gate: FAIL ===")
+    os.exit(1)
+end
+local parseFails = 0
+for _, rel in ipairs(TOC_LUA) do
+    local pfn, perr = loadfile(P(rel))
+    if not pfn then
+        parseFails = parseFails + 1
+        realprint("  [PARSE FAIL] " .. rel)
+        realprint("        " .. tostring(perr))
+    end
+end
+if parseFails > 0 then
+    realprint(string.format("=== toc parse gate: FAIL (%d of %d file(s) do not compile) ===",
+        parseFails, #TOC_LUA))
+    os.exit(1)
+end
+realprint(string.format("  [ok] %d .lua file(s) in %s compile", #TOC_LUA, TOC_FILE))
+realprint("=== toc parse gate: PASS ===")
+realprint("")
+
+----------------------------------------------------------------------
+-- 0b) TOC IDENTITY GATE
+--   1. SavedVariables must declare DaseekiChatDB, SavedVariablesPerCharacter
+--      must declare DaseekiChatCharDB (an undeclared global is ERASED at the
+--      next logout — Bags AT-RISK-1).
+--   2. Dependencies must carry Daseeki-Core (hard, honest — N1); OptionalDeps
+--      must carry Daseeki-Nexus and must NOT also list Core.
+--   3. ## Version must match core.lua's ns.VERSION (gate C.12 shape).
+--   4. .pkgmeta must exist, relate daseeki-core, and ignore harness/dev.
+--   5. THE FILE MAP IS LAW: the .toc's .lua list must be exactly the design
+--      doc's file map, in order — three Wave-2 agents fill these files in
+--      place and never touch the .toc.
+----------------------------------------------------------------------
+local EXPECTED_FILE_MAP = {
+    "core.lua", "config.lua", "reconcile.lua", "channels.lua", "decor.lua",
+    "stamps.lua", "names.lua", "urls.lua", "history.lua", "badges.lua",
+    "skin.lua", "nexus.lua",
+}
+
+local function tocDirective(src, key)
+    for line in src:gmatch("[^\r\n]+") do
+        local v = line:match("^%s*##%s*" .. key .. "%s*:%s*(.-)%s*$")
+        if v then return v end
+    end
+    return nil
+end
+
+realprint("=== toc identity gate :: SavedVariables + deps + version + file map ===")
+local idFails = 0
+local tocSrc = readFile(P(TOC_FILE))
+if not tocSrc then
+    idFails = idFails + 1
+    realprint("  [FAIL] cannot read " .. TOC_FILE)
+else
+    local sv = tocDirective(tocSrc, "SavedVariables") or ""
+    if not sv:find("DaseekiChatDB", 1, true) then
+        idFails = idFails + 1
+        realprint("  [FAIL] SavedVariables does not declare DaseekiChatDB (it would be erased at logout)")
+    end
+    local svpc = tocDirective(tocSrc, "SavedVariablesPerCharacter") or ""
+    if not svpc:find("DaseekiChatCharDB", 1, true) then
+        idFails = idFails + 1
+        realprint("  [FAIL] SavedVariablesPerCharacter does not declare DaseekiChatCharDB")
+    end
+    if idFails == 0 then realprint("  [ok] both SavedVariables globals declared") end
+
+    local hard, optional = {}, {}
+    for name in (tocDirective(tocSrc, "Dependencies") or ""):gmatch("[^,%s]+") do hard[name] = true end
+    for name in (tocDirective(tocSrc, "RequiredDeps") or ""):gmatch("[^,%s]+") do hard[name] = true end
+    for name in (tocDirective(tocSrc, "OptionalDeps") or ""):gmatch("[^,%s]+") do optional[name] = true end
+    if not hard["Daseeki-Core"] then
+        idFails = idFails + 1
+        realprint("  [FAIL] Daseeki-Core is not a hard ## Dependencies entry (N1: there is no Core-less rendering path)")
+    end
+    if optional["Daseeki-Core"] then
+        idFails = idFails + 1
+        realprint("  [FAIL] Daseeki-Core listed on BOTH Dependencies and OptionalDeps")
+    end
+    if not optional["Daseeki-Nexus"] then
+        idFails = idFails + 1
+        realprint("  [FAIL] Daseeki-Nexus missing from OptionalDeps (load-order statement for the chatcfg bridge)")
+    end
+    if hard["Daseeki-Nexus"] then
+        idFails = idFails + 1
+        realprint("  [FAIL] Daseeki-Nexus must NOT be a hard dependency (Chat runs unchanged without it)")
+    end
+    if hard["Daseeki-Core"] and optional["Daseeki-Nexus"] and not optional["Daseeki-Core"] and not hard["Daseeki-Nexus"] then
+        realprint("  [ok] Dependencies: Daseeki-Core hard, Daseeki-Nexus optional")
+    end
+
+    local tocVersion = tocDirective(tocSrc, "Version")
+    local coreSrc = readFile(P("core.lua"))
+    local coreVersion = coreSrc and coreSrc:match('ns%.VERSION%s*=%s*"([^"]+)"')
+    if not tocVersion then
+        idFails = idFails + 1
+        realprint("  [FAIL] " .. TOC_FILE .. " has no ## Version line")
+    elseif not coreVersion then
+        idFails = idFails + 1
+        realprint("  [FAIL] cannot read ns.VERSION from core.lua")
+    elseif tocVersion ~= coreVersion then
+        idFails = idFails + 1
+        realprint(("  [FAIL] ## Version %s does not match core.lua ns.VERSION %s")
+            :format(tocVersion, coreVersion))
+    else
+        realprint("  [ok] ## Version " .. tocVersion .. " consistent with core.lua")
+    end
+
+    -- The file map is law.
+    local mapOk = #TOC_LUA == #EXPECTED_FILE_MAP
+    if mapOk then
+        for i = 1, #EXPECTED_FILE_MAP do
+            if TOC_LUA[i] ~= EXPECTED_FILE_MAP[i] then mapOk = false break end
+        end
+    end
+    if not mapOk then
+        idFails = idFails + 1
+        realprint("  [FAIL] the .toc .lua list is not the design doc's file map (exact files, exact order):")
+        realprint("         expected: " .. table.concat(EXPECTED_FILE_MAP, ", "))
+        realprint("         got:      " .. table.concat(TOC_LUA, ", "))
+    else
+        realprint("  [ok] file map matches the design doc (" .. #EXPECTED_FILE_MAP .. " files, in order)")
+    end
+end
+
+do
+    local pkg = readFile(P(".pkgmeta"))
+    if not pkg then
+        idFails = idFails + 1
+        realprint("  [FAIL] .pkgmeta is missing")
+    else
+        if not pkg:lower():find("daseeki%-core") then
+            idFails = idFails + 1
+            realprint("  [FAIL] .pkgmeta has no daseeki-core required-dependency relation")
+        end
+        local ignoresHarness = false
+        for line in pkg:gmatch("[^\r\n]+") do
+            if line:match("^%s*%-%s*harness%s*$") then ignoresHarness = true end
+        end
+        if not ignoresHarness then
+            idFails = idFails + 1
+            realprint("  [FAIL] .pkgmeta does not ignore harness/ (dev tooling would ship)")
+        end
+        if pkg:lower():find("daseeki%-core") and ignoresHarness then
+            realprint("  [ok] .pkgmeta relates daseeki-core and ignores harness/")
+        end
+    end
+end
+
+if idFails > 0 then
+    realprint(string.format("=== toc identity gate: FAIL (%d problem(s)) ===", idFails))
+    os.exit(1)
+end
+realprint("=== toc identity gate: PASS ===")
+realprint("")
+
+----------------------------------------------------------------------
+-- WoW global aliases + error routing recorder
+----------------------------------------------------------------------
+_G.strmatch = string.match
+_G.strfind  = string.find
+_G.strsub   = string.sub
+_G.format   = string.format
+_G.wipe     = function(t) for k in pairs(t) do t[k] = nil end return t end
+
+_G.geterrorhandler = function()
+    return function(err) realprint("  !! routed error: " .. tostring(err)) end
+end
+
+----------------------------------------------------------------------
+-- QUEUE-AND-PUMP TIMER (simulator doctrine: "scheduled" and "ran" are
+-- different words; a no-op or inline C_Timer erases the gap a whole defect
+-- class lives in). Deadline order, schedule-order tiebreak (Class 8), nested
+-- callbacks picked up in the same sweep, flush() as the between-suites broom.
+----------------------------------------------------------------------
+local HTIMER = { clock = 0, queue = {}, seq = 0, ran = 0, peak = 0 }
+
+function HTIMER.After(delay, fn)
+    if type(fn) ~= "function" then return end
+    HTIMER.seq = HTIMER.seq + 1
+    HTIMER.queue[#HTIMER.queue + 1] =
+        { at = HTIMER.clock + (tonumber(delay) or 0), fn = fn, seq = HTIMER.seq }
+    if #HTIMER.queue > HTIMER.peak then HTIMER.peak = #HTIMER.queue end
+end
+function HTIMER.pending() return #HTIMER.queue end
+
+local function drain(target, all)
+    while true do
+        local best, bi
+        for i = 1, #HTIMER.queue do
+            local t = HTIMER.queue[i]
+            if (all or t.at <= target) and
+               (not best or t.at < best.at or (t.at == best.at and t.seq < best.seq)) then
+                best, bi = t, i
+            end
+        end
+        if not best then break end
+        table.remove(HTIMER.queue, bi)
+        if best.at > HTIMER.clock then HTIMER.clock = best.at end
+        HTIMER.ran = HTIMER.ran + 1
+        local ok, err = pcall(best.fn)
+        if not ok then realprint("  !! harness timer callback error: " .. tostring(err)) end
+    end
+    if target and target > HTIMER.clock then HTIMER.clock = target end
+end
+
+function HTIMER.advance(dt) drain(HTIMER.clock + (tonumber(dt) or 0), false) end
+function HTIMER.flush()     drain(nil, true) end
+function HTIMER.reset()     HTIMER.queue, HTIMER.seq = {}, 0 end
+
+_G.C_Timer = { After = function(delay, fn) HTIMER.After(delay, fn) end }
+_G.__DaseekiChatHarnessTimer = HTIMER
+
+----------------------------------------------------------------------
+-- Install the unkind chat simulator + the Core sentinel stub.
+----------------------------------------------------------------------
+local Sim = assert(loadfile(H("chatsim.lua")), "chatsim.lua failed to compile")()
+assert(loadfile(H("corestub.lua")), "corestub.lua failed to compile")()
+
+----------------------------------------------------------------------
+-- SavedVariables preset: skin starts DISABLED so the inertness gate below can
+-- pin "disabled module = zero hooks" against a full login. The skin suite
+-- enables it itself (phase 1) and leaves it enabled.
+----------------------------------------------------------------------
+_G.DaseekiChatDB = { modules = { skin = false } }
+
+----------------------------------------------------------------------
+-- ns namespace + suite-registration sentinel (Bags precedent: intercept the
+-- RegisterSelfTest assignment via __newindex so core.lua's own registration is
+-- seen, and wrap every suite between two timer flushes for isolation).
+----------------------------------------------------------------------
+local ns = {}
+local registeredSuites = {}
+local suiteOrder       = {}
+setmetatable(ns, {
+    __newindex = function(t, k, v)
+        if k == "RegisterSelfTest" and type(v) == "function" then
+            rawset(t, k, function(self, name, fn)
+                name = tostring(name)
+                if not registeredSuites[name] then
+                    registeredSuites[name] = true
+                    suiteOrder[#suiteOrder + 1] = name
+                end
+                return v(self, name, function(...)
+                    HTIMER.flush()
+                    local r = fn(...)
+                    HTIMER.flush()
+                    return r
+                end)
+            end)
+        else
+            rawset(t, k, v)
+        end
+    end,
+})
+
+----------------------------------------------------------------------
+-- Load addon files in .toc order (the parsed list IS the load list — the file
+-- map gate above already pinned it to the design map).
+----------------------------------------------------------------------
+local loadResults = {}
+for _, rel in ipairs(TOC_LUA) do
+    local fn, err = loadfile(P(rel))
+    if not fn then
+        loadResults[#loadResults + 1] = { rel, false, "compile: " .. tostring(err) }
+    else
+        local ok, rerr = pcall(fn, ADDON, ns)
+        loadResults[#loadResults + 1] = { rel, ok, rerr }
+    end
+end
+
+-- Re-point ns.Print at the captured log (core's Print prefixes color escapes).
+function ns:Print(...)
+    local parts = {}
+    for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+    logline(table.concat(parts, "\t"))
+end
+
+realprint("=== Daseeki-Chat harness :: file load ===")
+local criticalFail = false
+for _, r in ipairs(loadResults) do
+    realprint(string.format("  [%s] %s%s", r[2] and "ok  " or "FAIL", r[1],
+        r[2] and "" or ("  -> " .. tostring(r[3]))))
+    if not r[2] then criticalFail = true end
+end
+if criticalFail then
+    realprint("!!! a file failed to load -- aborting.")
+    os.exit(2)
+end
+realprint("")
+
+----------------------------------------------------------------------
+-- Drive a full login with the skin module DISABLED.
+----------------------------------------------------------------------
+Sim.Login(ADDON)
+Sim.EnterWorld()
+HTIMER.flush()
+
+----------------------------------------------------------------------
+-- INERTNESS GATE — disabled = ZERO hooks (the pin). After a complete login
+-- with every feature module disabled, the client must have seen NOTHING from
+-- us beyond core's four lifecycle event registrations.
+----------------------------------------------------------------------
+realprint("=== inertness gate :: disabled module = zero hooks ===")
+local inertPass = true
+do
+    local function ck(c, m)
+        if not c then inertPass = false; realprint("  [FAIL] " .. m) end
+    end
+    ck(ns.Skin ~= nil, "ns.Skin exists")
+    ck(ns.Skin and ns.Skin.active == false, "skin is inactive")
+    ck(ns.Skin and ns.Skin.hooked == false, "skin installed no hooksecurefunc")
+    ck(Sim.CallCount("hooksecurefunc") == 0, "the sim counted ZERO hooksecurefunc calls")
+    ck(Sim.CallCount("SetFading") == 0, "no chat frame's fading was touched")
+    ck(ns.EventHandlerCount() == 4,
+        "only core's 4 lifecycle events are registered (got " .. ns.EventHandlerCount() .. ")")
+    ck(#ns.ModuleOrder == 1 and ns.ModuleOrder[1] == "skin",
+        "exactly one module (skin) is registered in Wave 1")
+    local styledAny = false
+    for i = 1, 10 do
+        local f = Sim.Frame(i)
+        local bg = _G["ChatFrame" .. i .. "Background"]
+        if (bg and bg._alpha == 0) then styledAny = true end
+    end
+    ck(not styledAny, "no stock chat texture was stripped while disabled")
+    if inertPass then realprint("  [ok] a disabled module is behaviorally absent") end
+end
+realprint("=== inertness gate: " .. (inertPass and "PASS" or "FAIL") .. " ===")
+realprint("")
+
+----------------------------------------------------------------------
+-- CHAT SIM GATE — the rig proving itself. A sim that is secretly kind (inline
+-- timers, synchronous joins, warm lists) would wave broken Wave-2 code
+-- through, so every unkindness is asserted here before any suite runs.
+----------------------------------------------------------------------
+realprint("=== chat sim gate :: the rig proves its own unkindness ===")
+local simPass = true
+do
+    local function ck(c, m)
+        if not c then simPass = false; realprint("  [FAIL] " .. m) end
+    end
+
+    -- 1. Timers QUEUE (never inline), fire deadline-order with schedule-order
+    --    tiebreak, nested pickups in the same sweep.
+    HTIMER.flush()
+    local order = {}
+    _G.C_Timer.After(0, function() order[#order + 1] = "a0" end)
+    ck(#order == 0, "C_Timer.After(0) queues; it must not run inline")
+    _G.C_Timer.After(0, function() order[#order + 1] = "b0" end)
+    _G.C_Timer.After(0.5, function()
+        order[#order + 1] = "c50"
+        _G.C_Timer.After(0, function() order[#order + 1] = "d-nested" end)
+    end)
+    _G.C_Timer.After(0.1, function() order[#order + 1] = "e10" end)
+    HTIMER.advance(1.0)
+    ck(table.concat(order, ",") == "a0,b0,e10,c50,d-nested",
+        "deadline order + schedule tiebreak + nested pickup (got " .. table.concat(order, ",") .. ")")
+
+    -- 2. Ring buffer: uptime stamps, newest-first GetEntryAtIndex, mutability,
+    --    the WRAPPED headIndex/maxElements shape, cap trimming.
+    local cf = Sim.Frame(4)   -- a quiet window
+    cf:AddMessage("one", 1, 1, 1)
+    HTIMER.advance(1.0)
+    cf:AddMessage("two", 1, 1, 1)
+    ck(cf:GetNumMessages() == 2, "AddMessage lands in the frame buffer")
+    ck(cf:GetMessageInfo(1) == "one", "GetMessageInfo(1) is the OLDEST line")
+    local newest = cf.historyBuffer:GetEntryAtIndex(1)
+    ck(newest and newest.message == "two", "historyBuffer:GetEntryAtIndex(1) is the NEWEST entry")
+    ck(type(newest.timestamp) == "number" and newest.timestamp < 1e6,
+        "entry timestamps are UPTIME-based (small numbers), never epoch")
+    ck(type(cf.historyBuffer.maxElements) == "table" and cf.historyBuffer.maxElements.value,
+        "maxElements is the WRAPPED { value = n } shape by default (unkind)")
+    ck(type(cf.historyBuffer.headIndex) == "table", "headIndex is wrapped too")
+    newest.message = "two (edited)"
+    ck(cf:GetMessageInfo(2) == "two (edited)", "buffer entries are MUTABLE in place")
+    local cap = cf.historyBuffer.maxElements.value
+    for i = 1, cap + 5 do cf:AddMessage("bulk " .. i, 1, 1, 1) end
+    ck(cf:GetNumMessages() == cap, "the buffer trims to maxElements (oldest evicted)")
+
+    -- 3. Era message events: full 17-arg shape, GUID in arg12, sentinel and
+    --    nil-info cases, ADDON-HANDLER-FIRST ordering, hyperlink-bearing
+    --    client lines.
+    local probe = _G.CreateFrame("Frame")
+    local got = {}
+    probe:RegisterEvent("CHAT_MSG_SAY")
+    probe:SetScript("OnEvent", function(self, event, ...)
+        got = { event = event, args = { ... },
+                bufferAtEvent = Sim.Frame(1):GetNumMessages() }
+    end)
+    local preCount = Sim.Frame(1):GetNumMessages()
+    local line = Sim.SendChat{ event = "CHAT_MSG_SAY", text = "hello world",
+                               sender = "Puu-Whitemane", guid = "Player-1-00000001" }
+    ck(got.event == "CHAT_MSG_SAY" and got.args[1] == "hello world", "event delivered with text in arg1")
+    ck(got.args[2] == "Puu-Whitemane", "sender (Name-Realm) in arg2")
+    ck(got.args[12] == "Player-1-00000001", "sender GUID rides in arg12 (the era fact)")
+    ck(got.bufferAtEvent == preCount,
+        "UNKIND ORDERING: the addon handler ran BEFORE the client stored the line")
+    ck(Sim.Frame(1):GetNumMessages() == preCount + 1, "the client routed the line afterwards")
+    ck(line:find("|Hplayer:", 1, true) ~= nil, "the client-formatted line carries a player hyperlink")
+    local locClass, token = _G.GetPlayerInfoByGUID("Player-1-00000001")
+    ck(locClass == "Warrior" and token == "WARRIOR", "GetPlayerInfoByGUID resolves a known GUID")
+    local _, zeroInfo = Sim.SendChat{ event = "CHAT_MSG_SAY", text = "who am I",
+                                      sender = "Mystery", guid = "zero" }
+    ck(zeroInfo[12] == "0000000000000000", "the all-zeros GUID sentinel is deliverable")
+    ck(_G.GetPlayerInfoByGUID("0000000000000000") == nil, "the sentinel resolves to NOTHING")
+    ck(_G.GetPlayerInfoByGUID("Player-1-99999999") == nil, "an unencountered GUID resolves to NOTHING")
+
+    -- 4. Channel-routed traffic reaches only windows whose store routes it.
+    _G.AddChatWindowChannel(1, "World")
+    local w4Before = Sim.Frame(4):GetNumMessages()
+    local chanLine = Sim.SendChat{ event = "CHAT_MSG_CHANNEL", text = Sim.MakeItemLink(),
+                                   sender = "Choco", guid = "Player-1-00000002",
+                                   channelNumber = 2, channelName = "World" }
+    ck(Sim.Frame(1):GetMessageInfo(Sim.Frame(1):GetNumMessages()):find("|Hitem:", 1, true) ~= nil,
+        "a CHANNEL line with an embedded item link landed in the routed window")
+    ck(Sim.Frame(4):GetNumMessages() == w4Before, "an unrouted window stayed silent")
+    ck(chanLine:find("|Hchannel:channel:2|h", 1, true) ~= nil, "the channel header is a real hyperlink")
+    ck(_G.ChatFrame_AddChannel == nil,
+        "ChatFrame_AddChannel is ABSENT (not in the 11509 catalog; use AddChatWindowChannel)")
+
+    -- 5. Async channels: joins complete later, throttled joins DROP, the
+    --    notice fires BEFORE the list updates, holes refill lowest-first,
+    --    the swap primitive works.
+    HTIMER.flush()
+    Sim.ResetCalls()
+    local notices = {}
+    local listAtNotice
+    probe:RegisterEvent("CHAT_MSG_CHANNEL_NOTICE")
+    probe:SetScript("OnEvent", function(self, event, ...)
+        if event == "CHAT_MSG_CHANNEL_NOTICE" then
+            local kind, _, _, _, _, _, _, num, name = ...
+            notices[#notices + 1] = { kind = kind, num = num, name = name }
+            if kind == "YOU_JOINED" then listAtNotice = { _G.GetChannelList() } end
+        end
+    end)
+    local dropsBefore = Sim.droppedJoins
+    _G.JoinChannelByName("World2")
+    _G.JoinChannelByName("TooFast")        -- <0.5s after the previous op
+    ck(Sim.droppedJoins == dropsBefore + 1, "a join issued <0.5s after another is DROPPED silently")
+    ck(#notices == 0, "nothing has completed yet (joins are server round-trips)")
+    HTIMER.advance(0.5)
+    ck(#notices == 1 and notices[1].kind == "YOU_JOINED" and notices[1].name == "World2",
+        "the join completed ~0.5s later via CHAT_MSG_CHANNEL_NOTICE")
+    local sawInNoticeList = false
+    for _, v in ipairs(listAtNotice or {}) do if v == "World2" then sawInNoticeList = true end end
+    ck(not sawInNoticeList,
+        "EVENT BEFORE STATE: GetChannelList inside the notice handler does NOT show the join yet")
+    HTIMER.advance(0.1)
+    local nowList = { _G.GetChannelList() }
+    local sawNow = false
+    for _, v in ipairs(nowList) do if v == "World2" then sawNow = true end end
+    ck(sawNow, "…and shows it one beat later")
+    ck(Sim.CallCount("JoinChannelByName") == 2, "call counting works (2 joins issued)")
+
+    -- Leave -> hole -> lowest-hole refill -> swap.
+    HTIMER.advance(0.5)
+    local generalNum = select(1, _G.GetChannelName("General"))
+    _G.LeaveChannelByName("General")
+    HTIMER.flush()
+    ck(Sim.serverChannels[generalNum] == nil,
+        "leaving left a HOLE at the old number")
+    HTIMER.advance(0.5)
+    _G.JoinChannelByName("Osiris")
+    HTIMER.flush()
+    local osirisNum = select(1, _G.GetChannelName("Osiris"))
+    ck(osirisNum == generalNum, "a new join fills the LOWEST hole (numbers get reused)")
+    local worldNum = select(1, _G.GetChannelName("World2"))
+    _G.C_ChatInfo.SwapChatChannelsByChannelIndex(osirisNum, worldNum)
+    ck(select(2, _G.GetChannelName(osirisNum)) == "World2",
+        "SwapChatChannelsByChannelIndex renumbers in place")
+
+    -- 6. Hostile CVar defaults (the two that silently bite).
+    ck(_G.GetCVar("chatStyle") == "im", "chatStyle defaults to 'im' (must be forced by code that needs classic)")
+    ck(_G.GetCVar("chatClassColorOverride") == "1",
+        "chatClassColorOverride defaults to 1 (class colors force-disabled until managed)")
+    local cvarEvents = 0
+    probe:RegisterEvent("CVAR_UPDATE")
+    local prevScript = probe:GetScript("OnEvent")
+    probe:SetScript("OnEvent", function(self, event, ...)
+        if event == "CVAR_UPDATE" then cvarEvents = cvarEvents + 1
+        elseif prevScript then prevScript(self, event, ...) end
+    end)
+    _G.SetCVar("chatStyle", "classic")
+    ck(cvarEvents == 1 and _G.GetCVar("chatStyle") == "classic", "SetCVar lands and announces via CVAR_UPDATE")
+
+    -- 7. Batch replay doubles a buffer (the double-stamp trap, ready-made).
+    local cf5 = Sim.Frame(5)
+    cf5:AddMessage("r1", 1, 1, 1); cf5:AddMessage("r2", 1, 1, 1)
+    Sim.ReplayBuffer(cf5)
+    ck(cf5:GetNumMessages() == 4, "ReplayBuffer re-adds every stored line")
+
+    -- 8. New session: uptime RESETS, server epoch does not, buffers clear.
+    local upBefore, epochBefore = _G.GetTime(), _G.GetServerTime()
+    Sim.NewSession()
+    ck(_G.GetTime() < upBefore, "NewSession resets the uptime clock (old buffer stamps go bogus)")
+    ck(_G.GetServerTime() >= epochBefore, "…while the server epoch keeps advancing")
+    ck(Sim.Frame(5):GetNumMessages() == 0, "…and frame buffers start empty")
+    local darkList = { _G.GetChannelList() }
+    ck(#darkList == 0, "…and the channel list is DARK again until the world populates")
+
+    -- Restore the world for the suites: fresh session, logged in, in world.
+    probe:UnregisterEvent("CHAT_MSG_SAY")
+    probe:UnregisterEvent("CHAT_MSG_CHANNEL_NOTICE")
+    probe:UnregisterEvent("CVAR_UPDATE")
+    Sim.EnterWorld(false, false)
+    HTIMER.flush()
+    Sim.ResetCalls()
+end
+realprint("=== chat sim gate: " .. (simPass and "PASS" or "FAIL") .. " ===")
+realprint("")
+
+----------------------------------------------------------------------
+-- Harness-registered suite: placeholders parse and register NOTHING. The
+-- three Wave-2 agents each replace their own files; until then every
+-- placeholder is an empty module table with no events, no hooks, no suites.
+----------------------------------------------------------------------
+local PLACEHOLDER_KEYS = {
+    Config = "config.lua", Reconcile = "reconcile.lua", Channels = "channels.lua",
+    Decor = "decor.lua", Stamps = "stamps.lua", Names = "names.lua",
+    Urls = "urls.lua", History = "history.lua", Badges = "badges.lua",
+    Nexus = "nexus.lua",
+}
+
+ns:RegisterSelfTest("placeholders", function(verbose)
+    local fails = {}
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    for key, file in pairs(PLACEHOLDER_KEYS) do
+        local t = ns[key]
+        ck(type(t) == "table", file .. " registered its ns." .. key .. " table")
+        if type(t) == "table" then
+            ck(next(t) == nil, file .. " is a pure placeholder (empty table, no behavior)")
+        end
+    end
+    -- No placeholder registered a lifecycle module.
+    local moduleSet = {}
+    for _, name in ipairs(ns.ModuleOrder) do moduleSet[name] = true end
+    for key in pairs(PLACEHOLDER_KEYS) do
+        ck(not moduleSet[key:lower()], key .. " did not register a lifecycle module")
+    end
+    for _, f in ipairs(fails) do ns:Print("  FAIL placeholders :: " .. f) end
+    if #fails == 0 and verbose then ns:Print("  PASS placeholders") end
+    return #fails == 0
+end)
+
+----------------------------------------------------------------------
+-- Expected-suite roster (the softer silent-green catch: a file that loads but
+-- never registers reads as ALL PASS to a runner that only iterates what
+-- registered).
+----------------------------------------------------------------------
+local EXPECTED_SUITES = { "core", "skin", "placeholders" }
+
+realprint("=== expected-suite roster (" .. #EXPECTED_SUITES .. " suites) ===")
+local rosterPass, gotCount = true, 0
+local expectedSet = {}
+for _, name in ipairs(EXPECTED_SUITES) do expectedSet[name] = true end
+for _, name in ipairs(EXPECTED_SUITES) do
+    if registeredSuites[name] then
+        gotCount = gotCount + 1
+    else
+        rosterPass = false
+        realprint("  [MISSING] suite \"" .. name .. "\" never registered")
+    end
+end
+for _, name in ipairs(suiteOrder) do
+    if not expectedSet[name] then
+        realprint("  [note] new suite \"" .. name .. "\" is not in EXPECTED_SUITES (add it to the roster)")
+    end
+end
+realprint(string.format("  %d of %d expected suite(s) registered", gotCount, #EXPECTED_SUITES))
+realprint("=== expected-suite roster: " .. (rosterPass and "PASS" or "FAIL") .. " ===")
+realprint("")
+
+----------------------------------------------------------------------
+-- Run all suites
+----------------------------------------------------------------------
+realprint("=== ns:RunRegisteredSelfTests (real Lua 5.1) ===")
+local ok, pass = pcall(function() return ns:RunRegisteredSelfTests(true) end)
+flushlog()
+if not ok then
+    realprint("HARNESS ERROR: " .. tostring(pass))
+    os.exit(3)
+end
+
+local overall = pass and rosterPass and inertPass and simPass
+realprint("")
+realprint("############################################################")
+realprint("# toc parse gate (compiles)   : PASS (else we exited 1 above)")
+realprint("# toc identity gate           : PASS (else we exited 1 above)")
+realprint("# inertness gate (disabled=0) : " .. (inertPass and "PASS" or "FAIL"))
+realprint("# chat sim gate (unkind rig)  : " .. (simPass and "PASS" or "FAIL"))
+realprint("# expected-suite roster       : " .. (rosterPass and "PASS" or "FAIL"))
+realprint("# registered self-test suites : " .. (pass and "PASS" or "FAIL"))
+realprint("# Daseeki-Chat self-tests     : " .. (overall and "ALL PASS" or "RED (see above)"))
+realprint("############################################################")
+os.exit(overall and 0 or 1)
