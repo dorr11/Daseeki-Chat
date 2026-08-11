@@ -444,6 +444,13 @@ local function testLive(fails, verbose)
     _G.FCF_SelectDockFrame(cf1)
 
     -- ── Phase 5: whisper distinction (accent ink while a whisper is unread). ─
+    -- Routing is scaffolding, not the pin: phases 5 and 7 stand on whisper/
+    -- say/guild delivery to window 1, so construct those routes explicitly
+    -- (idempotent) instead of assuming the fresh-login groups survived the
+    -- converger suites (composition honesty).
+    for _, grp in ipairs({ "WHISPER", "SAY", "GUILD" }) do
+        _G.ChatFrame_AddMessageGroup(cf1, grp)
+    end
     _G.FCF_SelectDockFrame(cf3)          -- cf1 is now docked-unselected
     Sim.SendChat{ event = "CHAT_MSG_WHISPER", text = "psst",
                   sender = "Choco", guid = "Player-1-00000002" }

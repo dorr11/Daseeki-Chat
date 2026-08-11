@@ -465,6 +465,11 @@ local function testNames(fails)
     ck(Names.CacheGet("ghost") == nil, "phase 4: a cold answer caches nothing (Class 4)")
 
     -- ── Phase 5: sighting fallback + localized-name mapping. ─────────────────
+    -- Routing is scaffolding here, not the pin: the reconciler wave's converge
+    -- legs may legitimately leave window 1's message groups tightened, so the
+    -- whisper route this phase stands on is constructed EXPLICITLY instead of
+    -- assumed from the fresh-login default (composition honesty).
+    _G.ChatFrame_AddMessageGroup(f1, "WHISPER")
     Names.NoteSighting("Choco-Whitemane", "Mage")   -- localized, cross-realm form
     ck(Names.CacheGet("choco") == "MAGE", "phase 5: localized class name mapped to its token")
     Sim.SendChat{ event = "CHAT_MSG_WHISPER", text = "psst",
@@ -473,6 +478,9 @@ local function testNames(fails)
         "phase 5: a GUID-less whisper colors from the sighting cache (fallback path)")
 
     -- ── Phase 6: channel coverage feeds the cache too. ───────────────────────
+    -- Same discipline: "World" being routed to window 1 in the fresh world was
+    -- a harness-gate artifact, never this suite's to assume — construct it.
+    _G.AddChatWindowChannel(1, "World")
     Sim.playerDB["Player-1-00000003"] = { name = "Rhee", localizedClass = "Warlock", classToken = "WARLOCK" }
     Sim.SendChat{ event = "CHAT_MSG_CHANNEL", text = "wts stuff",
         sender = "Rhee", guid = "Player-1-00000003",
