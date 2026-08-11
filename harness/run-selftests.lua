@@ -287,8 +287,13 @@ assert(loadfile(H("corestub.lua")), "corestub.lua failed to compile")()
 -- SavedVariables preset: skin starts DISABLED so the inertness gate below can
 -- pin "disabled module = zero hooks" against a full login. The skin suite
 -- enables it itself (phase 1) and leaves it enabled.
+-- Wave-2 agents append their lifecycle modules here (each marked): every
+-- feature module starts DISABLED for the gate; its own suite enables it.
 ----------------------------------------------------------------------
 _G.DaseekiChatDB = { modules = { skin = false } }
+-- w2/reconciler suites: reconcile + channels start disabled for the same gate
+_G.DaseekiChatDB.modules.reconcile = false
+_G.DaseekiChatDB.modules.channels = false
 
 ----------------------------------------------------------------------
 -- ns namespace + suite-registration sentinel (Bags precedent: intercept the
@@ -380,8 +385,20 @@ do
     ck(Sim.CallCount("SetFading") == 0, "no chat frame's fading was touched")
     ck(ns.EventHandlerCount() == 4,
         "only core's 4 lifecycle events are registered (got " .. ns.EventHandlerCount() .. ")")
-    ck(#ns.ModuleOrder == 1 and ns.ModuleOrder[1] == "skin",
-        "exactly one module (skin) is registered in Wave 1")
+    -- KNOWN_MODULES: the lifecycle-module roster. Wave-2 agents append theirs
+    -- in their marked block; every one must be DISABLED by the preset above
+    -- and behaviorally ABSENT at this gate (disabled = zero hooks).
+    local KNOWN_MODULES = { skin = true }
+    -- w2/reconciler suites
+    KNOWN_MODULES.reconcile = true
+    KNOWN_MODULES.channels = true
+    for _, name in ipairs(ns.ModuleOrder) do
+        ck(KNOWN_MODULES[name],
+            "registered module '" .. name .. "' is in the KNOWN_MODULES roster")
+        local m = ns.Modules[name]
+        ck(m and not m.__active,
+            "module '" .. name .. "' is inert at the gate (disabled login)")
+    end
     local styledAny = false
     for i = 1, 10 do
         local f = Sim.Frame(i)
@@ -581,10 +598,10 @@ realprint("")
 -- placeholder is an empty module table with no events, no hooks, no suites.
 ----------------------------------------------------------------------
 local PLACEHOLDER_KEYS = {
-    Config = "config.lua", Reconcile = "reconcile.lua", Channels = "channels.lua",
+    -- w2/reconciler suites: Config/Reconcile/Channels/Nexus removed — those
+    -- four files are REAL now (their own suites own their behavior pins).
     Decor = "decor.lua", Stamps = "stamps.lua", Names = "names.lua",
     Urls = "urls.lua", History = "history.lua", Badges = "badges.lua",
-    Nexus = "nexus.lua",
 }
 
 ns:RegisterSelfTest("placeholders", function(verbose)
@@ -613,7 +630,10 @@ end)
 -- never registers reads as ALL PASS to a runner that only iterates what
 -- registered).
 ----------------------------------------------------------------------
-local EXPECTED_SUITES = { "core", "skin", "placeholders" }
+local EXPECTED_SUITES = { "core", "skin", "placeholders",
+    -- w2/reconciler suites
+    "config", "reconcile", "channels", "nexus",
+}
 
 realprint("=== expected-suite roster (" .. #EXPECTED_SUITES .. " suites) ===")
 local rosterPass, gotCount = true, 0

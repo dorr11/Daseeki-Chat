@@ -1,6 +1,759 @@
--- Daseeki Chat — reconcile.lua
--- Wave 2: reconciler/sync agent. The login/entering-world reconciler with the
--- verify-and-retry ladder and persisted trace ring. Placeholder: registers nothing.
+-- Daseeki Chat — reconcile.lua  (Wave 2, reconciler/sync agent — REAL)
+--
+-- THE FLAGSHIP: the login/zone-in reconciler. The design doc's six reconciler
+-- rules are the spec of this file:
+--
+--   1. Config is authoritative; the client's per-character chat state is a
+--      projection (config.lua owns the model).
+--   2. At login/entering world the reconciler diffs client vs config and
+--      converges windows, tabs, routing, fonts, position, channels. The gate
+--      is EVENT-DRIVEN: the ENTERING_WORLD bus beat plus channels.lua's
+--      CHANNEL_LIST_WARM signal — never a lone timer guess (Class 2), and
+--      never a conclusion from the dark channel list (Class 6).
+--   3. CAPTURE-BACK: player edits observed on the same client surfaces
+--      (hooks on the FCF-family operations + UPDATE_CHAT_COLOR) are diffed
+--      into the config, rev-bumped, synced. ECHO DISCIPLINE: every write the
+--      reconciler makes is wrapped in SelfWrite, so capture-back can never
+--      capture our own actions — proven by call counts in the suite (the
+--      echo-storm red control).
+--   4. Convergence is VERIFY-AND-RETRY on a finite ladder, with a persisted,
+--      bounded, build-stamped TRACE RING in the per-character store: every
+--      reconcile records what changed, what refused, and why.
+--      /dchat debug reconcile prints it.
+--   5. Brand-new character with a config anywhere: the full layout
+--      materializes on first login. No config anywhere: ADOPT the current
+--      client state as the initial config (never impose defaults).
+--   6. Channel-join failures refuse onto the ladder with a trace record;
+--      colors re-impose by name on every join/renumber (channels.lua).
+--
+-- Window writes go through the client's WRITABLE PER-CHARACTER STORE
+-- (SetChatWindow* + FloatingChatFrame_Update(id) + FCF_DockUpdate — the
+-- write-then-poke reality: store writes do NOT move frames until poked).
+-- Channel routing uses AddChatWindowChannel(id, name):
+-- **ChatFrame_AddChannel does NOT exist on 11509** — both surfaces are
+-- runtime-detected defensively.
+--
+-- INERTNESS: subscriptions install in OnEnable and are given back in
+-- OnDisable. hooksecurefunc has no un-hook, so the capture hooks install once
+-- on the FIRST enable and every body gates on Reconcile.active.
 
 local ADDON, ns = ...
-ns.Reconcile = ns.Reconcile or {}
+
+local Reconcile = {
+    active     = false,
+    hooked     = false,
+    stats      = { runs = 0, retries = 0, captures = 0 },
+    _selfDepth = 0,
+}
+ns.Reconcile = Reconcile
+
+----------------------------------------------------------------------
+-- Constants.
+----------------------------------------------------------------------
+
+local LADDER           = { 1.0, 2.0, 4.0, 8.0 }  -- retry delays after a failed verify
+local VERIFY_WAIT      = 0.7                     -- store beats settle before the verify read
+local CAPTURE_DEBOUNCE = 0.25                    -- player-edit capture coalescing
+local TRACE_MAX        = 40                      -- persisted trace ring bound
+
+Reconcile.LADDER = LADDER
+Reconcile.TRACE_MAX = TRACE_MAX
+
+local function after(delay, fn)
+    local T = _G.C_Timer
+    if T and type(T.After) == "function" then
+        T.After(delay, fn)
+    elseif ns.RouteError then
+        ns.RouteError("reconcile: C_Timer absent; step dropped")
+    end
+end
+
+local function numWindows() return _G.NUM_CHAT_WINDOWS or 10 end
+
+----------------------------------------------------------------------
+-- ECHO DISCIPLINE (rule 3). Every client write the reconciler (or
+-- channels.lua) performs runs inside SelfWrite; the capture hooks and the
+-- UPDATE_CHAT_COLOR handler skip anything observed while the depth is > 0.
+-- The sim's hooksecurefunc (like the client's) runs post-hooks synchronously
+-- inside the call, so the depth is always visible to them.
+----------------------------------------------------------------------
+
+function Reconcile.SelfWrite(fn, ...)
+    Reconcile._selfDepth = Reconcile._selfDepth + 1
+    local ok, err = pcall(fn, ...)
+    Reconcile._selfDepth = Reconcile._selfDepth - 1
+    if not ok and ns.RouteError then ns.RouteError(err) end
+    return ok
+end
+
+function Reconcile.InSelfWrite()
+    return Reconcile._selfDepth > 0
+end
+
+----------------------------------------------------------------------
+-- THE TRACE RING (rule 4): per-character (never synced), bounded,
+-- build-stamped. chardb.reconcile.trace = array, oldest first.
+----------------------------------------------------------------------
+
+local function traceRing()
+    if not ns.chardb then return nil end
+    if type(ns.chardb.reconcile) ~= "table" then ns.chardb.reconcile = {} end
+    local area = ns.chardb.reconcile
+    if type(area.trace) ~= "table" then area.trace = {} end
+    return area.trace
+end
+
+function Reconcile.Trace(entry)
+    local ring = traceRing()
+    if not ring or type(entry) ~= "table" then return end
+    entry.at = entry.at or (ns.Config and ns.Config.Now and ns.Config.Now()) or 0
+    entry.build = ns.VERSION
+    ring[#ring + 1] = entry
+    while #ring > TRACE_MAX do table.remove(ring, 1) end
+end
+
+function Reconcile.TraceEntries()
+    return traceRing() or {}
+end
+
+----------------------------------------------------------------------
+-- CAPTURE-BACK (rule 3): hooks on the FCF-family conveniences (the surfaces
+-- the Blizzard UI itself routes player edits through) + UPDATE_CHAT_COLOR for
+-- channel color edits. Debounced; wholesale capture-diff lives in config.lua.
+----------------------------------------------------------------------
+
+local CAPTURE_HOOKS = {
+    "FCF_SetWindowName", "FCF_SetChatWindowFontSize", "FCF_SetWindowColor",
+    "FCF_SetWindowAlpha", "FCF_DockFrame", "FCF_UnDockFrame", "FCF_Close",
+    "FCF_OpenNewWindow", "FCF_SavePositionAndDimensions", "FCF_StopDragging",
+    "FCF_ResetChatWindows",
+}
+
+function Reconcile.ScheduleCapture(why)
+    if not Reconcile.active then return end
+    Reconcile._pendingWhy = tostring(why or "?")
+    if Reconcile._captureQueued then return end
+    Reconcile._captureQueued = true
+    after(CAPTURE_DEBOUNCE, function()
+        Reconcile._captureQueued = false
+        if not Reconcile.active then return end
+        local C = ns.Config
+        if not (C and C.CaptureBack) then return end
+        local changed = C.CaptureBack(Reconcile._pendingWhy)
+        if changed then
+            Reconcile.stats.captures = Reconcile.stats.captures + 1
+            Reconcile.Trace({ gate = "capture",
+                changed = { Reconcile._pendingWhy .. " -> rev " .. tostring(C.Rev()) } })
+        end
+    end)
+end
+
+-- channels.lua reports player-driven membership changes here.
+function Reconcile.NoteExternalChange(why)
+    Reconcile.ScheduleCapture(why)
+end
+
+local function installHooks()
+    if Reconcile.hooked then return end
+    Reconcile.hooked = true
+    local hook = _G.hooksecurefunc
+    if type(hook) ~= "function" then return end
+    for _, name in ipairs(CAPTURE_HOOKS) do
+        if type(_G[name]) == "function" then
+            local capturedName = name
+            hook(capturedName, function()
+                if Reconcile.active and Reconcile._selfDepth == 0 then
+                    Reconcile.ScheduleCapture(capturedName)
+                end
+            end)
+        end
+    end
+end
+
+----------------------------------------------------------------------
+-- WINDOW CONVERGENCE: config -> the client's per-character store.
+----------------------------------------------------------------------
+
+-- Runtime-detected channel routing (the 11509 fact: AddChatWindowChannel /
+-- RemoveChatWindowChannel are the real surface; the ChatFrame_* globals are
+-- checked second purely as a defensive shim for client drift).
+local function addChannelToWindow(id, name)
+    if type(_G.AddChatWindowChannel) == "function" then
+        _G.AddChatWindowChannel(id, name)
+    elseif type(_G.ChatFrame_AddChannel) == "function" then
+        local frame = _G["ChatFrame" .. id]
+        if frame then _G.ChatFrame_AddChannel(frame, name) end
+    end
+end
+
+local function removeChannelFromWindow(id, name)
+    if type(_G.RemoveChatWindowChannel) == "function" then
+        _G.RemoveChatWindowChannel(id, name)
+    elseif type(_G.ChatFrame_RemoveChannel) == "function" then
+        local frame = _G["ChatFrame" .. id]
+        if frame then _G.ChatFrame_RemoveChannel(frame, name) end
+    end
+end
+
+-- Converge one window. Returns a list of field names written (empty = clean).
+local function convergeWindow(id, want)
+    local C = ns.Config
+    local have = C.CaptureWindow(id)
+    if not have or type(want) ~= "table" then return {} end
+    local dirty = {}
+    local function W(cond, field, fn, ...)
+        if cond and type(fn) == "function" then
+            local args = { ... }
+            Reconcile.SelfWrite(function() fn(unpack(args)) end)
+            dirty[#dirty + 1] = field
+        end
+    end
+    W(want.name ~= nil and have.name ~= want.name, "name",
+        _G.SetChatWindowName, id, want.name)
+    W(want.fontSize ~= nil and have.fontSize ~= want.fontSize, "fontSize",
+        _G.SetChatWindowSize, id, want.fontSize)
+    W((want.r ~= nil or want.g ~= nil or want.b ~= nil)
+        and not (have.r == want.r and have.g == want.g and have.b == want.b), "color",
+        _G.SetChatWindowColor, id, want.r or 0, want.g or 0, want.b or 0)
+    W(want.alpha ~= nil and have.alpha ~= want.alpha, "alpha",
+        _G.SetChatWindowAlpha, id, want.alpha)
+    W(want.shown ~= nil and have.shown ~= want.shown, "shown",
+        _G.SetChatWindowShown, id, want.shown)
+    W(want.locked ~= nil and have.locked ~= want.locked, "locked",
+        _G.SetChatWindowLocked, id, want.locked)
+    W(want.docked ~= nil and not C.SerEq(have.docked, want.docked), "docked",
+        _G.SetChatWindowDocked, id, want.docked)
+    W(want.uninteractable ~= nil and have.uninteractable ~= want.uninteractable,
+        "uninteractable", _G.SetChatWindowUninteractable, id, want.uninteractable)
+    if type(want.dim) == "table" and not C.SerEq(have.dim, want.dim) then
+        W(true, "dim", _G.SetChatWindowSavedDimensions, id, want.dim[1], want.dim[2])
+    end
+    if type(want.pos) == "table" and not C.SerEq(have.pos, want.pos) then
+        W(true, "pos", _G.SetChatWindowSavedPosition, id,
+            want.pos[1], want.pos[2], want.pos[3])
+    end
+
+    -- Message groups: set-rewrite when different (sorted, deterministic).
+    if type(want.groups) == "table" and not C.SerEq(have.groups, want.groups) then
+        local frame = _G["ChatFrame" .. id]
+        if frame and type(_G.ChatFrame_RemoveAllMessageGroups) == "function"
+                 and type(_G.ChatFrame_AddMessageGroup) == "function" then
+            Reconcile.SelfWrite(function()
+                _G.ChatFrame_RemoveAllMessageGroups(frame)
+                for _, g in ipairs(want.groups) do
+                    _G.ChatFrame_AddMessageGroup(frame, g)
+                end
+            end)
+            dirty[#dirty + 1] = "groups"
+        end
+    end
+
+    -- Channel routing BY NAME: add the missing, remove the unwanted.
+    if type(want.channels) == "table" and not C.SerEq(have.channels, want.channels) then
+        local haveSet, wantSet = {}, {}
+        for _, nm in ipairs(have.channels) do haveSet[nm] = true end
+        for _, nm in ipairs(want.channels) do wantSet[nm] = true end
+        Reconcile.SelfWrite(function()
+            for _, nm in ipairs(want.channels) do
+                if not haveSet[nm] then addChannelToWindow(id, nm) end
+            end
+            for _, nm in ipairs(have.channels) do
+                if not wantSet[nm] then removeChannelFromWindow(id, nm) end
+            end
+        end)
+        dirty[#dirty + 1] = "channels"
+    end
+
+    -- The write-then-poke reality: the frame re-reads the store only when told.
+    if #dirty > 0 and type(_G.FloatingChatFrame_Update) == "function" then
+        Reconcile.SelfWrite(_G.FloatingChatFrame_Update, id)
+    end
+    return dirty
+end
+
+function Reconcile.ConvergeWindows(cfg)
+    local changed = {}
+    local want = type(cfg) == "table" and cfg.windows or nil
+    if type(want) ~= "table" then return changed end
+    for id = 1, numWindows() do
+        local dirty = convergeWindow(id, want[id])
+        if #dirty > 0 then
+            changed[#changed + 1] = "window " .. id .. ": " .. table.concat(dirty, ",")
+        end
+    end
+    if #changed > 0 and type(_G.FCF_DockUpdate) == "function" then
+        Reconcile.SelfWrite(_G.FCF_DockUpdate)
+    end
+    return changed
+end
+
+-- Colors that config wants but the client's CHANNELn slots do not show yet
+-- (checked against the CURRENT number of each joined channel).
+function Reconcile.VerifyColors(cfg)
+    local diffs = {}
+    local C = ns.Config
+    local colors = type(cfg) == "table" and cfg.colors or nil
+    if type(colors) ~= "table" or next(colors) == nil then return diffs end
+    local Ch = ns.Channels
+    local join = Ch and Ch.CaptureJoinList and Ch.CaptureJoinList() or nil
+    if not join then return diffs end
+    local CTI = _G.ChatTypeInfo
+    for _, e in ipairs(join) do
+        local n, name = e[1], e[2]
+        local want = colors[tostring(name):lower()]
+        local info = type(CTI) == "table" and CTI["CHANNEL" .. tostring(n)] or nil
+        if want and info and not C.NearColor(info, want) then
+            diffs[#diffs + 1] = "color " .. name
+        end
+    end
+    return diffs
+end
+
+----------------------------------------------------------------------
+-- THE RUN: attempt -> converge -> (channels) -> verify -> retry ladder.
+----------------------------------------------------------------------
+
+local function finishRun()
+    Reconcile._runInFlight = false
+    Reconcile._chanResult = nil
+    if Reconcile._rerunGate then
+        local gate = Reconcile._rerunGate
+        Reconcile._rerunGate = nil
+        Reconcile.Run(gate)
+    end
+end
+
+function Reconcile.Verify(cfg, changed)
+    if not Reconcile.active then finishRun() return end
+    local C = ns.Config
+    local snap = C.CaptureClient()
+    local diffs = C.DiffList(cfg, snap)
+    for _, d in ipairs(Reconcile.VerifyColors(cfg)) do diffs[#diffs + 1] = d end
+    local refused = {}
+    if Reconcile._chanResult and type(Reconcile._chanResult.refused) == "table" then
+        for _, r in ipairs(Reconcile._chanResult.refused) do
+            refused[#refused + 1] = "channel join refused: " .. tostring(r)
+        end
+    end
+    local attempt = Reconcile._attempt
+    local entry = {
+        gate = tostring(Reconcile._gate) .. " attempt " .. attempt,
+        changed = changed,
+    }
+    if #diffs > 0 or #refused > 0 then
+        entry.refused = {}
+        for _, d in ipairs(diffs) do entry.refused[#entry.refused + 1] = "unconverged: " .. d end
+        for _, r in ipairs(refused) do entry.refused[#entry.refused + 1] = r end
+    end
+    Reconcile.Trace(entry)
+
+    if #diffs > 0 and attempt <= #LADDER then
+        Reconcile.stats.retries = Reconcile.stats.retries + 1
+        after(LADDER[attempt], function()
+            if Reconcile.active and Reconcile._runInFlight then Reconcile.Attempt() end
+        end)
+    else
+        if #diffs > 0 then
+            Reconcile.Trace({ gate = tostring(Reconcile._gate) .. " EXHAUSTED",
+                refused = { ("%d item(s) still unconverged after %d attempt(s)")
+                    :format(#diffs, attempt) } })
+        end
+        finishRun()
+    end
+end
+
+function Reconcile.Attempt()
+    if not Reconcile.active then finishRun() return end
+    local C = ns.Config
+    if not C then finishRun() return end
+    Reconcile._attempt = (Reconcile._attempt or 0) + 1
+    Reconcile._chanResult = nil
+
+    -- Rule 5, second half: no config ANYWHERE -> adopt the client state.
+    if not C.HasAnyConfig() then
+        C.AdoptClient(nil)
+        Reconcile.Trace({ gate = tostring(Reconcile._gate),
+            changed = { "first run: adopted client state as the initial config (rev "
+                        .. tostring(C.Rev()) .. ")" } })
+        finishRun()
+        return
+    end
+
+    -- Read-time resolution: converge toward the cross-account WINNER (receive
+    -- never adopts; the local store is only written by edit paths).
+    local cfg, owner = C.EffectiveCfg()
+    if type(cfg) ~= "table" then finishRun() return end
+    Reconcile._winnerOwner = owner
+
+    local changed = Reconcile.ConvergeWindows(cfg)
+
+    local Ch = ns.Channels
+    local wantJoin = type(cfg.join) == "table" and #cfg.join > 0
+    if not Reconcile._opts.windowsOnly and Ch and Ch.active and Ch.IsListWarm() then
+        if wantJoin then
+            Ch.Converge(cfg.join, function(result)
+                Reconcile._chanResult = result
+                after(VERIFY_WAIT, function()
+                    if Reconcile.active and Reconcile._runInFlight then
+                        Reconcile.Verify(cfg, changed)
+                    end
+                end)
+            end)
+            return
+        end
+        -- No join intent: still keep colors imposed for whatever is joined.
+        Ch.ImposeAllColors()
+    end
+    after(VERIFY_WAIT, function()
+        if Reconcile.active and Reconcile._runInFlight then
+            Reconcile.Verify(cfg, changed)
+        end
+    end)
+end
+
+function Reconcile.Run(gate, opts)
+    if not Reconcile.active then return end
+    if Reconcile._runInFlight then
+        Reconcile._rerunGate = gate    -- coalesce; the fresh beat reruns after
+        return
+    end
+    Reconcile._runInFlight = true
+    Reconcile._attempt = 0
+    Reconcile._gate = gate or "?"
+    Reconcile._opts = opts or {}
+    Reconcile.stats.runs = Reconcile.stats.runs + 1
+    Reconcile.Attempt()
+end
+
+----------------------------------------------------------------------
+-- Lifecycle wiring. ENTERING_WORLD arms the run; CHANNEL_LIST_WARM fires it
+-- (the two-signal gate). With the channels module inert the reconciler still
+-- converges WINDOWS on a short grace — it just never touches membership and
+-- never reads the dark list.
+----------------------------------------------------------------------
+
+Reconcile._ewListener = function(isLogin, isReload)
+    if not Reconcile.active then return end
+    Reconcile._pendingGate = isLogin and "login" or (isReload and "reload" or "zone")
+    local Ch = ns.Channels
+    if not (Ch and Ch.active) then
+        after(0.5, function()
+            if Reconcile.active then
+                Reconcile.Run(Reconcile._pendingGate or "zone", { windowsOnly = true })
+            end
+        end)
+    end
+end
+
+Reconcile._warmListener = function()
+    if not Reconcile.active then return end
+    local gate = Reconcile._pendingGate or "warm"
+    Reconcile._pendingGate = nil
+    Reconcile.Run(gate)
+end
+
+Reconcile._remoteListener = function()
+    -- A peer's config arrived (nexus.lua pumped the bus; the STORE holds it —
+    -- receive never adopts). If the new winner differs, converge toward it.
+    if not Reconcile.active or not ns.state.inWorld then return end
+    if Reconcile._remoteQueued then return end
+    Reconcile._remoteQueued = true
+    after(1.0, function()
+        Reconcile._remoteQueued = false
+        if Reconcile.active and ns.state.inWorld then Reconcile.Run("remote") end
+    end)
+end
+
+Reconcile._colorHandler = function(event, chatType)
+    if not Reconcile.active or Reconcile._selfDepth > 0 then return end
+    if type(chatType) == "string" and chatType:match("^CHANNEL%d+$") then
+        Reconcile.ScheduleCapture("UPDATE_CHAT_COLOR " .. chatType)
+    end
+end
+
+function Reconcile.OnEnable()
+    Reconcile.active = true
+    installHooks()
+    ns:RegisterEvent("UPDATE_CHAT_COLOR", Reconcile._colorHandler)
+    ns:On("ENTERING_WORLD", Reconcile._ewListener)
+    ns:On("CHANNEL_LIST_WARM", Reconcile._warmListener)
+    ns:On("CHATCFG_REMOTE", Reconcile._remoteListener)
+    -- Enabled while already in-world (live /dchat enable): reconcile now,
+    -- through the same warm gate.
+    if ns.state.inWorld then
+        local Ch = ns.Channels
+        if Ch and Ch.active and Ch.IsListWarm and Ch.IsListWarm() then
+            Reconcile.Run("enable")
+        elseif Ch and Ch.active then
+            Reconcile._pendingGate = "enable"
+        else
+            after(0.5, function()
+                if Reconcile.active then Reconcile.Run("enable", { windowsOnly = true }) end
+            end)
+        end
+    end
+end
+
+function Reconcile.OnDisable()
+    Reconcile.active = false
+    ns:UnregisterEvent("UPDATE_CHAT_COLOR", Reconcile._colorHandler)
+    ns:Off("ENTERING_WORLD", Reconcile._ewListener)
+    ns:Off("CHANNEL_LIST_WARM", Reconcile._warmListener)
+    ns:Off("CHATCFG_REMOTE", Reconcile._remoteListener)
+    Reconcile._runInFlight = false
+    Reconcile._rerunGate = nil
+    Reconcile._captureQueued = false
+end
+
+ns.RegisterModule("reconcile", Reconcile)
+
+ns.RegisterDebugCommand("reconcile", "the reconcile trace ring (what changed, what refused, why)", function()
+    local ring = Reconcile.TraceEntries()
+    ns:Print(("reconcile: %s | %d run(s), %d retr(ies), %d capture(s)"):format(
+        Reconcile.active and "active" or "inactive",
+        Reconcile.stats.runs, Reconcile.stats.retries, Reconcile.stats.captures))
+    if #ring == 0 then
+        ns:Print("  trace ring is empty (no reconcile has run on this character)")
+        return
+    end
+    local first = math.max(1, #ring - 9)
+    for i = #ring, first, -1 do
+        local e = ring[i]
+        ns:Print(("  [%d] %s (build %s, at %s)"):format(
+            i, tostring(e.gate), tostring(e.build), tostring(e.at)))
+        for _, c in ipairs(e.changed or {}) do ns:Print("      changed: " .. tostring(c)) end
+        for _, r in ipairs(e.refused or {}) do ns:Print("      refused: " .. tostring(r)) end
+    end
+end)
+
+----------------------------------------------------------------------
+-- Self-tests (suite "reconcile"). Live legs drive the full module against
+-- the unkind sim; skipped in-game.
+----------------------------------------------------------------------
+
+local function testConvergenceMatrix(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Sim = _G.__DaseekiChatSim
+    if not Sim then return end
+    local HT = _G.__DaseekiChatHarnessTimer
+    local Config, Channels = ns.Config, ns.Channels
+
+    -- Phase 0: INERTNESS. The harness drove a full login with this module
+    -- disabled; nothing may have been installed.
+    ck(Reconcile.active == false and Reconcile.hooked == false,
+        "phase 0: disabled module installed nothing")
+    ck(Sim.CallCount("hooksecurefunc") == 0, "phase 0: zero hook installs (the pin)")
+
+    -- ── FRESH CHARACTER MATERIALIZES THE FULL LAYOUT (rule 5, first half) ──
+    Sim.NewSession()
+    _G.FCF_ResetChatWindows()
+
+    -- The authoritative config: stock baseline for every window, then a real
+    -- layout on windows 1 and 3, a join list with deterministic numbers, and
+    -- a channel color by name.
+    local c = Config.Get()
+    c.rev, c.at = 3, Config.Now()
+    c.colors, c.join = {}, {}
+    c.windows = {}
+    for id = 1, 10 do c.windows[id] = Config.CaptureWindow(id) end
+    c.windows[1].name = "Main"
+    c.windows[1].fontSize = 16
+    c.windows[1].groups = { "GUILD", "SAY", "SYSTEM" }
+    c.windows[1].channels = { "General", "OsirisTrade" }
+    c.windows[3].name = "Trade Watch"
+    c.windows[3].shown = true
+    c.windows[3].fontSize = 12
+    c.windows[3].channels = { "OsirisTrade" }
+    c.windows[3].dim = { 300, 150 }
+    c.windows[3].pos = { "TOPLEFT", 10, -10 }
+    c.join = { { 1, "General" }, { 2, "OsirisTrade" } }
+    c.colors = { osiristrade = { r = 0.9, g = 0.4, b = 0.1 } }
+
+    ns.SetModuleEnabled("channels", true)
+    ns.SetModuleEnabled("reconcile", true)
+    ck(Reconcile.active and Reconcile.hooked, "enable installs the capture layer")
+    Sim.ResetCalls()
+    local drops0 = Sim.droppedJoins
+
+    Sim.EnterWorld(true, false)
+    -- THE DARK-LIST GATE: at PEW+0 the channel list is dark and the
+    -- reconciler has written NOTHING (event-gated, never timer-guessed).
+    ck(Sim.CallCount("SetChatWindowName") == 0
+        and Sim.CallCount("JoinChannelByName") == 0,
+        "dark gate: zero writes before the warm signal")
+
+    HT.advance(0.5)   -- the list warms; the run fires through the gate
+    HT.flush()        -- paced joins + verify ladder settle
+
+    ck(select(1, _G.GetChatWindowInfo(1)) == "Main", "window 1 renamed from config")
+    local _, fs1 = _G.GetChatWindowInfo(1)
+    ck(fs1 == 16, "window 1 font size converged")
+    ck(Config.SerEq(Config.CaptureWindow(1).groups, { "GUILD", "SAY", "SYSTEM" }),
+        "window 1 message groups converged")
+    ck(Config.SerEq(Config.CaptureWindow(1).channels, { "General", "OsirisTrade" }),
+        "window 1 channel routing converged BY NAME")
+    local w3 = Config.CaptureWindow(3)
+    ck(w3.name == "Trade Watch" and w3.shown == true and w3.fontSize == 12,
+        "window 3 materialized (name/shown/font)")
+    ck(Config.SerEq(w3.dim, { 300, 150 }) and Config.SerEq(w3.pos, { "TOPLEFT", 10, -10 }),
+        "window 3 dimensions + position converged")
+    ck(Sim.Frame(3)._shown == true,
+        "the frame was POKED (FloatingChatFrame_Update projected the store)")
+    ck(select(1, _G.GetChannelName("OsirisTrade")) == 2,
+        "the join list landed OsirisTrade on its configured number")
+    ck(Sim.droppedJoins == drops0, "zero channel ops dropped during materialization")
+    ck(Config.NearColor(_G.ChatTypeInfo["CHANNEL2"], c.colors.osiristrade),
+        "the channel color was imposed at the configured number")
+    ck(Config.Rev() == 3, "materializing a fresh character never edits the config")
+    local sawLogin = false
+    for _, e in ipairs(Reconcile.TraceEntries()) do
+        if tostring(e.gate):find("login", 1, true) then sawLogin = true end
+    end
+    ck(sawLogin, "the trace ring recorded the login reconcile")
+end
+
+local function testDriftEchoAndCapture(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Sim = _G.__DaseekiChatSim
+    if not Sim then return end
+    local HT = _G.__DaseekiChatHarnessTimer
+    local Config = ns.Config
+    local c = Config.Get()
+
+    -- ── DRIFT CORRECTION + THE ECHO-STORM RED CONTROL ──────────────────────
+    -- Drift the client via RAW store writes (external mutation, no hooks),
+    -- then reconcile: the drift is corrected and — the red control — the
+    -- reconciler's own writes are NEVER captured back: rev and the capture
+    -- counter stay frozen, proven by counts.
+    local revBefore = Config.Rev()
+    local capsBefore = Reconcile.stats.captures
+    _G.SetChatWindowName(1, "Drifted")
+    _G.SetChatWindowSize(3, 99)
+    Sim.EnterWorld(false, false)    -- the zone-in re-verify beat
+    HT.advance(0.5)
+    HT.flush()
+    ck(select(1, _G.GetChatWindowInfo(1)) == "Main", "drifted name corrected back to config")
+    local _, fs3 = _G.GetChatWindowInfo(3)
+    ck(fs3 == 12, "drifted font size corrected back to config")
+    ck(Config.Rev() == revBefore,
+        "ECHO RED CONTROL: a full reconcile pass never bumped the config rev")
+    ck(Reconcile.stats.captures == capsBefore,
+        "ECHO RED CONTROL: zero capture-backs fired for the reconciler's own writes")
+
+    -- ── CAPTURE-BACK, the positive control: a PLAYER edit through the hooked
+    -- FCF surface lands in the config, exactly once. ───────────────────────
+    _G.FCF_SetWindowName(Sim.Frame(3), "My Rename")
+    HT.advance(0.3)   -- past the capture debounce
+    ck(Config.Rev() == revBefore + 1, "a player edit bumped the rev exactly once")
+    ck(c.windows[3].name == "My Rename", "the player's rename landed in the config")
+    ck(Reconcile.stats.captures == capsBefore + 1, "exactly one capture ran")
+
+    -- The next reconcile RESPECTS the player's captured edit (D3: the
+    -- reconciler only corrects drift it did not author).
+    Sim.EnterWorld(false, false)
+    HT.advance(0.5)
+    HT.flush()
+    ck(select(1, _G.GetChatWindowInfo(3)) == "My Rename",
+        "a captured player edit is the new truth, not drift")
+
+    -- ── UPDATE_CHAT_COLOR capture: a player recolor is captured BY NAME ────
+    local revC = Config.Rev()
+    _G.ChangeChatColor("CHANNEL2", 0.2, 0.3, 0.4)
+    HT.advance(0.3)
+    ck(Config.Rev() == revC + 1, "a player channel recolor captures (rev bump)")
+    ck(Config.NearColor(c.colors["osiristrade"], { r = 0.2, g = 0.3, b = 0.4 }),
+        "the recolor was captured against the channel NAME, not its number")
+end
+
+local function testLadderAndTrace(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Sim = _G.__DaseekiChatSim
+    if not Sim then return end
+    local HT = _G.__DaseekiChatHarnessTimer
+    local Config = ns.Config
+    local c = Config.Get()
+
+    -- ── THE RETRY LADDER IS FINITE; A REFUSED JOIN TRACES, NEVER SPINS ─────
+    Sim.opts.refuseJoins = { Ghost = true }
+    c.join = { { 1, "General" }, { 2, "OsirisTrade" }, { 3, "Ghost" } }
+    c.rev = c.rev + 1
+    c.at = Config.Now()
+    local drops0 = Sim.droppedJoins
+    local runsBefore = Reconcile.stats.runs
+    Sim.EnterWorld(false, false)
+    HT.advance(0.5)
+    HT.flush()   -- an unbounded ladder would hang this flush; it terminates
+    ck(Reconcile.stats.runs == runsBefore + 1, "one run consumed the refusal")
+    ck(Reconcile._runInFlight == false, "the run ENDED (finite ladder)")
+    ck(select(1, _G.GetChannelName("Ghost")) == 0, "the refused channel never appeared")
+    ck(Sim.droppedJoins == drops0, "pacing held through every retry")
+    local sawRefusal, sawExhausted = false, false
+    for _, e in ipairs(Reconcile.TraceEntries()) do
+        for _, r in ipairs(e.refused or {}) do
+            if tostring(r):find("Ghost", 1, true) then sawRefusal = true end
+        end
+        if tostring(e.gate):find("EXHAUSTED", 1, true) then sawExhausted = true end
+    end
+    ck(sawRefusal, "the trace names the refused channel")
+    ck(sawExhausted, "the trace records the exhausted ladder honestly")
+    Sim.opts.refuseJoins = {}
+
+    -- Clean config again; the next beat converges clean.
+    c.join = { { 1, "General" }, { 2, "OsirisTrade" } }
+    c.rev = c.rev + 1
+    c.at = Config.Now()
+    Sim.EnterWorld(false, false)
+    HT.advance(0.5)
+    HT.flush()
+    ck(Reconcile._runInFlight == false, "the clean run also ends")
+
+    -- ── TRACE RING: bounded and build-stamped ──────────────────────────────
+    for i = 1, Reconcile.TRACE_MAX + 10 do
+        Reconcile.Trace({ gate = "synthetic " .. i })
+    end
+    local ring = Reconcile.TraceEntries()
+    ck(#ring == Reconcile.TRACE_MAX, "the ring is bounded at TRACE_MAX")
+    ck(ring[#ring].build == ns.VERSION, "entries are build-stamped")
+    ck(ring[#ring].gate == "synthetic " .. (Reconcile.TRACE_MAX + 10),
+        "the newest entry survives the trim (oldest evicted)")
+    local ok = pcall(ns.SlashDispatch, "debug reconcile")
+    ck(ok, "/dchat debug reconcile prints without error")
+
+    -- ── OUT: disable both modules; the client hears nothing further ────────
+    ns.SetModuleEnabled("reconcile", false)
+    ns.SetModuleEnabled("channels", false)
+    ck(Reconcile.active == false, "reconcile disables")
+    ck(ns.EventHandlerCount("UPDATE_CHAT_COLOR") == 0
+        and ns.EventHandlerCount("CHAT_MSG_CHANNEL_NOTICE") == 0,
+        "every event subscription was given back")
+    ck(ns.EventHandlerCount() == 4, "only core's 4 lifecycle events remain")
+    _G.FCF_SetWindowName(Sim.Frame(3), "Silent Edit")
+    HT.advance(0.5)
+    HT.flush()
+    ck(ns.Config.Get().windows[3].name == "My Rename",
+        "a disabled reconciler captures NOTHING (hook bodies are inert)")
+    Sim.ResetCalls()
+end
+
+ns:RegisterSelfTest("reconcile", function(verbose)
+    local suites = {
+        { name = "fresh-character materialization", fn = testConvergenceMatrix },
+        { name = "drift + echo control + capture",  fn = testDriftEchoAndCapture },
+        { name = "finite ladder + trace ring",      fn = testLadderAndTrace },
+    }
+    local allPass = true
+    for _, suite in ipairs(suites) do
+        local fails = {}
+        local ok, err = pcall(suite.fn, fails)
+        if not ok then fails[#fails + 1] = "error: " .. tostring(err) end
+        local passed = #fails == 0
+        if not passed then allPass = false end
+        if verbose and ns.Print then
+            if passed then ns:Print("  PASS reconcile/" .. suite.name)
+            else for _, f in ipairs(fails) do ns:Print("  FAIL reconcile/" .. suite.name .. " :: " .. f) end end
+        end
+    end
+    return allPass
+end)
+
+return Reconcile

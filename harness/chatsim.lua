@@ -53,6 +53,11 @@ local Sim = {
     opts         = {
         wrappedBufferFields = true,   -- unkind default
         addonEventFirst     = true,   -- unkind default (Class 2 ordering)
+        -- w2/reconciler ADDITIVE unkindness (default inert): channel names the
+        -- "server" never grants. The join is accepted (it consumes the pacing
+        -- slot like a real send) but no notice ever fires and the list never
+        -- changes — the refusal-ladder world channels.lua must survive.
+        refuseJoins         = {},     -- [name] = true
     },
     droppedJoins = 0,                 -- silently swallowed join/leave requests
     windows      = {},                -- the per-character client chat store
@@ -681,6 +686,9 @@ _G.JoinChannelByName = function(name, password, frameId)
     record("JoinChannelByName")
     if type(name) ~= "string" or name == "" then return end
     if throttled() then return end     -- DROPPED SILENTLY (the pacing reality)
+    -- w2/reconciler additive: a refused name consumed its send but the server
+    -- never grants it — no notice, no list entry, ever.
+    if Sim.opts.refuseJoins and Sim.opts.refuseJoins[name] then return end
     _G.C_Timer.After(JOIN_LATENCY, function()
         if channelNumberOf(name) then return end    -- already in: server no-ops
         local n = lowestFreeChannelNumber()
