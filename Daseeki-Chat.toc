@@ -9,34 +9,40 @@
 ## Version: 0.9.0
 ## SavedVariables: DaseekiChatDB
 ## SavedVariablesPerCharacter: DaseekiChatCharDB
-##
-## SAVEDVARIABLES CONTRACT (the Bags AT-RISK-1 lesson applies from day one): the
-## client rewrites this addon's SavedVariables files at every logout from the
-## DECLARED names only — a global dropped from these lines is erased at the next
-## logout, silently. Two stores, deliberately split:
-##   DaseekiChatDB     — the authoritative account-spanning chat CONFIG (windows,
-##                       tabs, routing, colors, fonts, layout) plus module flags.
-##                       This is what the reconciler treats as truth and what the
-##                       Nexus `chatcfg` namespace syncs. Account-wide by design.
-##   DaseekiChatCharDB — per-character, high-churn, never synced: cross-session
-##                       chat HISTORY snapshots and any per-character debug traces.
-##                       Isolated so config sync never drags scrollback around
-##                       (the Prat "high CPU file" precedent).
-##
-## DEPENDENCIES — Daseeki-Core is HARD and honest (the Bags N1 lesson): every
-## visual surface here is drawn from Core theme tokens and Core font roles; there
-## is no Core-less rendering path. Daseeki-Nexus stays OPTIONAL and must NOT be
-## promoted: nexus.lua is fully type-guarded and Chat is unchanged without it —
-## the OptionalDeps line is a LOAD-ORDER statement only (Nexus SavedVariables must
-## be attached before our ADDON_LOADED so the chatcfg adopt decision can see them).
-##
-## FILE MAP (DASEEKI_CHAT_DESIGN.md is LAW; this list is its file map, in order).
-## Wave ownership: Wave 1 built core.lua + skin.lua + this skeleton + the harness.
-## Three Wave-2 agents fill the placeholders IN PLACE — the .toc never changes and
-## no agent touches another agent's files:
-##   reconciler/sync agent : config.lua, reconcile.lua, channels.lua, nexus.lua
-##   pipeline agent        : decor.lua, stamps.lua, names.lua, urls.lua
-##   history/badges agent  : history.lua, badges.lua
+#
+# NOTE: prose comments in a .toc must use a SINGLE #. A ## prefix is a DIRECTIVE
+# to the client's parser — the original ##-prefixed comment block below made the
+# client read "## DEPENDENCIES — … (the Bags N1 lesson): every" as a dependency
+# on an addon named "every", and the whole addon refused to load (live incident,
+# 2026-08-10, caught in BugSack on first UAT).
+#
+# SAVEDVARIABLES CONTRACT (the Bags AT-RISK-1 lesson applies from day one): the
+# client rewrites this addon's SavedVariables files at every logout from the
+# DECLARED names only — a global dropped from these lines is erased at the next
+# logout, silently. Two stores, deliberately split:
+#   DaseekiChatDB     — the authoritative account-spanning chat CONFIG (windows,
+#                       tabs, routing, colors, fonts, layout) plus module flags.
+#                       This is what the reconciler treats as truth and what the
+#                       Nexus `chatcfg` namespace syncs. Account-wide by design.
+#   DaseekiChatCharDB — per-character, high-churn, never synced: cross-session
+#                       chat HISTORY snapshots and any per-character debug traces.
+#                       Isolated so config sync never drags scrollback around
+#                       (the Prat "high CPU file" precedent).
+#
+# DEPENDENCIES — Daseeki-Core is HARD and honest (the Bags N1 lesson): every
+# visual surface here is drawn from Core theme tokens and Core font roles; there
+# is no Core-less rendering path. Daseeki-Nexus stays OPTIONAL and must NOT be
+# promoted: nexus.lua is fully type-guarded and Chat is unchanged without it —
+# the OptionalDeps line is a LOAD-ORDER statement only (Nexus SavedVariables must
+# be attached before our ADDON_LOADED so the chatcfg adopt decision can see them).
+#
+# FILE MAP (DASEEKI_CHAT_DESIGN.md is LAW; this list is its file map, in order).
+# Wave ownership: Wave 1 built core.lua + skin.lua + this skeleton + the harness.
+# Three Wave-2 agents fill the placeholders IN PLACE — the .toc never changes and
+# no agent touches another agent's files:
+#   reconciler/sync agent : config.lua, reconcile.lua, channels.lua, nexus.lua
+#   pipeline agent        : decor.lua, stamps.lua, names.lua, urls.lua
+#   history/badges agent  : history.lua, badges.lua
 core.lua
 # config.lua: the authoritative config model + capture-back diffing. Loads right
 # after core because every other module reads config at call time.
