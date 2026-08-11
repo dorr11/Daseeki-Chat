@@ -57,6 +57,18 @@
 --      Re-asserted on every re-evaluation beat (the client re-clamps) and
 --      deferred to the regen beat when the write is refused in combat.
 --
+-- SKIN V2.2 — the chat BUTTON COLUMN, down by default:
+--
+--   8. HIDE THE BUTTON COLUMN (hideButtonColumn, ON). The client's per-window
+--      chat-menu + scroll-button column is taken down and KEPT down against
+--      the client's own re-shows. It is the other half of "drag it flush to
+--      the edge": the client flips the column's side by screen position
+--      (which is why two accounts wear it on opposite sides) and its width is
+--      part of what a drag has to fit on screen. The one verb it owned — the
+--      client's chat menu — stays reachable: on the icon rail, and by
+--      right-clicking the resting edit bar's channel prefix. OFF is the
+--      client's own column back, side-flipping and all.
+--
 -- Everything visual reads Daseeki-Core theme tokens at render (DaseekiUI.Color/
 -- Token / FLAT_BACKDROP / UI.Skin / UI.fonts / UI.FontFile) — ZERO hardcoded
 -- colors anywhere in this file; alpha/measure constants only. The one family
@@ -85,6 +97,10 @@ local Skin = {
     moves    = 0,      -- completed drags (the harness reads this)
     _ebDepth = 0,      -- persistent-edit-box re-entrancy latch (Class 9)
     _clampPending = {},-- frames whose clamp write was refused in combat
+    -- skin v2.2 state (the chat button column)
+    columnHides = 0,   -- times we actually took the column down (never a loop)
+    menuOpens   = 0,   -- times we opened the client's chat menu
+    _bfDepth    = 0,   -- button-column re-entrancy latch (Class 9)
 }
 ns.Skin = Skin
 
@@ -122,6 +138,9 @@ ns.DEFAULTS.skin.iconRail            = false  -- left-edge affordance rail (opt-
 ns.DEFAULTS.skin.altDragMove         = true   -- ALT-drag anywhere on a window moves it
 ns.DEFAULTS.skin.persistentEditBox   = true   -- the edit box never hides
 ns.DEFAULTS.skin.unclampWindows      = true   -- drags may reach the screen edge
+-- skin v2.2: the client's chat BUTTON COLUMN is down by default (the reference
+-- look replaces it; OFF gives the client's own column back, side-flip and all).
+ns.DEFAULTS.skin.hideButtonColumn    = true   -- hide the chat button column
 
 local function UIKit() return _G.DaseekiUI end
 
@@ -999,6 +1018,17 @@ local function ensureEditBoxRig(frame, rec)
         if not Skin.active then return end
         Skin.StyleEditBoxFocus(self, false)
     end)
+    -- skin v2.2: the chat menu's FALLBACK affordance. The icon rail carries the
+    -- menu verb, but the rail ships OFF, so the resting bar's own prefix strip
+    -- answers a RIGHT-click with the same client menu. Additive (HookScript),
+    -- modified-gesture-only, and measured — an unplaceable right-click is left
+    -- exactly as native, and a left-click is never touched at all.
+    eb:HookScript("OnMouseDown", function(self, button)
+        if not Skin.active then return end
+        if button ~= "RightButton" then return end
+        if not Skin.OverPrefix(self) then return end
+        Skin.OpenChatMenu()
+    end)
     eb:HookScript("OnHide", function(self)
         if not Skin.EditBoxPersistent() then return end
         -- Deferred by one beat: re-showing from inside a hide handler is the
@@ -1191,6 +1221,248 @@ local function ensureMoveRig(frame, rec)
 end
 
 ----------------------------------------------------------------------
+-- THE CHAT BUTTON COLUMN (skin v2.2, default ON = the column is DOWN).
+--
+-- WHAT IT IS: every chat window carries a small button frame — the chat-menu
+-- and scroll-button column — hanging off one edge of the window. The client
+-- picks WHICH edge from the window's screen position (FCF_UpdateButtonSide /
+-- FCF_GetButtonSide / FCF_SetButtonSide, all catalog-verified on 11509): a
+-- window pushed against the left edge has no room for the column there, so the
+-- client flips it to the right. That is why the owner's two accounts disagree
+-- about which side the little square column sits on — same client rule, two
+-- different window positions.
+--
+-- WHY IT IS IN THE WAY: the column rides along with the window and has to fit
+-- on screen too, so its width is part of what a DRAG has to place — the last
+-- stretch to the screen edge is eaten by the column even after the clamp
+-- insets are loosened. Taking the column down is the other half of the
+-- flush-to-the-edge fix, and Skin.ColumnFootprint is this module's own
+-- awareness of it (what the removed column stops costing, in the window's
+-- units — the rail's placement reads it, /dchat debug skin prints it).
+--
+-- WHY IT CAN GO: the reference look the owner chose has no column; the skin's
+-- icon rail already carries scroll-to-bottom, and the persistent edit box
+-- carries the sticky channel the menu button mostly answered. The ONE verb
+-- with no replacement — the client's chat menu (languages, emotes, whisper
+-- targets) — is kept reachable in both worlds (Skin.OpenChatMenu below).
+--
+-- THE SEAM, same posture as the persistent edit box: the last word, never a
+-- fight. The client re-shows the column on every button-side update, so we
+--   1. POST-hook FCF_UpdateButtonSide and FCF_SetButtonSide (the client makes
+--      its side decision and its re-show, then we take it back down, in-call);
+--   2. WATCH the object with an OnShow, deferred one beat (Class 2: a show can
+--      arrive from a path no function hook sees), latched per Class 9 so a
+--      nested beat can never spin.
+-- Nothing is destroyed: Hide() is reversible, the client's own shown state is
+-- remembered on the first touch, and OPTION OFF is byte-identical native
+-- behavior — including the client's side-flipping, which we never suppress.
+----------------------------------------------------------------------
+
+-- A widget number read that answers nil for UNKNOWN (never a manufactured 0).
+local function widgetNum(w, method)
+    if type(w) ~= "table" then return nil end
+    local f = w[method]
+    if type(f) ~= "function" then return nil end
+    local ok, v = pcall(f, w)
+    if ok and type(v) == "number" then return v end
+    return nil
+end
+
+function Skin.HideButtonColumn()
+    return (Skin.active and cfg().hideButtonColumn) and true or false
+end
+
+-- The window's button column. Both client shapes are defended, exactly like
+-- the edit box's header lookup: the frame's own field (the game-facts
+-- register's name for it) and the $parentButtonFrame global.
+function Skin.ButtonColumnOf(frame)
+    if type(frame) ~= "table" then return nil end
+    if type(frame.buttonFrame) == "table" then return frame.buttonFrame end
+    local n = frame.GetName and frame:GetName()
+    local byName = n and _G[n .. "ButtonFrame"]
+    return (type(byName) == "table") and byName or nil
+end
+
+-- Which side the client currently has the column on: its own accessor first,
+-- geometry second, and nil (UNKNOWN) when neither can answer.
+function Skin.ButtonColumnSide(frame)
+    local f = _G.FCF_GetButtonSide
+    if type(f) == "function" then
+        local ok, side = pcall(f, frame)
+        if ok and type(side) == "string" and side ~= "" then return side:lower() end
+    end
+    local col = Skin.ButtonColumnOf(frame)
+    local colLeft, frameLeft = widgetNum(col, "GetLeft"), widgetNum(frame, "GetLeft")
+    if colLeft and frameLeft then return (colLeft < frameLeft) and "left" or "right" end
+    return nil
+end
+
+-- What the column costs the window's placement right now, in the window's own
+-- units: extra width on the left, extra width on the right. A column that is
+-- down (or absent, or unmeasurable) costs nothing — which is the whole point.
+function Skin.ColumnFootprint(frame)
+    local col = Skin.ButtonColumnOf(frame)
+    if not col then return 0, 0 end
+    if type(col.IsShown) == "function" then
+        local ok, shown = pcall(col.IsShown, col)
+        if ok and not shown then return 0, 0 end
+    end
+    local w = widgetNum(col, "GetWidth")
+    if not w or w <= 0 then return 0, 0 end
+    if Skin.ButtonColumnSide(frame) == "right" then return 0, w end
+    return w, 0
+end
+
+-- Take the column down and KEEP it down. Costs a client call ONLY when the
+-- column is actually up, so an idle beat is free and a fight loop is not a
+-- shape this code can take. A refused hide is not retried in a spin either: it
+-- is swallowed here and picked up by the next client beat that re-shows the
+-- column, which is the only beat where it matters again.
+function Skin.KeepButtonColumnHidden(frame)
+    if not Skin.HideButtonColumn() then return false end
+    local rec = Skin.styled[frame]
+    if not rec then return false end
+    local col = Skin.ButtonColumnOf(frame)
+    if not col or type(col.Hide) ~= "function" then return false end
+    -- The client's own visibility, remembered on the first touch so a disable
+    -- hands back exactly what it had (never a blanket Show).
+    if rec.bfWasShown == nil and type(col.IsShown) == "function" then
+        local okW, was = pcall(col.IsShown, col)
+        if okW then rec.bfWasShown = was and true or false end
+    end
+    local shown = true
+    if type(col.IsShown) == "function" then
+        local okS, v = pcall(col.IsShown, col)
+        if okS then shown = v and true or false end
+    end
+    rec.bfForcedHidden = true
+    if not shown then return false end        -- already down: nothing to say
+    if Skin._bfDepth > 0 then return false end
+    Skin._bfDepth = Skin._bfDepth + 1
+    local ok, err = pcall(col.Hide, col)
+    Skin._bfDepth = Skin._bfDepth - 1
+    if not ok then
+        if ns.RouteError then ns.RouteError(err) end
+        return false
+    end
+    Skin.columnHides = Skin.columnHides + 1
+    return true
+end
+
+-- Give the column back: the option went off, or the module did. The client's
+-- own side logic is re-run rather than replayed from memory, so the column
+-- returns where the CLIENT wants it, not where it was when we took it.
+function Skin.RestoreButtonColumn(frame, rec)
+    rec = rec or Skin.styled[frame]
+    if not (rec and rec.bfForcedHidden) then return false end
+    rec.bfForcedHidden = nil
+    local col = Skin.ButtonColumnOf(frame)
+    if not col then return false end
+    if rec.bfWasShown == false then return false end   -- it was down before us
+    if type(col.Show) == "function" then pcall(col.Show, col) end
+    local upd = _G.FCF_UpdateButtonSide
+    if type(upd) == "function" then pcall(upd, frame) end
+    return true
+end
+
+-- One window's column, brought in line with the option — the beat StyleWindow
+-- and Refresh both call.
+function Skin.SyncButtonColumn(frame)
+    if Skin.HideButtonColumn() then return Skin.KeepButtonColumnHidden(frame) end
+    return Skin.RestoreButtonColumn(frame)
+end
+
+local function ensureButtonColumnRig(frame, rec)
+    if rec.bfRig then return end
+    local col = Skin.ButtonColumnOf(frame)
+    if not col or type(col.HookScript) ~= "function" then return end
+    rec.bfRig = true
+    col:HookScript("OnShow", function(self)
+        if not Skin.HideButtonColumn() then return end
+        -- Deferred one beat: hiding from inside a show handler is the
+        -- re-entrancy this defers away from. Without C_Timer (headless) the
+        -- watch simply does not fire — the function post-hooks are the primary
+        -- seam and still cover every client path that has a name.
+        local CT = _G.C_Timer
+        if not (CT and type(CT.After) == "function") then return end
+        if self._dchatRehideQueued then return end
+        self._dchatRehideQueued = true
+        CT.After(0, function()
+            self._dchatRehideQueued = false
+            Skin.KeepButtonColumnHidden(frame)
+        end)
+    end)
+end
+
+----------------------------------------------------------------------
+-- THE CLIENT'S CHAT MENU — the one verb the column owned outright.
+--
+-- Languages, emotes, whisper targets: nothing in Chat replicates that list, so
+-- hiding the column must not take it away. The seam is RESOLVED AT RUNTIME and
+-- never assumed, because the obvious name is not there: ChatFrame_ToggleMenu
+-- does NOT exist on 11509 (catalog), while ToggleFrame does, and the client's
+-- own menu button performs exactly that toggle on the client's own menu frame.
+-- So we ask, in order:
+--   1. ToggleFrame(ChatMenu) — the client's own call on the client's own menu;
+--   2. the client's menu BUTTON's own Click — the same verb, one layer up,
+--      for a client that names the frame differently.
+-- WHERE the menu lands stays the CLIENT's business: we toggle, we never
+-- anchor. The harness pins CALL IDENTITY — the function we hold is the
+-- client's own object, not a lookalike.
+----------------------------------------------------------------------
+
+-- Returns kind ("toggle" | "button"), the CLIENT function we will call, and
+-- the subject to call it on. nil when this client offers neither shape.
+function Skin.ChatMenuSeam()
+    local toggle, menu = _G.ToggleFrame, _G.ChatMenu
+    if type(toggle) == "function" and type(menu) == "table" then
+        return "toggle", toggle, menu
+    end
+    local btn = _G.ChatFrameMenuButton
+    if type(btn) == "table" and type(btn.Click) == "function" then
+        return "button", btn.Click, btn
+    end
+    return nil
+end
+
+function Skin.OpenChatMenu()
+    if not Skin.active then return nil end
+    local kind, verb, subject = Skin.ChatMenuSeam()
+    if not kind then return nil end
+    local ok = pcall(verb, subject)
+    if not ok then return nil end
+    Skin.menuOpens = Skin.menuOpens + 1
+    return kind
+end
+
+-- Is the pointer over the resting bar's PREFIX region ("Say:", "Guild:")?
+-- That strip is the fallback affordance for the chat menu, so it has to be
+-- measured honestly: the cursor answers in PIXELS (the client's convention)
+-- and a widget edge answers in the widget's own units, so the read converts
+-- through the box's effective scale (Class 3) before comparing. An unmeasurable
+-- region is UNKNOWN and therefore NOT a hit — a right-click that cannot be
+-- placed is left alone, never guessed into a menu.
+function Skin.OverPrefix(eb)
+    local header = editBoxHeader(eb)
+    if type(eb) ~= "table" or type(header) ~= "table" then return false end
+    local gcp = _G.GetCursorPosition
+    if type(gcp) ~= "function" then return false end
+    local okC, cx = pcall(gcp)
+    if not okC or type(cx) ~= "number" then return false end
+    local scale = widgetNum(eb, "GetEffectiveScale")
+    if not scale or scale <= 0 then scale = 1 end
+    cx = cx / scale
+    local left  = widgetNum(header, "GetLeft") or widgetNum(eb, "GetLeft")
+    local right = widgetNum(header, "GetRight")
+    if right == nil and left ~= nil then
+        local sw = widgetNum(header, "GetStringWidth")
+        if sw and sw > 0 then right = left + sw end
+    end
+    if left == nil or right == nil then return false end
+    return cx >= left and cx <= right
+end
+
+----------------------------------------------------------------------
 -- The copy-chat affordance: a quiet per-window button (ASCII label) that opens
 -- the shared copy window. The copy window is one themed frame holding the
 -- extracted text in a multiline edit box, focused and pre-highlighted — the
@@ -1323,12 +1595,19 @@ end
 --   copy   "C"  -> Skin.OpenCopy(frame)      (the copy-chat affordance)
 --   config "*"  -> ns.SlashDispatch("")      (the /dchat surface)
 --   bottom "v"  -> frame:ScrollToBottom()    (the client's own frame method)
+--   menu   "="  -> Skin.OpenChatMenu()       (the CLIENT's own chat menu —
+--                  skin v2.2: the one verb the hidden button column owned,
+--                  kept reachable rather than replaced)
 --
 -- Every glyph is ASCII (the tofu law: only a NON-ASCII glyph needs a cmap
 -- check against the vendored face — none ship here).
+--
+-- PLACEMENT (v2.2): the rail sits off the window's left edge, clearing whatever
+-- the client's button column still occupies there — which, with the column
+-- down, is nothing, so the rail moves in flush with the window.
 ----------------------------------------------------------------------
 
-local RAIL_ORDER = { "copy", "config", "bottom" }
+local RAIL_ORDER = { "copy", "config", "bottom", "menu" }
 
 local function railButton(rail, glyph, onClick)
     local UI = UIKit()
@@ -1356,6 +1635,21 @@ local function railButton(rail, glyph, onClick)
     return btn
 end
 
+-- Where the rail's right edge sits, off the window's left edge: past the pad,
+-- the gap, and whatever the client's button column still costs on that side.
+local function railOffset(frame)
+    local left = Skin.ColumnFootprint(frame)
+    return -(PAD + RAIL_GAP + (left or 0))
+end
+
+local function anchorRail(rail, frame)
+    if type(rail.ClearAllPoints) ~= "function" then return end
+    local dx = railOffset(frame)
+    pcall(rail.ClearAllPoints, rail)
+    rail:SetPoint("TOPRIGHT", frame, "TOPLEFT", dx, PAD)
+    rail:SetPoint("BOTTOMRIGHT", frame, "BOTTOMLEFT", dx, -PAD)
+end
+
 local function ensureRail(frame, rec)
     local UI = UIKit()
     if not UI then return end
@@ -1363,12 +1657,15 @@ local function ensureRail(frame, rec)
         if rec.rail then rec.rail:Hide() end
         return
     end
-    if rec.rail then rec.rail:Show() return end
+    if rec.rail then
+        rec.rail:Show()
+        anchorRail(rec.rail, frame)   -- the footprint can move under us
+        return
+    end
 
     local rail = UI.FlatFrame(frame, "panel", "border")
     if type(rail.SetWidth) == "function" then rail:SetWidth(RAIL_WIDTH) end
-    rail:SetPoint("TOPRIGHT", frame, "TOPLEFT", -(PAD + RAIL_GAP), PAD)
-    rail:SetPoint("BOTTOMRIGHT", frame, "BOTTOMLEFT", -(PAD + RAIL_GAP), -PAD)
+    anchorRail(rail, frame)
     if rail.SetFrameLevel and frame.GetFrameLevel then
         local okL, lvl = pcall(frame.GetFrameLevel, frame)
         pcall(rail.SetFrameLevel, rail, (okL and lvl or 1))
@@ -1383,6 +1680,10 @@ local function ensureRail(frame, rec)
         if type(frame.ScrollToBottom) == "function" then frame:ScrollToBottom() end
     end)
     buttons.bottom._verb = frame.ScrollToBottom
+    -- skin v2.2: the client's own chat menu (languages, emotes, whisper
+    -- targets) — the verb the hidden button column used to carry.
+    buttons.menu = railButton(rail, "=", function() Skin.OpenChatMenu() end)
+    buttons.menu._verb = Skin.OpenChatMenu
 
     for i, key in ipairs(RAIL_ORDER) do
         local btn = buttons[key]
@@ -1424,6 +1725,10 @@ function Skin.StyleWindow(frame, id)
         end
     end
     ensureCopyButton(frame, rec)
+    -- The column goes down BEFORE the rail is placed: the rail's own offset
+    -- reads the footprint the column leaves behind (v2.2).
+    ensureButtonColumnRig(frame, rec)
+    Skin.SyncButtonColumn(frame)
     ensureRail(frame, rec)
     ensureMoveRig(frame, rec)
     Skin.LoosenClamp(frame, rec)
@@ -1451,6 +1756,9 @@ local function restoreWindow(frame, rec)
         end
     end
     Skin._clampPending[frame] = nil
+    -- The client's button column comes back exactly as we found it (and the
+    -- client re-decides its side), so a disable leaves no trace of v2.2.
+    Skin.RestoreButtonColumn(frame, rec)
     if rec.backdrop then rec.backdrop:Hide() end
     if rec.copyBtn then rec.copyBtn:Hide() end
     if rec.rail then rec.rail:Hide() end
@@ -1487,6 +1795,9 @@ function Skin.Refresh()
     for _, frame in ipairs(Skin.order) do
         local rec = Skin.styled[frame]
         if rec then
+            -- The column first (the rail's placement depends on its
+            -- footprint), and free on a beat where it is already down.
+            Skin.SyncButtonColumn(frame)
             ensureRail(frame, rec)
             -- The client re-clamps periodically (the survey's frame-treatment
             -- note), so the loosened insets are re-asserted on every cheap
@@ -1567,6 +1878,22 @@ local function installHooks()
             if not Skin.EditBoxPersistent() then return end
             Skin.KeepEditBoxShown(editBox)
         end)
+    end
+    -- The button column's PRIMARY seam (skin v2.2): the client re-decides which
+    -- side the column belongs on — and re-shows it — on both of these. We take
+    -- it back down synchronously inside the same call, so there is no beat
+    -- where the column is visibly back. The side decision itself is never
+    -- fought: with the option off these bodies do nothing at all.
+    local function reHide(chatFrame)
+        if not Skin.HideButtonColumn() then return end
+        if type(chatFrame) ~= "table" or not Skin.styled[chatFrame] then return end
+        Skin.KeepButtonColumnHidden(chatFrame)
+    end
+    if type(_G.FCF_SetButtonSide) == "function" then
+        hook("FCF_SetButtonSide", function(chatFrame) reHide(chatFrame) end)
+    end
+    if type(_G.FCF_UpdateButtonSide) == "function" then
+        hook("FCF_UpdateButtonSide", function(chatFrame) reHide(chatFrame) end)
     end
 end
 
@@ -1670,6 +1997,10 @@ ns.RegisterDebugCommand("skin", "skin state: styled windows, config, tab inks", 
     ns:Print(("  altDragMove=%s persistentEditBox=%s unclampWindows=%s | moveMode=%s, %d move(s)")
         :format(tostring(c.altDragMove), tostring(c.persistentEditBox),
                 tostring(c.unclampWindows), tostring(Skin.moveMode), Skin.moves))
+    local menuKind = Skin.ChatMenuSeam()
+    ns:Print(("  hideButtonColumn=%s | %d column hide(s), chat menu seam '%s', %d open(s)")
+        :format(tostring(c.hideButtonColumn), Skin.columnHides,
+                tostring(menuKind or "none"), Skin.menuOpens))
     ns:Print(("  tab dim factor %.3f (token-derived), stamps showing: %s, stamp sample '%s'")
         :format(Skin.DimFactor(), tostring(Skin.StampsShowing()), Skin.StampSample()))
     for _, frame in ipairs(Skin.order) do
@@ -2151,11 +2482,11 @@ local function testCopyAndSkin(fails, verbose)
     local rail = Skin.styled[cf1].rail
     local rbtn = Skin.styled[cf1].railButtons
     ck(rail and rail._shown == true, "phase 8: turning it on builds the rail")
-    ck(rbtn and rbtn.copy and rbtn.config and rbtn.bottom,
-        "phase 8: three affordances: copy, settings, scroll-to-bottom")
+    ck(rbtn and rbtn.copy and rbtn.config and rbtn.bottom and rbtn.menu,
+        "phase 8: four affordances: copy, settings, scroll-to-bottom, chat menu")
     ck(near3(rail._backdropColor, UI.Color("panel")),
         "phase 8: the rail is a flat PANEL-token strip")
-    for _, key in ipairs({ "copy", "config", "bottom" }) do
+    for _, key in ipairs({ "copy", "config", "bottom", "menu" }) do
         local glyph = rbtn[key]._glyph
         ck(type(glyph) == "string" and glyph:match("^[\32-\126]+$") ~= nil,
             "phase 8: the '" .. key .. "' glyph is ASCII (the tofu law)")
@@ -2166,6 +2497,7 @@ local function testCopyAndSkin(fails, verbose)
     ck(rbtn.copy._verb == Skin.OpenCopy, "phase 8: copy is Skin.OpenCopy, not a new verb")
     ck(rbtn.config._verb == ns.SlashDispatch, "phase 8: settings is the /dchat dispatcher itself")
     ck(rbtn.bottom._verb == cf1.ScrollToBottom, "phase 8: scroll-to-bottom is the CLIENT's own frame method")
+    ck(rbtn.menu._verb == Skin.OpenChatMenu, "phase 8: the menu button holds the chat-menu verb itself")
     Sim.ResetCalls()
     rbtn.bottom:GetScript("OnClick")(rbtn.bottom)
     ck(Sim.CallCount("ScrollToBottom") == 1, "phase 8: clicking it calls the client verb exactly once")
@@ -2247,6 +2579,13 @@ local function testMoveAndEditBox(fails, verbose)
         if fn then fn(frame) end
     end
     local savedAlt = Sim.altDown
+    -- v2.2: the client's button column is the OTHER thing that can hold a drag
+    -- off the screen edge, and it has its own phases (B1..B7). Take it out of
+    -- the picture here so every assertion below can only be about the CLAMP —
+    -- and so this suite reads the same whichever way the column option ships.
+    local savedColumn = ns.db.skin.hideButtonColumn
+    ns.db.skin.hideButtonColumn = true
+    Skin.Refresh()
 
     -- ── Phase M1: the rig exists, and an UNMODIFIED drag is never intercepted ─
     ck(rec1 and rec1.moveRig == true, "M1: the styled window carries a move rig")
@@ -2469,7 +2808,258 @@ local function testMoveAndEditBox(fails, verbose)
 
     -- ── OUT: back to the world the suites after us expect ───────────────────
     ns.SetModuleEnabled("skin", true)
+    ns.db.skin.hideButtonColumn = savedColumn
     Skin.moveMode = false
+    _G.FCF_ResetChatWindows()
+    for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do _G.FloatingChatFrame_Update(id) end
+    for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do
+        local f = Sim.Frame(id)
+        f._left, f._bottom = 32, 32
+    end
+    _G.FCF_SelectDockFrame(cf1)
+    Skin.Refresh()
+    HT.flush()
+    Sim.ResetCalls()
+end
+
+-- skin v2.2: the chat BUTTON COLUMN — the client's own column, its side flip,
+-- its share of the drag footprint, our keep-it-down seam, the chat-menu verb
+-- in both the rail-on and rail-off worlds, and the option-off native world.
+local function testButtonColumn(fails, verbose)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Sim = _G.__DaseekiChatSim
+    local UI  = UIKit()
+    if not (Sim and UI) then return end
+    local HT  = _G.__DaseekiChatHarnessTimer
+    local C   = ns.Config
+
+    local cf1 = _G.ChatFrame1
+    local rec1 = Skin.styled[cf1]
+    local eb1 = editBoxOf(cf1)
+    local function fireDrag(frame, script)
+        local fn = frame:GetScript(script)
+        if fn then fn(frame) end
+    end
+    local savedAlt, savedLeft, savedBottom = Sim.altDown, cf1._left, cf1._bottom
+
+    -- ── Phase B1: THE MECHANICS — the column, both shapes, and its side ──────
+    ck(ns.DEFAULTS.skin.hideButtonColumn == true,
+        "B1: the column ships DOWN (the reference look the owner chose)")
+    local bf = Skin.ButtonColumnOf(cf1)
+    ck(bf ~= nil, "B1: the window's button column is found")
+    ck(bf == cf1.buttonFrame and bf == _G.ChatFrame1ButtonFrame,
+        "B1: …through BOTH client shapes (the frame's own field and the global)")
+    ns.db.skin.hideButtonColumn = true
+    Skin.Refresh()
+    ck(bf._shown == false, "B1: with the option on the column is down")
+
+    -- Option OFF puts the client's own world back, side-flip and all.
+    ns.db.skin.hideButtonColumn = false
+    Skin.Refresh()
+    ck(bf._shown == true, "B1: option OFF gives the client its column back")
+    cf1._left = 400
+    _G.FCF_UpdateButtonSide(cf1)
+    ck(Skin.ButtonColumnSide(cf1) == "left",
+        "B1: a window with room on its left wears the column on the LEFT (account 1)")
+    local fl, fr = Skin.ColumnFootprint(cf1)
+    ck(fl == Sim.BUTTON_FRAME_WIDTH and fr == 0,
+        "B1: …and that column costs the window's left side its own width")
+    cf1._left = 0
+    _G.FCF_UpdateButtonSide(cf1)
+    ck(Skin.ButtonColumnSide(cf1) == "right",
+        "B1: THE ACCOUNT DIFFERENCE — flush left, the CLIENT flips the column RIGHT (account 2)")
+    fl, fr = Skin.ColumnFootprint(cf1)
+    ck(fl == 0 and fr == Sim.BUTTON_FRAME_WIDTH,
+        "B1: …and the cost moves to the right with it")
+
+    -- ── Phase B2: THE RED CONTROL — the column is what blocks flush ──────────
+    -- The clamp is already loosened here, so the ONLY thing left holding the
+    -- drag off the edge is the column itself.
+    ns.db.skin.unclampWindows = true
+    cf1._left, cf1._bottom = 400, 300
+    _G.FCF_UpdateButtonSide(cf1)                 -- column on the left, shown
+    Sim.altDown = true
+    fireDrag(cf1, "OnDragStart")
+    local bx, by = Sim.DragTo(cf1, -80, -80)
+    ck(bx == Sim.BUTTON_FRAME_WIDTH,
+        "B2: THE SYMPTOM — with the column shown the drag stops exactly its width short")
+    ck(by == 0, "B2: …and only horizontally: the loosened clamp still reaches the bottom")
+    fireDrag(cf1, "OnDragStop")
+
+    ns.db.skin.hideButtonColumn = true
+    Skin.Refresh()
+    ck(bf._shown == false, "B2: turning the option on takes the column down")
+    ck(select(1, Skin.ColumnFootprint(cf1)) == 0,
+        "B2: …so it costs the window's placement nothing")
+    fireDrag(cf1, "OnDragStart")
+    local fx, fy = Sim.DragTo(cf1, -80, -80)
+    ck(fx == 0 and fy == 0,
+        "B2: THE FIX — the very same drag now lands FLUSH in the corner")
+    fireDrag(cf1, "OnDragStop")
+    ck(cf1:IsClampedToScreen() == true, "B2: …and the window is still clamped ON screen")
+    -- The drop is exactly where the client re-decides the side and re-shows.
+    ck(Skin.ButtonColumnSide(cf1) == "right",
+        "B2: the client DID flip the side on the drop (its rule is untouched)")
+    ck(bf._shown == false, "B2: …and the column still came back down, in-call")
+
+    -- ── Phase B3: KEEP-HIDDEN, against every client re-show, latch-clean ─────
+    Sim.ResetCalls()
+    local hidesBefore = Skin.columnHides
+    _G.FloatingChatFrame_Update(1)
+    ck(bf._shown == false, "B3: the client's own window update did not get the column back")
+    ck(Skin.columnHides == hidesBefore + 1,
+        "B3: …and it cost exactly ONE hide, not one per hooked function")
+    ck(Skin._bfDepth == 0, "B3: the re-entrancy latch is back at rest")
+    _G.FCF_DockUpdate()
+    ck(bf._shown == false, "B3: the dock update did not either")
+    ck(Skin._bfDepth == 0, "B3: …and the latch is still clean")
+
+    -- The OBJECT path: a show from nowhere in particular (Class 2).
+    local hidesObj = Skin.columnHides
+    bf:Show()
+    ck(bf._shown == true, "B3: we do NOT re-hide from inside the client's show handler")
+    HT.advance(0)
+    ck(bf._shown == false, "B3: …the OnShow watch put it back down one beat later")
+    ck(Skin.columnHides == hidesObj + 1, "B3: …at the cost of exactly one hide")
+    ck(Skin._bfDepth == 0, "B3: the latch is released after the deferred re-hide")
+
+    -- NEVER A FIGHT LOOP: an idle beat over a column already down is free.
+    local idleHides = Skin.columnHides
+    for _ = 1, 5 do Skin.Refresh() end
+    HT.flush()
+    ck(Skin.columnHides == idleHides,
+        "B3: five idle re-evaluation beats cost ZERO client calls (no fight loop)")
+
+    -- ── Phase B4: THE MENU VERB — the one thing the column owned ────────────
+    local kind, verb, subject = Skin.ChatMenuSeam()
+    ck(kind == "toggle", "B4: the seam this client offers is the menu-frame toggle")
+    ck(verb == _G.ToggleFrame, "B4: CALL IDENTITY — we hold the CLIENT's own ToggleFrame")
+    ck(subject == _G.ChatMenu, "B4: …and the CLIENT's own chat menu frame")
+
+    -- The rail world (opt-in).
+    ns.db.skin.iconRail = true
+    Skin.Refresh()
+    local rbtn = rec1.railButtons
+    ck(rbtn and rbtn.menu ~= nil, "B4: the rail carries the chat-menu verb")
+    -- THE WIDTH MATH: the rail's own placement reads the footprint, so a
+    -- removed column really is removed from what the skin lays out around.
+    cf1._left = 400
+    _G.FCF_UpdateButtonSide(cf1)
+    Skin.Refresh()
+    ck(rec1.rail._points[1][4] == -(PAD + RAIL_GAP),
+        "B4: with the column down the rail sits right against the window")
+    ns.db.skin.hideButtonColumn = false
+    Skin.Refresh()
+    ck(rec1.rail._points[1][4] == -(PAD + RAIL_GAP + Sim.BUTTON_FRAME_WIDTH),
+        "B4: with the column up it clears the column instead of sitting on it")
+    ns.db.skin.hideButtonColumn = true
+    Skin.Refresh()
+    _G.ChatMenu:Hide()
+    Sim.ResetCalls()
+    local opensBefore = Skin.menuOpens
+    rbtn.menu:GetScript("OnClick")(rbtn.menu)
+    ck(_G.ChatMenu._shown == true, "B4: clicking it opens the CLIENT's chat menu")
+    ck(Sim.CallCount("ToggleFrame") == 1, "B4: …with exactly one client call")
+    ck(Sim.CallCount("CreateFrame") == 0, "B4: …and nothing built behind it")
+    ck(Skin.menuOpens == opensBefore + 1, "B4: the open was counted")
+    rbtn.menu:GetScript("OnClick")(rbtn.menu)
+    ck(_G.ChatMenu._shown == false, "B4: clicking again closes it (the client's own toggle)")
+
+    -- THE RAIL IS OFF BY DEFAULT, so the resting bar's PREFIX answers too.
+    ns.db.skin.iconRail = false
+    Skin.Refresh()
+    ck(rec1.rail._shown == false, "B4: back in the default world the rail is away")
+    ck(eb1 ~= nil and eb1._shown == true, "B4: …and the persistent bar is the surface at hand")
+    local mouse = eb1:GetScript("OnMouseDown")
+    ck(type(mouse) == "function", "B4: the bar answers a mouse-down")
+    Sim.SetCursorAt(eb1.header, 5, 5)             -- over the prefix
+    ck(Skin.OverPrefix(eb1) == true, "B4: the pointer is measured onto the prefix region")
+    local opens2 = Skin.menuOpens
+    mouse(eb1, "LeftButton")
+    ck(Skin.menuOpens == opens2 and _G.ChatMenu._shown == false,
+        "B4: an UNMODIFIED click is never intercepted (typing still just works)")
+    mouse(eb1, "RightButton")
+    ck(_G.ChatMenu._shown == true and Skin.menuOpens == opens2 + 1,
+        "B4: THE FALLBACK — right-clicking the prefix opens the same client menu")
+    _G.ChatMenu:Hide()
+    Sim.SetCursorAt(eb1, 300, 5)                  -- past the prefix, in the text
+    ck(Skin.OverPrefix(eb1) == false, "B4: a pointer past the prefix is not on it")
+    local opens3 = Skin.menuOpens
+    mouse(eb1, "RightButton")
+    ck(Skin.menuOpens == opens3 and _G.ChatMenu._shown == false,
+        "B4: …and a right-click there is left exactly as native")
+
+    -- The DEFENDED SHAPE: a client that does not name the menu frame still has
+    -- the button that performs the verb.
+    local savedMenu = _G.ChatMenu
+    _G.ChatMenu = nil
+    local kind2, verb2, subject2 = Skin.ChatMenuSeam()
+    ck(kind2 == "button", "B4: without the menu frame the seam falls back to the client's button")
+    ck(verb2 == _G.ChatFrameMenuButton.Click and subject2 == _G.ChatFrameMenuButton,
+        "B4: CALL IDENTITY — that is the CLIENT's own button and its own Click")
+    Sim.ResetCalls()
+    ck(Skin.OpenChatMenu() == "button", "B4: …and the verb goes through it")
+    ck(Sim.CallCount("widget:Click") == 1, "B4: …exactly once")
+    _G.ChatMenu = savedMenu
+
+    -- ── Phase B5: OPTION OFF = the client's own world, byte for byte ────────
+    ns.db.skin.hideButtonColumn = false
+    Skin.Refresh()
+    ck(bf._shown == true, "B5: the column is back up the moment the option goes off")
+    Sim.ResetCalls()
+    local hidesOff = Skin.columnHides
+    _G.FloatingChatFrame_Update(1)
+    _G.FCF_DockUpdate()
+    bf:Show()
+    HT.advance(0)
+    ck(bf._shown == true, "B5: nothing of ours touches it — the client's column stands")
+    ck(Skin.columnHides == hidesOff, "B5: …we hid it exactly zero times")
+    ck(Sim.CallCount("FCF_UpdateButtonSide") == 1 + (_G.NUM_CHAT_WINDOWS or 10),
+        "B5: exactly the CLIENT's own side updates ran — we added none")
+    cf1._left = 0
+    _G.FloatingChatFrame_Update(1)
+    ck(Skin.ButtonColumnSide(cf1) == "right" and bf._shown == true,
+        "B5: and the client's own side-flipping is untouched")
+
+    -- ── Phase B6: THE CAPTURE READS THE WINDOW, NOT THE COLUMN ──────────────
+    cf1._left, cf1._bottom = 320, 240
+    _G.FCF_UpdateButtonSide(cf1)                  -- column on the left, shown
+    ck(bf:GetLeft() < cf1:GetLeft(),
+        "B6: the shown column really does hang outside the window's corner")
+    local npShown = C.CaptureNormalizedPos(1)
+    local uiW, uiH, uiScale = C.ScreenGeometry()
+    local fs = cf1:GetEffectiveScale()
+    local colFx = C.Normalize(bf:GetLeft() * fs, cf1:GetBottom() * fs, uiW * uiScale, uiH * uiScale)
+    ck(npShown and math.abs(npShown[2] - colFx) > C.NPOS_EPSILON,
+        "B6: RED CONTROL — a column-inclusive read would answer a DIFFERENT number")
+    ns.db.skin.hideButtonColumn = true
+    Skin.Refresh()
+    ck(bf._shown == false, "B6: the column goes down")
+    local npHidden = C.CaptureNormalizedPos(1)
+    ck(npHidden and npShown and npHidden[1] == npShown[1]
+        and npHidden[2] == npShown[2] and npHidden[3] == npShown[3],
+        "B6: …and the stored position does not move by a single digit")
+
+    -- ── Phase B7: disable hands the client's column back ────────────────────
+    ns.SetModuleEnabled("skin", false)
+    ck(bf._shown == true, "B7: a column we took down is given back on disable")
+    ck(rec1.bfForcedHidden == nil, "B7: …and we stop claiming it")
+    ns.SetModuleEnabled("skin", true)
+    ck(bf._shown == false, "B7: re-enabling takes it down again")
+    -- A column the CLIENT already had down before us is never resurrected: the
+    -- restore hands back what was there, not a blanket Show.
+    rec1.bfForcedHidden, rec1.bfWasShown = true, false
+    ck(Skin.RestoreButtonColumn(cf1, rec1) == false and bf._shown == false,
+        "B7: a column that was already down before us stays down")
+    rec1.bfForcedHidden, rec1.bfWasShown = true, true
+
+    -- ── OUT: back to the world the suites after us expect ───────────────────
+    Sim.altDown = savedAlt
+    Sim.cursor = { 0, 0 }
+    _G.ChatMenu:Hide()
+    ns.db.skin.iconRail = false
+    ns.db.skin.hideButtonColumn = true
+    cf1._left, cf1._bottom = savedLeft, savedBottom
     _G.FCF_ResetChatWindows()
     for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do _G.FloatingChatFrame_Update(id) end
     for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do
@@ -2492,6 +3082,8 @@ ns:RegisterSelfTest("skin", function(verbose)
     if not ok then fails[#fails + 1] = "live error: " .. tostring(err) end
     ok, err = pcall(testMoveAndEditBox, fails, verbose)
     if not ok then fails[#fails + 1] = "move/editbox error: " .. tostring(err) end
+    ok, err = pcall(testButtonColumn, fails, verbose)
+    if not ok then fails[#fails + 1] = "button-column error: " .. tostring(err) end
     for _, f in ipairs(fails) do ns:Print("  FAIL skin :: " .. f) end
     if #fails == 0 and verbose then ns:Print("  PASS skin") end
     return #fails == 0

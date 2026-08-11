@@ -60,6 +60,18 @@ This entry accumulates until 1.0.0 ships. Foundation so far:
   (they stay on screen, they just stop being fenced off it). On by default,
   re-applied whenever the game re-imposes it, and postponed out of combat when
   the game refuses the change.
+- **The little button column beside each chat window is gone.** On by default:
+  the game's own chat-menu and scroll-button strip — the small square column
+  that sits on the left of your chat window on one account and on the right on
+  another, because the game moves it depending on where the window is — is
+  hidden and stays hidden. It was also the last thing stopping a window from
+  being dragged flush to the screen edge: its width has to fit on screen too,
+  so it ate the final stretch even after the edge margin was loosened. Nothing
+  is lost: the jump-to-newest button lives on the icon rail, the input bar
+  already shows the channel you are about to talk in, and the game's chat menu
+  (languages, emotes, whisper targets) is still one click away — on the icon
+  rail, or by right-clicking the channel label on the input bar. Turn the
+  option off and the game's column comes straight back, side-switching and all.
 - **`/dchat debug position`** prints everything that decides where a window
   lands: the scale chain, the screen's size in both units and pixels, the clamp
   state and margins, the game's saved position, the live position, and the saved
@@ -70,4 +82,6 @@ This entry accumulates until 1.0.0 ships. Foundation so far:
   uptime stamps, GUID-carrying era message events, the edit box's sticky-channel
   header beat, real frame geometry with a clamped drag and an unclamped
   programmatic placement, a drivable UI scale, the edit box's own show/hide
-  machinery under both chat styles, and call counting throughout.
+  machinery under both chat styles, the per-window button column with the
+  game's own side-flipping and its share of the drag footprint, a real pointer,
+  and call counting throughout.
