@@ -288,7 +288,12 @@ assert(loadfile(H("corestub.lua")), "corestub.lua failed to compile")()
 -- pin "disabled module = zero hooks" against a full login. The skin suite
 -- enables it itself (phase 1) and leaves it enabled.
 ----------------------------------------------------------------------
-_G.DaseekiChatDB = { modules = { skin = false } }
+_G.DaseekiChatDB = { modules = { skin = false,
+    -- w2/pipeline suites: the pipeline modules also start disabled so the
+    -- inertness gate pins them against a full login; each suite enables its
+    -- own module (the skin precedent).
+    decor = false, stamps = false, names = false, urls = false,
+} }
 
 ----------------------------------------------------------------------
 -- ns namespace + suite-registration sentinel (Bags precedent: intercept the
@@ -380,8 +385,37 @@ do
     ck(Sim.CallCount("SetFading") == 0, "no chat frame's fading was touched")
     ck(ns.EventHandlerCount() == 4,
         "only core's 4 lifecycle events are registered (got " .. ns.EventHandlerCount() .. ")")
-    ck(#ns.ModuleOrder == 1 and ns.ModuleOrder[1] == "skin",
-        "exactly one module (skin) is registered in Wave 1")
+    -- Every registered module must be in KNOWN_MODULES AND flagged disabled
+    -- in the SavedVariables preset above, or this gate is hollow. Wave agents
+    -- append their names inside their own marked block; the count derives
+    -- from the set so the blocks union-merge mechanically.
+    local KNOWN_MODULES = { skin = true }
+    -- w2/pipeline suites: pipeline modules registered in Wave 2
+    KNOWN_MODULES.decor, KNOWN_MODULES.stamps, KNOWN_MODULES.names, KNOWN_MODULES.urls =
+        true, true, true, true
+    -- end w2/pipeline suites
+    local knownCount = 0
+    for _ in pairs(KNOWN_MODULES) do knownCount = knownCount + 1 end
+    ck(#ns.ModuleOrder == knownCount,
+        "exactly " .. knownCount .. " known modules are registered (got " .. #ns.ModuleOrder .. ")")
+    for _, name in ipairs(ns.ModuleOrder) do
+        ck(KNOWN_MODULES[name], "module '" .. name .. "' is in KNOWN_MODULES")
+    end
+    -- w2/pipeline suites: disabled-is-inert pins for the pipeline modules
+    -- (the skin pattern: a module that never enabled has touched NOTHING).
+    ck(ns.Decor and ns.Decor.active == false, "decor is inactive")
+    ck(ns.Decor and ns.Decor.SeamCount() == 0, "decor installed ZERO AddMessage seams")
+    ck(ns.Decor and ns.Decor.hooked == false, "decor installed no temp-window hook")
+    ck(ns.Stamps and ns.Stamps.active == false, "stamps is inactive")
+    ck(ns.Names and ns.Names.active == false, "names is inactive")
+    ck(ns.Names and next(ns.Names.cache) == nil, "names cached nothing while disabled")
+    ck(_G.GetCVar("chatClassColorOverride") == "1",
+        "the hostile chatClassColorOverride default is UNTOUCHED while names is disabled")
+    ck(_G.GetCVar("showTimestamps") == "none",
+        "the showTimestamps CVar is untouched while stamps is disabled")
+    ck(ns.Urls and ns.Urls.active == false, "urls is inactive")
+    ck(ns.Urls and ns.Urls.hookedItemRef == false, "urls left SetItemRef untouched")
+    -- end w2/pipeline suites
     local styledAny = false
     for i = 1, 10 do
         local f = Sim.Frame(i)
@@ -582,8 +616,10 @@ realprint("")
 ----------------------------------------------------------------------
 local PLACEHOLDER_KEYS = {
     Config = "config.lua", Reconcile = "reconcile.lua", Channels = "channels.lua",
-    Decor = "decor.lua", Stamps = "stamps.lua", Names = "names.lua",
-    Urls = "urls.lua", History = "history.lua", Badges = "badges.lua",
+    -- w2/pipeline suites: Decor/Stamps/Names/Urls graduated from placeholders
+    -- (decor.lua, stamps.lua, names.lua, urls.lua are real; their own suites
+    -- pin their behavior).
+    History = "history.lua", Badges = "badges.lua",
     Nexus = "nexus.lua",
 }
 
@@ -613,7 +649,10 @@ end)
 -- never registers reads as ALL PASS to a runner that only iterates what
 -- registered).
 ----------------------------------------------------------------------
-local EXPECTED_SUITES = { "core", "skin", "placeholders" }
+local EXPECTED_SUITES = { "core", "skin", "placeholders",
+    -- w2/pipeline suites
+    "decor", "stamps", "names", "urls",
+}
 
 realprint("=== expected-suite roster (" .. #EXPECTED_SUITES .. " suites) ===")
 local rosterPass, gotCount = true, 0
