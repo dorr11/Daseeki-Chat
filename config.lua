@@ -1234,6 +1234,39 @@ local function testNormalizedPositions(fails)
     ck(Config.WindowDiffers(nil, cfgW) == false,
         "WindowDiffers: no capture at all is not a deletion")
 
+    -- ── THE EDGE, EXACTLY (bounce suspect c) ────────────────────────────────
+    -- A flush-left window is npos x = 0, and 0 is the one number a position
+    -- pipeline is most likely to fumble: Lua's 0 is truthy (Class 5), a
+    -- rounding step can push it to 1e-17, and a tolerance can either mistake it
+    -- for drift or mistake real drift for it. Every step of the round trip is
+    -- pinned at exactly 0 and at a hair off it, because "it always bounces
+    -- back" would look identical whichever of those went wrong.
+    local SW, SH, SC = 1920, 1080, 1.0
+    local fx, fy = Config.Normalize(0, 0, SW, SH)
+    ck(fx == 0 and fy == 0,
+        "npos@0: a corner AT the screen edge normalizes to exactly 0, not to nil and not to noise")
+    local ox, oy = Config.Denormalize(0, 0, SW / SC, SH / SC, SC, SC)
+    ck(ox == 0 and oy == 0, "npos@0: …and denormalizes straight back to 0")
+    -- Through a non-1 scale chain, both ways, still exact.
+    local fx2 = Config.Normalize(0, 0, SW, SH)
+    local ox2 = Config.Denormalize(fx2, 0, SW / 0.65, SH / 0.65, 0.65, 0.65)
+    ck(ox2 == 0, "npos@0: exact through a 0.65 scale chain too (no epsilon creep inward)")
+    -- A hair off zero survives as a hair off zero.
+    local fxTiny = Config.Normalize(0.001 * SW, 0, SW, SH)
+    ck(math.abs(fxTiny - 0.001) < 1e-9, "npos@0.001: a hair off the edge round-trips as itself")
+    ck(math.abs(Config.Denormalize(0.001, 0, SW, SH, 1, 1) - 0.001 * SW) < 1e-6,
+        "npos@0.001: …and back out to the same pixel")
+    -- THE TOLERANCE, at the edge, in BOTH directions.
+    ck(Config.NearPos({ "BOTTOMLEFT", 0, 0 }, { "BOTTOMLEFT", 0.001, 0 }) == true,
+        "npos@0: a stored near-0 and a live 0 ARE the same position (never nudged inward)")
+    ck(Config.NearPos({ "BOTTOMLEFT", 0, 0 }, { "BOTTOMLEFT", 0.01, 0 }) == false,
+        "npos@0: RED CONTROL — a real 1%-of-screen gap is still a real difference")
+    ck(Config.WindowDiffers({ name = "W", npos = { "BOTTOMLEFT", 0, 0 } },
+                            { name = "W", npos = { "BOTTOMLEFT", 0.001, 0 } }) == false,
+        "npos@0: …so a snapped flush drop never rev-bumps against a near-0 stored corner")
+    ck(Config.Normalize(0, 0, 0, SH) == nil,
+        "npos@0: a zero SCREEN is refused outright (0 is a truthy lie, Class 5)")
+
     -- ── WIRE-COMPAT: additive, both fields, old shapes still read ────────────
     local c = Config.Get()
     local savedWindows, savedRev, savedAt = c.windows, c.rev, c.at

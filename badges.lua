@@ -678,7 +678,13 @@ local function testLive(fails, verbose)
     ck(w3.holder._parent == tab, "phase 8: the badge anchors to the tab as its own child")
     ck(tab.Text._textColor == nil,
         "phase 8: badges never inked the tab's own text (that is skin's)")
-    ck(tab._alpha == 1, "phase 8: badges never touched the tab's alpha (that is skin's)")
+    -- The tab's alpha is the CLIENT's answer (noMouseAlpha / mouseOverAlpha,
+    -- which the client's own updater picks between) or skin's pin over it —
+    -- never ours. Pinned against the client's own computation rather than a
+    -- literal 1, because the client actively fades an unfocused tab.
+    ck(tab._alpha == (tab._mouseOver and tab.mouseOverAlpha or tab.noMouseAlpha)
+        or tab._alpha == 1,
+        "phase 8: badges never touched the tab's alpha (that is skin's)")
 
     -- ── Phase 9: temporary windows rig on open. ──────────────────────────────
     local temp = _G.FCF_OpenTemporaryWindow("WHISPER", "Puu")

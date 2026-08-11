@@ -188,6 +188,49 @@ This entry accumulates until 1.0.0 ships. Foundation so far:
   state and margins, the game's saved position, the live position, and the saved
   fraction. Run it on two accounts and the diff names whatever differs between
   them.
+- **A window you drag to the edge stays at the edge.** Dropping a window flush
+  against the screen no longer has it walk back inward a moment later. Two
+  separate things were putting it back and both are fixed: the game rewrites the
+  margin it fences windows away from the edge with every time it re-decides
+  which side the little button column belongs on, and it re-places a window from
+  its own saved position on its own beats — a position an ALT-drag had never
+  told it about. Now the loosened margin is retaken inside the very same call
+  the game rewrites it in (deferred and replayed if you are in combat), and a
+  drop is committed through the game's own save so its next tidy-up agrees with
+  where you actually put the window.
+- **Snap to edges when dragging.** On by default. Drop a chat window near a
+  screen edge, a screen centre line or another chat window's edge and it lands
+  *on* it exactly — including flush at the very edge, which is what "align it
+  with the left of my screen" was always asking for. While you drag, a thin
+  accent line shows the boundary it is about to line up with, and it disappears
+  the moment you let go. The drag itself is untouched and stays as smooth as the
+  game's own; only the landing is corrected. Turn it off in the settings page
+  and a near-miss stays a near-miss.
+- **Every way of moving a window now reaches the shared configuration.** Moving
+  a window by dragging its tab — the game's own way, which Chat deliberately
+  never took away — is captured back exactly like an ALT-drag, as is dropping a
+  tab onto the dock or tearing one off it. Previously a move the configuration
+  never learned about would simply be undone by the next reconcile.
+- **`/dchat debug reconcile` now opens with a one-line verdict**: *last position
+  change: user move captured @…* or *drift corrected to config @…*. If a window
+  ever moves when you did not move it, that line names who did it, and the trace
+  below says which window and from where to where.
+- **The chat tabs stop fading.** In the one box, the tab strip no longer dims
+  when the pointer is elsewhere. Turning message fading off had never covered
+  this: the game fades a chat *tab* with a completely separate mechanism from
+  the one that fades chat *text*. Chat now neutralises that mechanism and holds
+  the last word against it — at no cost when nothing has changed — and hands it
+  straight back the moment the box is turned off or the module is disabled.
+- **Thinner tabs and input bar, and no more dead margin beside the text.** The
+  tab strip and the input row are snug around what they actually contain
+  (the strip is 26 units tall instead of 35, the input row 26 instead of 36),
+  and the empty panel between the message text and the left and right edges of
+  the box is gone. Unread-count pips still sit centred in the thinner tab.
+- **The feed breathes.** Messages are set at the design's own size with the
+  spacing its line height asks for, computed from whatever size is in force
+  rather than frozen at one number, so lines no longer touch. Both are settings;
+  putting the size back to 0 hands the game's own right-click *Font size* menu
+  the authority again, exactly as before.
 - The headless harness with the unkind chat simulator: the 10-window client
   model, async server-gated channel joins, mutable per-frame ring buffers with
   uptime stamps, GUID-carrying era message events, the edit box's sticky-channel
@@ -198,4 +241,11 @@ This entry accumulates until 1.0.0 ships. Foundation so far:
   (including a hit test that answers whether a click reaches through a disabled
   frame to what is behind it), a recording model of the Daseeki settings hub so
   the settings page is really built and every control really driven under test,
-  and call counting throughout.
+  and call counting throughout. It now also models the things that made the two
+  live defects above invisible headless: a client that actively fades tabs on
+  its own beat, a clamp margin the client rewrites and then enforces on its next
+  layout pass, a saved position the client restores from without being asked,
+  and a native tab-drop in two postures — one that passes through the obvious
+  hookable names and one that does the same work through the client's own
+  internal references, so a capture layer that bets on the obvious names fails
+  the test instead of the player.
