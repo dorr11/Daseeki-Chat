@@ -188,10 +188,35 @@ function Reconcile.NotePositionChange(kind, why, detail)
     return Reconcile.lastPositionChange
 end
 
+-- The SIZE ledger, kept separate from the position one on purpose: "it moved"
+-- and "it changed shape" are two different complaints, and a verdict line that
+-- blurred them would answer neither. Same two kinds, same words.
+function Reconcile.NoteSizeChange(kind, why, detail)
+    Reconcile.lastSizeChange = {
+        kind   = (kind == "user") and "user" or "drift",
+        why    = tostring(why or "?"),
+        detail = detail and tostring(detail) or nil,
+        at     = (ns.Config and ns.Config.Now and ns.Config.Now()) or 0,
+        build  = ns.VERSION,
+    }
+    return Reconcile.lastSizeChange
+end
+
 -- The one-line verdict. Deliberately phrased so the two answers cannot be
--- confused for each other at a glance.
+-- confused for each other at a glance. Since the view grew a resize grip, the
+-- line covers BOTH gestures — a player who asks "why is my chat box like this"
+-- gets one answer that names whichever of the two last happened.
 function Reconcile.PositionVerdict()
     local e = Reconcile.lastPositionChange
+    local s = Reconcile.lastSizeChange
+    -- Whichever is NEWER is the one that explains what the player is looking at.
+    if s and (not e or (tonumber(s.at) or 0) >= (tonumber(e.at) or 0)) then
+        local head = (s.kind == "user")
+            and "last position change: user resize captured"
+            or  "last position change: size drift corrected to config"
+        return ("%s @ %s (%s%s)"):format(head, tostring(s.at), s.why,
+            s.detail and (" | " .. s.detail) or "")
+    end
     if not e then
         return "last position change: none this session (nothing has moved a window)"
     end
@@ -217,6 +242,23 @@ local function positionFingerprint()
     return out
 end
 
+-- …and the same snapshot for the stored SIZE, so a resize drop is as visible to
+-- the ledger as a move drop is.
+local function sizeFingerprint()
+    local C = ns.Config
+    local c = C and C.Get() or nil
+    local out = {}
+    local w = (type(c) == "table" and type(c.windows) == "table") and c.windows or {}
+    for id = 1, numWindows() do
+        local e = w[id]
+        local d = (type(e) == "table") and e.ndim or nil
+        out[id] = (type(d) == "table")
+            and ("%.3fx%.3f"):format(tonumber(d[1]) or 0, tonumber(d[2]) or 0)
+            or "none"
+    end
+    return out
+end
+
 -- The FIRST window whose corner the capture actually changed (deterministic:
 -- lowest id, never a pairs() lottery — Class 8), or nil when none did.
 local function firstMovedWindow(before)
@@ -224,6 +266,17 @@ local function firstMovedWindow(before)
     for id = 1, numWindows() do
         if before[id] ~= after[id] then
             return ("window %d npos %s -> %s"):format(id, tostring(before[id]),
+                tostring(after[id]))
+        end
+    end
+    return nil
+end
+
+local function firstResizedWindow(before)
+    local after = sizeFingerprint()
+    for id = 1, numWindows() do
+        if before[id] ~= after[id] then
+            return ("window %d ndim %s -> %s"):format(id, tostring(before[id]),
                 tostring(after[id]))
         end
     end
@@ -241,16 +294,25 @@ function Reconcile.ScheduleCapture(why)
         local C = ns.Config
         if not (C and C.CaptureBack) then return end
         local before = positionFingerprint()
+        local beforeSize = sizeFingerprint()
         local changed = C.CaptureBack(Reconcile._pendingWhy)
         if changed then
             Reconcile.stats.captures = Reconcile.stats.captures + 1
             local moved = firstMovedWindow(before)
+            local resized = firstResizedWindow(beforeSize)
             local line = Reconcile._pendingWhy .. " -> rev " .. tostring(C.Rev())
             if moved then
                 -- Named distinctly from the reconciler's own corrections below:
                 -- a bounce report reads one of these two phrases and stops.
                 line = "captured user move: " .. moved .. " (via " .. line .. ")"
                 Reconcile.NotePositionChange("user", Reconcile._pendingWhy, moved)
+            end
+            if resized then
+                -- A resize drop is its own fact and gets its own phrase, so the
+                -- verdict line can say "user resize captured" rather than
+                -- filing a shape change under "it moved".
+                line = "captured user resize: " .. resized .. " (via " .. line .. ")"
+                Reconcile.NoteSizeChange("user", Reconcile._pendingWhy, resized)
             end
             Reconcile.Trace({ gate = "capture", changed = { line } })
         end
@@ -397,6 +459,14 @@ function Reconcile.ConvergeWindows(cfg)
     -- frames exist and where the dock sits, and only then does the normalized
     -- placement have a stable world to write into. Runs unconditionally —
     -- a window can drift in position without any store field changing.
+    -- SIZE FIRST, THEN POSITION. A window's stored corner is its BOTTOM-LEFT,
+    -- so resizing after placing would leave the corner where it was and move
+    -- the other two edges — which is right — but the view's chassis is derived
+    -- from the engine window's size, so placing last is what makes one Layout
+    -- pass see both facts settled.
+    for _, s in ipairs(Reconcile.ApplySizes(cfg)) do
+        changed[#changed + 1] = s
+    end
     for _, p in ipairs(Reconcile.ApplyPositions(cfg)) do
         changed[#changed + 1] = p
     end
@@ -433,7 +503,21 @@ function Reconcile.PlaceableWindow(id, want)
     if type(frame) ~= "table" then return nil end
     local docked = type(want) == "table" and want.docked or nil
     if docked and docked ~= 0 and frame ~= dockPrimary() then return nil end
-    if type(frame.IsShown) == "function" then
+    -- A HIDDEN window is left alone — UNLESS the view is the one holding it
+    -- down. That distinction is the whole of the D2 revision: the view hides the
+    -- engine's FRAMES as a display act while the store still says they are
+    -- shown, so "not shown" here would mean "the reconciler stops replaying
+    -- positions and sizes the moment the owned view is switched on" — a synced
+    -- layout that silently never materializes, which is precisely the flagship
+    -- capability. The view publishes the predicate; nothing here reaches inside
+    -- it.
+    local V = ns.View
+    local heldByView = false
+    if V and V.active and type(V.HoldsEngine) == "function" then
+        local okV, held = pcall(V.HoldsEngine, frame)
+        heldByView = (okV and held) and true or false
+    end
+    if not heldByView and type(frame.IsShown) == "function" then
         local ok, shown = pcall(frame.IsShown, frame)
         if ok and not shown then return nil end
     end
@@ -463,6 +547,67 @@ function Reconcile.PlacePoint(frame, npos)
         frame:ClearAllPoints()
         frame:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", ox, oy)
     end)
+end
+
+-- Apply one normalized SIZE. The mirror image of PlacePoint: the fraction is
+-- denormalized into THIS account's units (through the frame's own scale, the
+-- Class 3 discipline) and written with SetSize inside SelfWrite, so the write
+-- is the reconciler's own echo and never reads back as a player edit.
+function Reconcile.SizeFrame(frame, ndim)
+    local C = ns.Config
+    if not (C and type(ndim) == "table") then return false end
+    local uiW, uiH, uiScale = C.ScreenGeometry()
+    if not uiW then return false end                    -- world not laid out: no guess
+    local fs = uiScale
+    if type(frame.GetEffectiveScale) == "function" then
+        local ok, v = pcall(frame.GetEffectiveScale, frame)
+        if ok and type(v) == "number" and v > 0 then fs = v end
+    end
+    local w, h = C.Denormalize(tonumber(ndim[1]), tonumber(ndim[2]), uiW, uiH, uiScale, fs)
+    if w == nil or w <= 0 or h <= 0 then return false end
+    if type(frame.SetSize) ~= "function" then return false end
+    return Reconcile.SelfWrite(function() frame:SetSize(w, h) end)
+end
+
+local function fmtNDim(d)
+    if type(d) ~= "table" then return "none" end
+    return ("%.3fx%.3f"):format(tonumber(d[1]) or 0, tonumber(d[2]) or 0)
+end
+
+-- The size half of the login replay, and it runs on exactly the same rules as
+-- ApplyPositions: config is authoritative, a window already the right size is
+-- not drift, and a size the capture could not read says nothing.
+function Reconcile.ApplySizes(cfg)
+    local applied = {}
+    local C = ns.Config
+    local want = (C and type(cfg) == "table") and cfg.windows or nil
+    if type(want) ~= "table" then return applied end
+    for id = 1, numWindows() do
+        local w = want[id]
+        local nd = type(w) == "table" and w.ndim or nil
+        if type(nd) == "table" then
+            local frame = Reconcile.PlaceableWindow(id, w)
+            if frame then
+                local have = C.CaptureNormalizedDim(id)
+                if have == nil or not C.NearDim(have, nd) then
+                    if Reconcile.SizeFrame(frame, nd) then
+                        local detail = ("window %d ndim %s -> %s"):format(id,
+                            fmtNDim(have), fmtNDim(nd))
+                        applied[#applied + 1] = "corrected size drift: " .. detail
+                        Reconcile.NoteSizeChange("drift",
+                            "reconcile:" .. tostring(Reconcile._gate or "?"), detail)
+                    end
+                end
+            end
+        end
+    end
+    -- The view rides the engine window's size (its chassis is that window plus
+    -- its own furniture), so a replayed size has to reach the pixels too.
+    local V = ns.View
+    if #applied > 0 and V and V.active and type(V.Layout) == "function" then
+        pcall(V.Layout)
+    end
+    return applied
 end
 
 function Reconcile.ApplyPositions(cfg)

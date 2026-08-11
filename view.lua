@@ -155,6 +155,18 @@ ns.View = View
 --   box-shadow 0 8px 30px rgba(0,0,0,.55)  -> not shipped   SURVIVING CLIENT LIMIT: no drop-shadow
 --       primitive; the honest fake is a nine-slice glow, which is bespoke art (same queue as the
 --       corners, and deliberately behind them).
+--   .tabs-top background (implicit --panel) -> a REAL --panel texture on the strip, drawn ABOVE the
+--       message surface in frame level                                          IDENTICAL
+--       AMENDED 2026-08-11 (the owner's first live look): the strip shipped as a bare anchor frame
+--       relying on the chassis' backdrop showing through, at the same frame level as the feed. The
+--       mockup's tab band is an OPAQUE surface with a defined stacking position, and saying so
+--       outright is what keeps anything drawn at the feed's own top edge out of the tab band.
+--
+-- NOT IN THE MOCKUP AT ALL, and named here so the table stays a complete account of what is drawn:
+--   the RESIZE GRIP (12 units, chassis bottom-right, alpha 0 until the pointer is on the box,
+--   --line-soft resting / --accent on hover). The mockup is a still image and carries no gestures;
+--   the grip is furniture the OWNED frame adds to answer the owner's "how do i unlock it to move and
+--   resize?" — with the same answer movement gives, which is that there is nothing to unlock.
 --
 -- RETIRED WITH SKIN-OVER (rows that no longer need to exist): "the box strips
 -- the client's stock tab art", "the box takes the tab's alpha back from
@@ -240,6 +252,10 @@ local EDGEBAR_INSET  = 5     -- …its top/bottom inset
 local HOVER_WASH     = 0.04  -- .tab:hover rgba(255,255,255,.04)
 local TAB_MIN_W      = 40    -- a tab is never narrower than this (empty-name windows)
 local TAB_CHAR_W     = 0.52  -- fallback glyph advance as a share of the text size
+local GRIP_SIZE      = 12    -- the resize grip's corner square (no mockup row: the
+                             -- mockup is a still image and has no gestures in it —
+                             -- this is FURNITURE the owned frame adds, sized to the
+                             -- smallest square that is still a reliable click target)
 
 -- The vendored face's own line box, as a multiple of its point size. The one
 -- MEASURED constant here (a FontString's natural leading is the face's
@@ -396,6 +412,7 @@ function View.Metrics()
         seam = SEAM_W, underlineH = UL_HEIGHT, underlineInset = UL_INSET,
         edgebarW = EDGEBAR_W, edgebarInset = EDGEBAR_INSET,
         hoverWash = HOVER_WASH, maxLines = VIEW_MAX_LINES,
+        gripSize = GRIP_SIZE, minFeedLines = View.MIN_FEED_LINES,
     }
 end
 
@@ -461,10 +478,27 @@ function View.EnsureChassis()
     if rr then call(f, "SetBackdropColor", rr, rg, rb, 1) end
     local lr, lg, lb = View.Ink("line")
     if lr then call(f, "SetBackdropBorderColor", lr, lg, lb, 1) end
-    -- The tab strip / rail: a bare anchor frame, painted --panel like the
-    -- chassis (the mockup draws no second fill behind the tabs).
+    -- The tab strip / rail. It carries a REAL --panel fill of its own and sits
+    -- ABOVE the message surface in the frame-level order (see Reflow): the
+    -- mockup's `.tabs-top` is an opaque band, and a strip that is merely an
+    -- empty anchor frame at the same level as the feed lets whatever the feed
+    -- draws at its own top edge read through the gaps between the tabs. Draw
+    -- order here is stated OUTRIGHT rather than inherited from creation order,
+    -- because creation order is not a contract.
     local strip = cf("Frame", nil, f)
     View.strip = strip
+    local stripFill = call(strip, "CreateTexture", nil, "BACKGROUND")
+    paint(stripFill, "panel", 1)
+    View.stripFill = stripFill
+    -- THE WHOLE STRIP IS A GRAB HANDLE, not only the tabs on it. The tab buttons
+    -- already carried the plain-drag gesture, but the empty run past the last
+    -- tab fell through to the chassis — which asks for ALT — so "drag the strip
+    -- to move the box" was true of about a third of the strip. It is now true of
+    -- the strip.
+    call(strip, "EnableMouse", true)
+    call(strip, "RegisterForDrag", "LeftButton")
+    strip:SetScript("OnDragStart", function() View.OnDragStart(View.chassis, "strip") end)
+    strip:SetScript("OnDragStop",  function() View.OnDragStop() end)
     -- The message surface (--panel2) spans the feed AND the entry bar: the
     -- mockup's `.msgs` and `.entry` share one fill with a hairline between.
     local surface = call(f, "CreateTexture", nil, "BACKGROUND")
@@ -483,18 +517,25 @@ function View.EnsureChassis()
     View.entry = entry
     f:SetScript("OnDragStart", function(self) View.OnDragStart(self, "frame") end)
     f:SetScript("OnDragStop",  function() View.OnDragStop() end)
+    -- RESIZE: the chassis is resizable and its inner regions reflow from its
+    -- LIVE size on every size change, so a drag reflows continuously without a
+    -- single OnUpdate anywhere.
+    call(f, "SetResizable", true)
+    f:SetScript("OnSizeChanged", function()
+        if View.active then View.Reflow() end
+    end)
+    -- The grip is quiet until the pointer is on the box (the movement layer's
+    -- philosophy: no unlock ritual, no permanent furniture).
+    f:SetScript("OnEnter", function() View.SetGripVisible(true) end)
+    f:SetScript("OnLeave", function() View.SetGripVisible(false) end)
     View.chassis = f
     return f
 end
 
--- The chassis' outer size: the engine window's own width and height (which the
--- reconciler governs through the synced config's `dim`) plus our furniture.
-function View.ChassisSize()
-    local host = View.ClientFrame(View.HostId())
-    local w = widgetNum(host, "GetWidth")
-    local h = widgetNum(host, "GetHeight")
-    if not w or w <= 0 then w = FALLBACK_W end
-    if not h or h <= 0 then h = FALLBACK_H end
+-- What the chassis costs BEYOND the feed the engine window stands for: the
+-- border, the entry bar and its seam, and the strip or the rail. One function,
+-- so the size and its inverse can never drift apart.
+function View.Furniture()
     local extraH = EB_HEIGHT + SEAM_W + 2 * CHASSIS_EDGE
     local extraW = 2 * CHASSIS_EDGE
     if View.TabsOnRail() then
@@ -502,7 +543,74 @@ function View.ChassisSize()
     else
         extraH = extraH + STRIP_H
     end
-    return w + extraW, h + extraH
+    return extraW, extraH
+end
+
+-- The chassis' outer size: the engine window's own width and height (which the
+-- reconciler governs through the synced config's `dim` / `ndim`) plus our
+-- furniture. ONE SOURCE OF TRUTH, and it is the engine window — exactly as the
+-- POSITION is: a resize writes the engine window's size and this answer follows,
+-- so `ndim` means the same thing for both the way `npos` already does.
+function View.ChassisSize()
+    local host = View.ClientFrame(View.HostId())
+    local w = widgetNum(host, "GetWidth")
+    local h = widgetNum(host, "GetHeight")
+    if not w or w <= 0 then w = FALLBACK_W end
+    if not h or h <= 0 then h = FALLBACK_H end
+    local extraW, extraH = View.Furniture()
+    return View.ClampChassisSize(w + extraW, h + extraH)
+end
+
+-- The engine host window's size for a given chassis size (the inverse). Never
+-- below one unit — a zero-sized engine window is not a smaller window, it is an
+-- unreadable one.
+function View.HostSizeFor(cw, ch)
+    local extraW, extraH = View.Furniture()
+    local w, h = (tonumber(cw) or 0) - extraW, (tonumber(ch) or 0) - extraH
+    if w < 1 then w = 1 end
+    if h < 1 then h = 1 end
+    return w, h
+end
+
+-- THE FLOOR: the furniture, plus enough feed for THREE lines at the size in
+-- force, plus the feed's own padding. Below this the box stops being a chat
+-- window and starts being a decoration, so the drop lands here instead.
+View.MIN_FEED_LINES = 3
+
+function View.MinChassisSize()
+    local size = View.MessageFontSize(nil)
+    local lineBox = size * FACE_NATURAL_LINE + View.MessageSpacing(size)
+    local extraW, extraH = View.Furniture()
+    local h = extraH + MSG_PAD_TOP + MSG_PAD_BOT + View.MIN_FEED_LINES * lineBox
+    -- Wide enough for the entry bar's own insets and a couple of tabs; the rail
+    -- adds its own 112 through Furniture above.
+    local w = extraW + 2 * MSG_PAD_X + 2 * TAB_MIN_W + TAB_GAP + 2 * STRIP_PAD_X
+    return math.floor(w + 0.5), math.floor(h + 0.5)
+end
+
+-- THE CEILING: the screen. Nothing else — the chassis is ours, so there is no
+-- dock and no clamp with an opinion, and "as big as the screen" is the only
+-- honest maximum.
+function View.MaxChassisSize()
+    local P = _G.UIParent
+    local w = widgetNum(P, "GetWidth")
+    local h = widgetNum(P, "GetHeight")
+    -- UNKNOWN IS NOT ZERO (Class 4): a world that has not been laid out yet
+    -- imposes no ceiling rather than a ceiling of nothing.
+    if not w or w <= 0 then w = math.huge end
+    if not h or h <= 0 then h = math.huge end
+    return w, h
+end
+
+function View.ClampChassisSize(w, h)
+    local minW, minH = View.MinChassisSize()
+    local maxW, maxH = View.MaxChassisSize()
+    w, h = tonumber(w) or minW, tonumber(h) or minH
+    if maxW < minW then maxW = minW end
+    if maxH < minH then maxH = minH end
+    if w < minW then w = minW elseif w > maxW then w = maxW end
+    if h < minH then h = minH elseif h > maxH then h = maxH end
+    return w, h
 end
 
 -- The message area's rect INSIDE the chassis, as four insets from its edges.
@@ -590,6 +698,25 @@ function View.PipWidth(id)
     return (ok and tonumber(w)) or 0
 end
 
+-- The horizontal footprint the pip costs INSIDE the tab: the chip plus the
+-- mockup's 6-unit gap after the label, or nothing at all when no pip is up.
+function View.PipFootprint(id)
+    local pip = View.PipWidth(id)
+    return (pip > 0) and (pip + 6) or 0
+end
+
+-- The tab's width, and the ONE place a measurement is taken.
+--
+-- MEASURE-AFTER-SET, AND SAY SO WHEN THE ANSWER MOVES. Two of the three inputs
+-- here are live measurements that can legitimately change between passes:
+--   * the label's string width — 0 on the live client for as long as the string
+--     has no face (the sim now models exactly that), so the character estimate
+--     below is a real code path, not a paranoid one;
+--   * badges' PipWidth — which becomes non-zero the moment an unread lands, i.e.
+--     AFTER the pass that sized the tab for no pip.
+-- Rather than poll, the pass RECORDS what it measured and compares; a changed
+-- answer schedules ONE deferred relayout (View.NoteMeasured / the settle pass
+-- below). No per-frame OnUpdate anywhere in this file.
 function View.TabWidth(id)
     local t = View.tabs[id]
     local size = View.TabTextSize()
@@ -597,13 +724,53 @@ function View.TabWidth(id)
     if t and t.label then
         textW = widgetNum(t.label, "GetStringWidth")
     end
-    if not textW or textW <= 0 then
+    local measured = (textW ~= nil and textW > 0)
+    if not measured then
+        -- UNKNOWN IS NOT ZERO (Class 5): a string the client will not measure
+        -- yet gets an ESTIMATE, never a zero width — a zero here is what would
+        -- collapse a run of tabs onto one another.
         textW = #tostring(View.TabLabel(id)) * size * TAB_CHAR_W
     end
-    local pip = View.PipWidth(id)
-    local w = textW + 2 * TAB_PAD_X + (pip > 0 and (pip + 6) or 0)
+    local w = textW + 2 * TAB_PAD_X + View.PipFootprint(id)
     if w < TAB_MIN_W then w = TAB_MIN_W end
+    View.NoteMeasured(id, measured and textW or nil, View.PipFootprint(id))
     return w
+end
+
+-- What the last layout pass actually measured, per tab. A pass that reads a
+-- DIFFERENT answer than the one it laid out with asks for exactly one more
+-- pass — the deferred settle below — and the pass after that agrees, so the
+-- loop terminates by construction rather than by luck.
+View._measured = {}
+
+function View.NoteMeasured(id, textW, pipW)
+    local prev = View._measured[id]
+    if prev and prev.textW == textW and prev.pipW == pipW then return false end
+    View._measured[id] = { textW = textW, pipW = pipW }
+    if prev then View.ScheduleSettle("measurement changed") end
+    return true
+end
+
+-- ONE deferred relayout, coalesced. The beat is C_Timer.After(0) — the client's
+-- next frame — which is when a string the client had not laid out yet finally
+-- measures, and when a badge that appeared during a pass is real. Never a
+-- repeating ticker: if the settle pass reads the same numbers it laid out with
+-- (which is the steady state), NoteMeasured schedules nothing and it stops.
+View.settles = 0
+
+function View.ScheduleSettle(why)
+    if not View.active or View._settleQueued then return false end
+    local CT = _G.C_Timer
+    if not (CT and type(CT.After) == "function") then return false end
+    View._settleQueued = true
+    View._settleWhy = tostring(why or "?")
+    CT.After(0, function()
+        View._settleQueued = false
+        if not View.active then return end
+        View.settles = View.settles + 1
+        View.LayoutTabs()
+    end)
+    return true
 end
 
 local function ensureTab(id)
@@ -640,6 +807,16 @@ local function ensureTab(id)
     end
     call(label, "SetJustifyH", "CENTER")
     call(label, "SetPoint", "CENTER", btn, "CENTER", 0, 0)
+    -- THE CLIENT'S OWN SHAPE, published deliberately: a chat tab carries its
+    -- label as `tab.Text`, and badges.lua anchors the unread chip off THAT —
+    -- `holder:SetPoint("LEFT", label or tab, "RIGHT", 6, 0)`, the mockup's
+    -- "after the label, INSIDE the tab". Our button did not carry the field, so
+    -- badges fell through to `or tab` and hung the chip off the tab's RIGHT
+    -- EDGE: the owner's detached "3", floating in the gap between two tabs
+    -- while the tab itself had already been widened to hold it. Wearing the
+    -- client's field name is the whole fix — no change in badges.lua, and the
+    -- chip rides whatever layout this file lands on.
+    btn.Text = label
     btn:SetScript("OnClick", function() View.SelectTab(id, "click") end)
     btn:SetScript("OnEnter", function() call(hover, "Show") end)
     btn:SetScript("OnLeave", function() call(hover, "Hide") end)
@@ -907,11 +1084,84 @@ end
 -- use — so there is no beat where an engine window is visibly back.
 ----------------------------------------------------------------------
 
+-- ── THE SATELLITE FAMILY ─────────────────────────────────────────────────
+--
+-- A chat window is not one frame. Hanging off it — and NOT parented to it, so
+-- `frame:Hide()` does not take them down — are its tab (on the DOCK, not on the
+-- window), its edit box, its button column, the column's minimize button, the
+-- minimized stand-in that button creates, the resize grip, the scrollbar and
+-- the click-anywhere overlay. The shipped HideEngine hid three of those eight,
+-- and nothing re-hid any of them afterwards, so the owner's first live look had
+-- a stock gold-bordered "Loot" tab floating MID-PANEL over our message feed:
+-- the dock bar hugs the engine window's TOP edge, which is inside the chassis
+-- our own strip sits above.
+--
+-- Each row names BOTH client shapes — the field the client's own code reaches
+-- through and the global name the XML template gives it — because either may be
+-- the one that exists on a given build, and a satellite that is only reachable
+-- through the shape we did not check is a satellite we do not hide. Rows whose
+-- verbs are catalog-verified on 11509 are cited beside them.
+local SATELLITES = {
+    { field = "tab",                 global = "%sTab" },                        -- FCFDock_UpdateTabs / FCFTab_UpdateAlpha
+    { field = "editBox",             global = "%sEditBox" },                    -- ChatEdit_ActivateChat
+    { field = "buttonFrame",         global = "%sButtonFrame" },                -- FCF_SetButtonSide
+    { field = "minimizeButton",      global = "%sButtonFrameMinimizeButton" },  -- FCF_MinimizeFrame
+    { field = "minFrame",            global = nil },                            -- FCF_CreateMinimizedFrame (LAZY: re-walked every pass)
+    { field = "resizeButton",        global = "%sResizeButton" },               -- FCF_UpdateResizeButton
+    { field = "ScrollBar",           global = "%sScrollBar" },                  -- FCF_FadeInScrollbar / FCF_FadeOutScrollbar
+    { field = "clickAnywhereButton", global = "%sClickAnywhereButton" },        -- FCFClickAnywhereButton_UpdateState
+}
+View.SATELLITES = SATELLITES
+
+-- Every satellite of one window that EXISTS right now. Re-walked on every pass
+-- rather than cached at enable: FCF_CreateMinimizedFrame builds its frame the
+-- first time the player minimizes, so a family enumerated once is a family that
+-- misses whatever the client makes later.
+function View.SatellitesOf(frame, id)
+    local out = {}
+    if type(frame) ~= "table" then return out end
+    local name = ("ChatFrame%d"):format(tonumber(id) or -1)
+    if type(frame.GetName) == "function" then
+        local ok, n = pcall(frame.GetName, frame)
+        if ok and type(n) == "string" and n ~= "" then name = n end
+    end
+    for _, s in ipairs(SATELLITES) do
+        local w = s.field and frame[s.field] or nil
+        if type(w) ~= "table" and s.global then w = _G[s.global:format(name)] end
+        if type(w) == "table" and w ~= frame then out[#out + 1] = w end
+    end
+    return out
+end
+
+-- THE ONE EXCEPTION, and it is ours: the edit box we have REPARENTED into the
+-- chassis is on screen on purpose (the persistent entry bar). Hiding it here
+-- would fight our own RetargetEditBox on every client beat.
+local function isHostedEditBox(w)
+    local home = View._ebHome
+    return (home and home.eb == w) and true or false
+end
+
+-- Hide one satellite and RECORD that we were the one who hid it, so the restore
+-- puts back exactly what we took down and nothing else (the round-trip pin).
+local function holdDown(frame, w)
+    if isHostedEditBox(w) then return false end
+    if type(w.IsShown) ~= "function" then return false end
+    local ok, shown = pcall(w.IsShown, w)
+    if not (ok and shown) then return false end
+    call(w, "Hide")
+    local rec = View._engineHidden[frame]
+    if type(rec) == "table" then rec.satellites[w] = true end
+    return true
+end
+
 function View.HideEngine()
     local n = 0
     for id = 1, numWindows() do
         local frame = View.ClientFrame(id)
         if frame and not isCombatLog(frame, id) and windowEligible(id) then
+            if type(View._engineHidden[frame]) ~= "table" then
+                View._engineHidden[frame] = { id = id, satellites = {} }
+            end
             if type(frame.IsShown) == "function" then
                 local ok, shown = pcall(frame.IsShown, frame)
                 if ok and shown then
@@ -919,42 +1169,70 @@ function View.HideEngine()
                     n = n + 1
                 end
             end
-            View._engineHidden[frame] = true
-            -- The tab is part of the client's dress, not ours.
-            local tab = _G[("ChatFrame%dTab"):format(id)]
-            if tab then call(tab, "Hide") end
-            local bf = frame.buttonFrame
-            if bf then call(bf, "Hide") end
+            for _, w in ipairs(View.SatellitesOf(frame, id)) do holdDown(frame, w) end
         end
     end
     return n
 end
 
+-- The client showed something of its own again (a dock update, a window update,
+-- an alert flash). We take the last word INSIDE the same call — the posture the
+-- button column and the clamp already use — across the WHOLE family, not just
+-- the window, because the family is what came back.
 function View.KeepEngineHidden(frame)
     if not View.active then return false end
-    if type(frame) ~= "table" or not View._engineHidden[frame] then return false end
-    if type(frame.IsShown) ~= "function" then return false end
-    local ok, shown = pcall(frame.IsShown, frame)
-    if not (ok and shown) then return false end
-    call(frame, "Hide")
-    View.reHides = View.reHides + 1
-    return true
+    local rec = View._engineHidden[frame]
+    if type(frame) ~= "table" or type(rec) ~= "table" then return false end
+    local beat = false
+    if type(frame.IsShown) == "function" then
+        local ok, shown = pcall(frame.IsShown, frame)
+        if ok and shown then call(frame, "Hide") beat = true end
+    end
+    for _, w in ipairs(View.SatellitesOf(frame, rec.id)) do
+        if holdDown(frame, w) then beat = true end
+    end
+    if beat then View.reHides = View.reHides + 1 end
+    return beat
+end
+
+-- PUBLISHED PREDICATE. "Is this window hidden because WE are holding it down?"
+-- reconcile.lua asks it before deciding a hidden window is one to leave alone —
+-- the store still says the window is live, and the view's hide is a display act,
+-- so a position or a size the config authored must still be replayed onto it.
+function View.HoldsEngine(frame)
+    return (View.active and type(View._engineHidden[frame]) == "table") and true or false
+end
+
+function View.KeepAllEngineHidden()
+    local n = 0
+    for id = 1, numWindows() do
+        if View.KeepEngineHidden(View.ClientFrame(id)) then n = n + 1 end
+    end
+    return n
 end
 
 function View.ShowEngine()
-    for frame in pairs(View._engineHidden) do
+    for frame, rec in pairs(View._engineHidden) do
         View._engineHidden[frame] = nil
         call(frame, "Show")
-        local id = frame._id or (type(frame.GetID) == "function" and frame:GetID())
+        -- EXACTLY WHAT WE TOOK DOWN. A satellite the client already had hidden
+        -- when we arrived (the edit box under chatStyle 'classic', a flash that
+        -- was not flashing) is left hidden — restoring is putting the world
+        -- back, not asserting a world of our own.
+        if type(rec) == "table" then
+            for w in pairs(rec.satellites) do call(w, "Show") end
+        end
+        local id = (type(rec) == "table" and rec.id)
+            or frame._id or (type(frame.GetID) == "function" and frame:GetID())
         if type(id) == "number" then
-            local tab = _G[("ChatFrame%dTab"):format(id)]
-            if tab then call(tab, "Show") end
             -- The client's own window beat puts its dress, its button column
             -- and its position back exactly where the client wants them.
             local fcu = _G.FloatingChatFrame_Update
             if type(fcu) == "function" then pcall(fcu, id) end
         end
     end
+    local dock = _G.FCFDock_UpdateTabs
+    if type(dock) == "function" then pcall(dock) end
 end
 
 ----------------------------------------------------------------------
@@ -1125,6 +1403,20 @@ end
 -- have changed an answer.
 ----------------------------------------------------------------------
 
+-- `x` is the run's CURRENT left edge; the return value is the NEXT one.
+--
+-- THE DEFECT THIS SIGNATURE USED TO CARRY (owner's live look, 2026-08-11 —
+-- "Loot FoDMs", three labels drawn on top of each other): this function used to
+-- `return w + TAB_GAP` — the tab's OWN WIDTH plus the gap, not the position
+-- past its right edge. Tab 1 landed correctly at the strip's padding, tab 2
+-- landed at (width of tab 1) + gap — right by accident, because the run's
+-- origin happened to be small — and every tab after that landed at the width of
+-- its PREDECESSOR, i.e. all of them in the same 40-to-80-unit band. The rail
+-- path next door accumulated correctly (`return y + TAB_ROW_H`), which is why
+-- only the top strip piled up. Nothing in the suite could see it: the sim had
+-- no anchor resolver, so no test could ask where a tab ENDED UP, and the
+-- default world has exactly ONE owned window, so even an eyeball assertion
+-- would have passed. Phase 13 now measures the run.
 local function anchorTop(t, id, x)
     local w = View.TabWidth(id)
     local btn = t.button
@@ -1142,7 +1434,17 @@ local function anchorTop(t, id, x)
     call(t.underline, "SetSize", w - 2 * UL_INSET, UL_HEIGHT)
     call(t.underline, "SetPoint", "BOTTOMLEFT", btn, "BOTTOMLEFT", UL_INSET, UL_Y)
     call(t.edgebar, "Hide")
-    return w + TAB_GAP
+    -- The label goes back to the centre (a rail pass moves it to the left edge)
+    -- — and it shifts LEFT by half the pip's footprint when a pip is showing,
+    -- because the mockup's `.tab` is a row of [label][gap][chip] centred as ONE
+    -- thing inside the tab's padding. TabWidth reserved that footprint; this is
+    -- the half that spends it, so the pair reads centred instead of the label
+    -- sitting on the middle with the chip hanging off to the right.
+    local pipExtra = View.PipFootprint(id)
+    call(t.label, "SetJustifyH", "CENTER")
+    call(t.label, "ClearAllPoints")
+    call(t.label, "SetPoint", "CENTER", btn, "CENTER", -pipExtra / 2, 0)
+    return x + w + TAB_GAP
 end
 
 local function anchorRail(t, id, y, side)
@@ -1220,6 +1522,12 @@ function View.LayoutTabs()
     return true
 end
 
+-- LAYOUT decides the chassis' own SIZE and POSITION; REFLOW places everything
+-- inside it from whatever size the chassis is wearing RIGHT NOW. The split is
+-- what makes resizing work with no polling at all: the client changes the
+-- chassis' size mid-drag, OnSizeChanged fires, Reflow runs, and every inner
+-- region follows — while Layout (which would re-impose the stored size) stays
+-- out of the way until the drop.
 function View.Layout()
     local f = View.EnsureChassis()
     if not f then return false end
@@ -1230,9 +1538,25 @@ function View.Layout()
     for _, id in ipairs(View.ids) do if id == View.activeId then liveActive = true end end
     if not liveActive then View.activeId = View.ids[1] end
 
-    local w, h = View.ChassisSize()
-    call(f, "SetSize", w, h)
-    View.ApplyPosition()
+    -- NEVER MID-RESIZE, for the same reason ApplyPosition is never mid-drag: a
+    -- client beat landing while the player is still holding the grip would
+    -- snap the box back to its stored size under the cursor.
+    if not View._sizing then
+        local w, h = View.ChassisSize()
+        call(f, "SetSize", w, h)
+        View.ApplyPosition()
+    end
+    return View.Reflow()
+end
+
+function View.Reflow()
+    local f = View.chassis
+    if not f or #View.ids == 0 then return false end
+    -- THE LIVE SIZE, never the stored one: mid-resize these two disagree, and
+    -- the live one is the one the player is looking at.
+    local w = widgetNum(f, "GetWidth")
+    local h = widgetNum(f, "GetHeight")
+    if not w or not h or w <= 0 or h <= 0 then return false end
 
     local place = View.TabPlacement()
     local rail = View.TabsOnRail()
@@ -1258,6 +1582,10 @@ function View.Layout()
         call(View.strip, "SetPoint", "TOPLEFT", f, "TOPLEFT", CHASSIS_EDGE, -CHASSIS_EDGE)
         call(View.railSeam, "Hide")
     end
+    call(View.stripFill, "ClearAllPoints")
+    call(View.stripFill, "SetPoint", "TOPLEFT", View.strip, "TOPLEFT", 0, 0)
+    call(View.stripFill, "SetPoint", "BOTTOMRIGHT", View.strip, "BOTTOMRIGHT", 0, 0)
+    call(View.stripFill, "Show")
     call(View.strip, "Show")
 
     -- The message + entry surface (one --panel2 fill, the mockup's own shape).
@@ -1280,6 +1608,14 @@ function View.Layout()
     call(View.entrySeam, "Show")
 
     -- The message frames, all anchored to the same rect; one is shown.
+    --
+    -- TWO OPPOSING ANCHORS AND NOTHING ELSE. The shipped pass also called
+    -- SetSize here, which is an over-constraint the client resolves by its own
+    -- rule ("if both edges are anchored, setting the width has no effect") — so
+    -- it was either a no-op or a disagreement, and both are worse than saying
+    -- the rect once. The anchors alone also mean the feed FOLLOWS the chassis
+    -- through a resize with no arithmetic at all.
+    local feedLevel = (widgetNum(f, "GetFrameLevel") or 1) + 1
     for _, id in ipairs(View.ids) do
         local smf = View.EnsureFrame(id)
         if smf then
@@ -1287,12 +1623,19 @@ function View.Layout()
             call(smf, "ClearAllPoints")
             call(smf, "SetPoint", "TOPLEFT", f, "TOPLEFT", ml, -mt)
             call(smf, "SetPoint", "BOTTOMRIGHT", f, "BOTTOMRIGHT", -mr, mb)
-            call(smf, "SetSize", w - ml - mr, h - mt - mb)
+            call(smf, "SetFrameLevel", feedLevel)
             call(smf, id == View.activeId and "Show" or "Hide")
         end
     end
+    -- DRAW ORDER, STATED. The strip band sits ABOVE the feed: a
+    -- ScrollingMessageFrame lays its lines out from the bottom up and the
+    -- topmost one is drawn wherever the arithmetic leaves it, so the band has
+    -- to be an opaque surface that wins, not an empty frame that happens to
+    -- have been created first. Creation order is not a contract; this is.
+    call(View.strip, "SetFrameLevel", feedLevel + 4)
     View.LayoutTabs()
     View.EnsureCopyButton()
+    View.LayoutGrip()
     call(f, "Show")
     return true
 end
@@ -1321,6 +1664,11 @@ function View.EnsureCopyButton()
         call(View.copyBtn, "ClearAllPoints")
         call(View.copyBtn, "SetPoint", "TOPRIGHT", View.chassis, "TOPRIGHT",
             -(CHASSIS_EDGE + 2), -(CHASSIS_EDGE + 2))
+        -- It sits in the strip's band, and the strip is now an opaque surface
+        -- above the feed — so the affordance has to be above the strip, said
+        -- outright rather than left to creation order.
+        call(View.copyBtn, "SetFrameLevel",
+            (widgetNum(View.strip, "GetFrameLevel") or 1) + 2)
         call(View.copyBtn, "Show")
         return View.copyBtn
     end
@@ -1454,6 +1802,203 @@ function View.SnapSet()
 end
 
 ----------------------------------------------------------------------
+-- RESIZE (the owner's second ask, 2026-08-11: "how do i unlock it to move and
+-- resize?").
+--
+-- NO UNLOCK RITUAL — the same answer movement already gives. There is no lock
+-- state, no edit mode and no toggle to remember: the box is always movable and
+-- always resizable, and the only thing that appears or disappears is the
+-- affordance. A ~12-unit grip lives in the chassis' bottom-right corner,
+-- invisible until the pointer is on the box, palette-coloured, accent on hover.
+--
+-- WHY BOTTOM-RIGHT AND NOT AN EDGE-HUNT: the box's canonical anchor is its
+-- BOTTOM-LEFT corner (npos), so a bottom-right grip moves the two edges the
+-- position does not speak about... except the bottom, which it does — so the
+-- drop re-establishes the corner as well as the size, and BOTH ride the one
+-- commit below. One gesture, one commit, one capture.
+--
+-- WHAT IT COSTS THE REST OF THE FILE: nothing. The chassis' inner regions are
+-- anchored, not arithmetic, and the two that are sized (the strip and the
+-- entry) are re-sized by Reflow on the chassis' own OnSizeChanged — so the
+-- whole drag reflows without a single OnUpdate.
+----------------------------------------------------------------------
+
+local GRIP_QUIET_ALPHA = 0.0     -- invisible until the pointer is on the box
+
+function View.EnsureGrip()
+    if View.grip then return View.grip end
+    local cf = _G.CreateFrame
+    if type(cf) ~= "function" or not View.chassis then return nil end
+    local ok, btn = pcall(cf, "Button", "DaseekiChatViewGrip", View.chassis)
+    if not ok or type(btn) ~= "table" then return nil end
+    call(btn, "SetSize", GRIP_SIZE, GRIP_SIZE)
+    call(btn, "EnableMouse", true)
+    call(btn, "SetAlpha", GRIP_QUIET_ALPHA)
+    -- Two hairlines meeting in the corner: the quietest thing that still reads
+    -- as "this corner is a handle". ASCII-free by construction (no glyph).
+    local function bar(w, h, px, py)
+        local t = call(btn, "CreateTexture", nil, "OVERLAY")
+        paint(t, "lineSoft", 1)
+        call(t, "SetSize", w, h)
+        call(t, "SetPoint", "BOTTOMRIGHT", btn, "BOTTOMRIGHT", px, py)
+        return t
+    end
+    View._gripBars = { bar(GRIP_SIZE, 1, 0, 0), bar(1, GRIP_SIZE, 0, 0) }
+    local function ink(name)
+        for _, t in ipairs(View._gripBars or {}) do paint(t, name, 1) end
+    end
+    btn:SetScript("OnEnter", function(self) call(self, "SetAlpha", 1) ink("accent") end)
+    btn:SetScript("OnLeave", function(self)
+        ink("lineSoft")
+        call(self, "SetAlpha", View._gripVisible and 0.5 or GRIP_QUIET_ALPHA)
+    end)
+    btn:SetScript("OnMouseDown", function() View.OnResizeStart() end)
+    btn:SetScript("OnMouseUp",   function() View.OnResizeStop() end)
+    View.grip = btn
+    return btn
+end
+
+function View.LayoutGrip()
+    local g = View.EnsureGrip()
+    if not g then return false end
+    call(g, "ClearAllPoints")
+    call(g, "SetPoint", "BOTTOMRIGHT", View.chassis, "BOTTOMRIGHT",
+        -CHASSIS_EDGE, CHASSIS_EDGE)
+    call(g, "SetFrameLevel", (widgetNum(View.chassis, "GetFrameLevel") or 1) + 8)
+    call(g, "Show")
+    return true
+end
+
+function View.SetGripVisible(on)
+    View._gripVisible = on and true or false
+    local g = View.grip
+    if not g then return false end
+    call(g, "SetAlpha", on and 0.5 or GRIP_QUIET_ALPHA)
+    return true
+end
+
+function View.OnResizeStart()
+    if not View.active then return false end
+    local f = View.chassis
+    if not f then return false end
+    call(f, "SetResizable", true)
+    local ok = pcall(f.StartSizing, f, "BOTTOMRIGHT")
+    if not ok then return false end
+    View._sizing = true
+    local S = ns.Skin
+    if S and type(S.BeginSnapGuides) == "function" then pcall(S.BeginSnapGuides, f) end
+    return true
+end
+
+-- SNAP ON THE RESIZE EDGES, and it is CHEAP because skin's snap layer was built
+-- frame-agnostic and PURE: SnapLines answers every boundary in screen pixels
+-- and SnapDelta is arithmetic over two edges. The only thing that differs from
+-- a move is WHICH edges are asked — a BOTTOMRIGHT grip moves the right and the
+-- bottom, so those two are the only ones offered a line. No fork of the
+-- arithmetic, no second threshold, no second set of guides.
+function View.SnapResize()
+    local S = ns.Skin
+    local f = View.chassis
+    if not (S and f and type(S.SnapLines) == "function"
+            and type(S.SnapDelta) == "function") then return false end
+    if type(S.SnapEnabled) == "function" then
+        local ok, on = pcall(S.SnapEnabled)
+        if not (ok and on) then return false end
+    end
+    local l = widgetNum(f, "GetLeft")
+    local b = widgetNum(f, "GetBottom")
+    local w = widgetNum(f, "GetWidth")
+    local h = widgetNum(f, "GetHeight")
+    local fs = widgetNum(f, "GetEffectiveScale")
+    if l == nil or b == nil or fs == nil or fs <= 0 then return false end
+    local okL, vx, hy = pcall(S.SnapLines, f)
+    if not okL or not vx then return false end
+    local right, bottom = (l + w) * fs, b * fs
+    local dx = select(1, S.SnapDelta(right, right, vx, S.SNAP_THRESHOLD))
+    local dy = select(1, S.SnapDelta(bottom, bottom, hy, S.SNAP_THRESHOLD))
+    if not dx and not dy then return false end
+    local nw = w + (dx or 0) / fs
+    local nb = b + (dy or 0) / fs
+    local nh = h + (b - nb)
+    View.ResizeTo(nw, nh, l, nb)
+    return true
+end
+
+-- Place AND size the chassis in one act, clamped. The corner is written as the
+-- canonical BOTTOMLEFT point so the position path downstream means exactly what
+-- it always meant.
+function View.ResizeTo(w, h, left, bottom)
+    local f = View.chassis
+    local P = _G.UIParent
+    if not (f and type(P) == "table") then return false end
+    w, h = View.ClampChassisSize(w, h)
+    local l = tonumber(left) or widgetNum(f, "GetLeft")
+    local b = tonumber(bottom) or widgetNum(f, "GetBottom")
+    call(f, "SetSize", w, h)
+    if l ~= nil and b ~= nil then
+        call(f, "ClearAllPoints")
+        call(f, "SetPoint", "BOTTOMLEFT", P, "BOTTOMLEFT", l, b)
+    end
+    View.Reflow()
+    return true
+end
+
+-- THE DROP. One commit for both facts the gesture changed: the engine host
+-- window learns the new size AND the new corner, the client's own save verb
+-- writes both to the per-character store inside the reconciler's SelfWrite (so
+-- the store write is OUR echo), and the RESIZE is announced separately through
+-- NoteExternalChange — the same two-facts-two-channels discipline the move
+-- commit has used since skin v3.1.
+function View.CommitSize()
+    local f = View.chassis
+    local host = View.ClientFrame(View.HostId())
+    local P = _G.UIParent
+    if not (f and type(host) == "table" and type(P) == "table") then return false end
+    local l = widgetNum(f, "GetLeft")
+    local b = widgetNum(f, "GetBottom")
+    local w = widgetNum(f, "GetWidth")
+    local h = widgetNum(f, "GetHeight")
+    if l == nil or b == nil or w == nil or h == nil then return false end
+    local hw, hh = View.HostSizeFor(w, h)
+    call(host, "SetSize", hw, hh)
+    call(host, "ClearAllPoints")
+    call(host, "SetPoint", "BOTTOMLEFT", P, "BOTTOMLEFT", l, b)
+    local S = ns.Skin
+    if S and type(S.CommitMove) == "function" then
+        -- FCF_SavePositionAndDimensions writes BOTH — which is why a resize
+        -- needs no second save verb and cannot disagree with a move about the
+        -- corner they share.
+        pcall(S.CommitMove, host)
+    end
+    local R = ns.Reconcile
+    if R and R.NoteExternalChange then pcall(R.NoteExternalChange, "resize: view chassis") end
+    return true
+end
+
+View.resizes = 0
+
+function View.OnResizeStop()
+    if not View._sizing then return false end
+    View._sizing = nil
+    local f = View.chassis
+    if not f then return false end
+    call(f, "StopMovingOrSizing")
+    -- CLAMP AT THE DROP, not through SetResizeBounds: the client applies bounds
+    -- inside its own sizing loop, and this box is sized by paths we drive too.
+    -- A floor that only lives in the client's loop is a floor that sometimes
+    -- does not run.
+    local l = widgetNum(f, "GetLeft")
+    local b = widgetNum(f, "GetBottom")
+    View.ResizeTo(widgetNum(f, "GetWidth"), widgetNum(f, "GetHeight"), l, b)
+    View.SnapResize()
+    local S = ns.Skin
+    if S and type(S.EndSnapGuides) == "function" then pcall(S.EndSnapGuides) end
+    View.resizes = View.resizes + 1
+    View.CommitSize()
+    return true
+end
+
+----------------------------------------------------------------------
 -- HOOKS. hooksecurefunc is permanent, so every install happens exactly once
 -- (first enable) and every body gates on View.active.
 ----------------------------------------------------------------------
@@ -1474,9 +2019,25 @@ local function installHooks()
     if type(_G.FCF_DockUpdate) == "function" then
         hook("FCF_DockUpdate", function()
             if not View.active then return end
-            for id = 1, numWindows() do View.KeepEngineHidden(View.ClientFrame(id)) end
+            View.KeepAllEngineHidden()
             View.Layout()
         end)
+    end
+    -- THE TAB RE-SHOW, BEATEN AT ITS SOURCE. The dock's own tab beat shows every
+    -- tab whose window the STORE says is live — and the store always says so,
+    -- because hiding a frame is a display act and never a routing one. This is
+    -- the beat that put the owner's stray gold "Loot" tab back over our feed
+    -- after HideEngine had already taken it down once. Same posture as the
+    -- clamp and the button column: in-call, last word, never a timer.
+    for _, verb in ipairs({ "FCFDock_UpdateTabs", "FCF_FlashTab", "FCF_StartAlertFlash",
+                            "FCF_MinimizeFrame", "FCF_CreateMinimizedFrame",
+                            "FCF_UpdateResizeButton", "FCF_FadeInScrollbar" }) do
+        if type(_G[verb]) == "function" then
+            hook(verb, function()
+                if not View.active then return end
+                View.KeepAllEngineHidden()
+            end)
+        end
     end
     -- A temporary window (a whisper pop-out) opens: it becomes a tab of ours
     -- like any other window, and its own frame goes down with the rest.
@@ -1643,11 +2204,28 @@ ns.RegisterDebugCommand("view", "the owned view: chassis, tabs, mirror, engine",
     ns:Print(("  engine: %d window(s) held down, %d client re-show(s) beaten, %d resync(s)")
         :format((function() local n = 0 for _ in pairs(View._engineHidden) do n = n + 1 end return n end)(),
                 View.reHides, View.resyncs))
-    ns:Print(("  edit box: %d retarget(s), hosted %s | %d chassis move(s)"):format(
-        View.retargets,
+    ns:Print(("  edit box: %d retarget(s), hosted %s | %d chassis move(s), %d resize(s)")
+        :format(View.retargets,
         tostring(View._ebHome and View._ebHome.eb and View._ebHome.eb.GetName
             and View._ebHome.eb:GetName() or "none"),
-        View.moves))
+        View.moves, View.resizes))
+    do
+        local cw = widgetNum(View.chassis, "GetWidth") or 0
+        local ch = widgetNum(View.chassis, "GetHeight") or 0
+        local mnW, mnH = View.MinChassisSize()
+        local mxW, mxH = View.MaxChassisSize()
+        ns:Print(("  size: %.0fx%.0f (min %.0fx%.0f, max %.0fx%.0f), grip %d, %d settle pass(es)")
+            :format(cw, ch, mnW, mnH, mxW, mxH, GRIP_SIZE, View.settles))
+        local held, sats = 0, 0
+        for frame, rec in pairs(View._engineHidden) do
+            held = held + 1
+            if type(rec) == "table" then
+                for _ in pairs(rec.satellites) do sats = sats + 1 end
+            end
+        end
+        ns:Print(("  satellites: %d held down across %d window(s) (roster of %d per window)")
+            :format(sats, held, #View.SATELLITES))
+    end
     ns:Print("  corners: SQUARE (DEFERRED: nine-slice corner art is ours to ship, not a client limit)")
     for _, id in ipairs(View.ids) do
         local smf = View.frames[id]
@@ -2049,8 +2627,282 @@ local function testLive(fails, verbose)
     end
     Sim.opts.addonEventFirst = savedOrder
 
+    -- ── Phase 13: THE TAB RUN (the owner's "Loot FoDMs" overlap). ────────
+    -- Four tabs, laid out, MEASURED. Nothing in this file could be asked
+    -- "where did that tab end up" before the sim grew an anchor resolver, which
+    -- is exactly why a tab run that piled three labels on one x shipped green.
+    local rect = Sim.ResolveRect
+    local savedW = {}
+    for id = 3, 5 do
+        local w = Sim.windows[id]
+        savedW[id] = { w.name, w.shown, w.docked }
+    end
+    _G.FCF_OpenNewWindow("Focus")
+    _G.FCF_OpenNewWindow("DMs")
+    _G.FCF_OpenNewWindow("Loot")
+    View.Refresh()
+    if HT then HT.flush() end
+    ck(#View.ids >= 4, "phase 13: the world has a real tab run to measure")
+    local sl, sb, sw, sh = rect(View.strip)
+    ck(sl ~= nil, "phase 13: the tab strip's rect RESOLVES (geometry is assertable at all)")
+    local prevRight, runOk, insideOk, orderOk = nil, true, true, true
+    for _, id in ipairs(View.ids) do
+        local l, b, w, h = rect(View.tabs[id].button)
+        if l == nil then runOk = false break end
+        if prevRight then
+            -- THE PIN: consecutive tabs are exactly TAB_GAP apart, in order.
+            if math.abs(l - (prevRight + TAB_GAP)) > 1e-6 then runOk = false end
+            if l < prevRight then orderOk = false end
+        end
+        if sl and (l < sl or l + w > sl + sw or b < sb or b + h > sb + sh) then insideOk = false end
+        prevRight = l + w
+    end
+    ck(runOk, "phase 13: RED CONTROL — each tab starts exactly TAB_GAP past the "
+        .. "previous one's RIGHT EDGE (a run, not a pile)")
+    ck(orderOk, "phase 13: …and the run advances, so no two tabs share an x")
+    ck(insideOk, "phase 13: …and every tab sits inside the strip")
+    local anyOverlap = false
+    for i = 1, #View.ids do
+        for j = i + 1, #View.ids do
+            if Sim.RectsOverlap(View.tabs[View.ids[i]].button,
+                                View.tabs[View.ids[j]].button) then anyOverlap = true end
+        end
+    end
+    ck(not anyOverlap, "phase 13: RED CONTROL — no two tab buttons OVERLAP")
+
+    -- THE BADGE RIDES THE FIXED LAYOUT: the mockup keeps the pip INSIDE the
+    -- tab, and the tab is sized for it — so a detached chip floating past the
+    -- tab's right edge is a layout failure, not a cosmetic one.
+    local badgeId = View.ids[2] or View.ids[1]
+    local Bm = ns.Badges
+    if Bm and Bm.active then
+        Bm.Clear(View.ClientFrame(badgeId))
+        View.ClientFrame(badgeId):AddMessage("unseen for the pip", 1, 1, 1)
+        if HT then HT.advance(0) end
+        View.LayoutTabs()
+        local bw = Bm.widgets[View.ClientFrame(badgeId)]
+        if bw and bw.holder and bw.holder._shown then
+            local hl, hb, hw, hh = rect(bw.holder)
+            local tl, tb, tw, th = rect(View.tabs[badgeId].button)
+            ck(hl ~= nil and tl ~= nil, "phase 13: the pip and its tab both resolve")
+            if hl and tl then
+                ck(hl >= tl - 1e-6 and hl + hw <= tl + tw + 1e-6,
+                    "phase 13: RED CONTROL — the unread pip sits INSIDE its tab "
+                    .. "(never floating detached past its right edge)")
+                ck(hb >= tb - 1e-6 and hb + hh <= tb + th + 1e-6,
+                    "phase 13: …vertically inside it too")
+            end
+        end
+        -- THE DEFERRED SETTLE, pinned: a pip appearing changes a measurement
+        -- the pass already sized the tab from, so exactly ONE more pass is
+        -- asked for — on the next client beat, never on a ticker — and the tab
+        -- comes out wider than it was without one.
+        local settlesBefore = View.settles
+        Bm.Clear(View.ClientFrame(badgeId))
+        View.LayoutTabs()
+        local narrow = select(3, rect(View.tabs[badgeId].button))
+        View.ClientFrame(badgeId):AddMessage("another unseen", 1, 1, 1)
+        if HT then HT.advance(0) end
+        ck(View.settles >= settlesBefore,
+            "phase 13: a changed measurement asks for a settle pass, not a poll")
+        View.LayoutTabs()
+        local wide = select(3, rect(View.tabs[badgeId].button))
+        ck(wide ~= nil and narrow ~= nil and wide > narrow,
+            "phase 13: …and the tab really grew to hold the pip the mockup keeps INSIDE it")
+        -- Idempotent: laying out again with nothing changed asks for nothing.
+        local settled = View.settles
+        View.LayoutTabs()
+        if HT then HT.advance(0) end
+        ck(View.settles == settled or View.settles == settled + 1,
+            "phase 13: …and a steady state does NOT keep re-scheduling itself")
+        Bm.Clear(View.ClientFrame(badgeId))
+        View.LayoutTabs()
+    end
+
+    -- A FACELESS LABEL still lays out. The sim now answers 0 for a FontString
+    -- nobody gave a face to (the real client's rule), so the width fallback is
+    -- a PIN rather than an assumption.
+    do
+        local t = View.tabs[View.ids[1]]
+        local savedFont = t.label._font
+        t.label._font = nil
+        ck(t.label:GetStringWidth() == 0, "phase 13: a faceless label really measures NOTHING")
+        View.LayoutTabs()
+        local l1, _, w1 = rect(t.button)
+        ck(l1 ~= nil and w1 >= TAB_MIN_W,
+            "phase 13: …and the tab is still sized from the fallback, never from 0")
+        t.label._font = savedFont
+        View.LayoutTabs()
+    end
+
+    -- ── Phase 14: THE GEOMETRIC INVARIANT, all three placements. ─────────
+    -- The feed never climbs into the tab strip / rail, and never under the
+    -- entry bar, at ANY placement. Measured, not reasoned about.
+    local savedPlace = ns.Config.TabPlacement()
+    for _, place in ipairs({ "top", "left", "right" }) do
+        ns.Config.SetTabPlacement(place)
+        View.Layout()
+        local cl, cb, cw, chh = rect(View.chassis)
+        local rl, rb, rw, rh = rect(View.strip)
+        local el, eb2, ew, eh = rect(View.entry)
+        local fl, fb, fw, fh = rect(View.frames[View.activeId])
+        local tag = "phase 14 [" .. place .. "]: "
+        ck(fl ~= nil and rl ~= nil and el ~= nil, tag .. "every region resolves")
+        if fl and rl and el and cl then
+            if place == "top" then
+                ck(fb + fh <= rb + 1e-6,
+                    tag .. "RED CONTROL — the feed's TOP edge is at or below the strip's BOTTOM")
+            elseif place == "left" then
+                ck(fl >= rl + rw - 1e-6, tag .. "the feed starts at or past the rail's right edge")
+            else
+                ck(fl + fw <= rl + 1e-6, tag .. "the feed ends at or before the rail's left edge")
+            end
+            ck(fb >= eb2 + eh - 1e-6, tag .. "…and its BOTTOM edge clears the entry bar")
+            ck(fl >= cl - 1e-6 and fl + fw <= cl + cw + 1e-6
+               and fb >= cb - 1e-6 and fb + fh <= cb + chh + 1e-6,
+                tag .. "…and the whole feed is inside the chassis")
+            ck(fw > 0 and fh > 0, tag .. "…with a real rect")
+        end
+    end
+    ns.Config.SetTabPlacement(savedPlace)
+    View.Layout()
+
+    -- ── Phase 15: THE SATELLITE FAMILY (the stray stock tab). ────────────
+    -- Hiding a window is not hiding its dress: the tab, the edit box, the
+    -- button column, the minimize button, the resize grip, the scrollbar and
+    -- the click-anywhere overlay are all SEPARATE frames that do not follow
+    -- their window's Hide — and the client puts them BACK on its own beats.
+    local hostedEB = View._ebHome and View._ebHome.eb
+    local function strays()
+        local out = {}
+        for _, id in ipairs(View.ids) do
+            for _, nm in ipairs(Sim.ShownSatellites(View.ClientFrame(id))) do
+                if not (hostedEB and nm == hostedEB._name) then out[#out + 1] = nm end
+            end
+        end
+        return out
+    end
+    ck(#strays() == 0, "phase 15: RED CONTROL — the COMPLETE satellite family of every "
+        .. "owned window is down (found: " .. table.concat(strays(), ", ") .. ")")
+    -- …and it stays down through every beat the client re-asserts its dress on.
+    local reShowsBefore = Sim.tabReShows
+    Sim.ClientFadeBeat()
+    for id = 1, 10 do _G.FloatingChatFrame_Update(id) end
+    _G.FCF_DockUpdate()
+    _G.FCFDock_UpdateTabs()
+    Sim.LayoutBeat()
+    ck(Sim.tabReShows > reShowsBefore,
+        "phase 15: the client really did try to put its tabs back")
+    ck(#strays() == 0, "phase 15: RED CONTROL — …and every one of them was beaten "
+        .. "(found: " .. table.concat(strays(), ", ") .. ")")
+    -- NOTHING of the client's overlaps our chassis: the owner's stray gold tab
+    -- floated MID-PANEL because the dock bar hugs the engine window's top edge,
+    -- which is inside the chassis our own strip sits above.
+    -- (The hosted edit box is excluded: it is ON the chassis on purpose — that
+    -- is the persistent entry bar, reparented, which is a different fact from a
+    -- stray the client put back.)
+    local overlaps = {}
+    for _, id in ipairs(View.ids) do
+        for _, w in ipairs(Sim.SatellitesOf(View.ClientFrame(id))) do
+            if w._shown and w ~= hostedEB and Sim.RectsOverlap(w, View.chassis) then
+                overlaps[#overlaps + 1] = tostring(w._name)
+            end
+        end
+    end
+    ck(#overlaps == 0, "phase 15: RED CONTROL — no client satellite is drawn OVER our "
+        .. "chassis (found: " .. table.concat(overlaps, ", ") .. ")")
+
+    -- ── Phase 16: RESIZE — the owner's second ask. ───────────────────────
+    local grip = View.EnsureGrip()
+    ck(type(grip) == "table", "phase 16: the chassis carries a resize grip")
+    ck(grip._shown == true, "phase 16: …which exists whether or not it is visible")
+    local minW, minH = View.MinChassisSize()
+    local maxW, maxH = View.MaxChassisSize()
+    ck(minW > 0 and minH > 0, "phase 16: a real minimum exists")
+    ck(maxH >= minH and maxW >= minW, "phase 16: …and the maximum is above it")
+    -- The minimum is honest about what it reserves: strip + 3 feed lines + entry.
+    local mm = View.Metrics()
+    ck(minH >= mm.stripH + mm.entryH + mm.msgPadTop + mm.msgPadBottom,
+        "phase 16: the minimum reserves the strip, the entry and the feed's own padding")
+
+    -- A resize DROP: clamped, reflowed, committed, captured, synced.
+    local hostR = View.ClientFrame(View.HostId())
+    local sizeCommitsBefore = ns.Skin.moveCommits
+    View.OnResizeStart()
+    ck(View._sizing == true, "phase 16: the grip started a resize")
+    Sim.SizeTo(View.chassis, View.chassis:GetLeft() + 620, View.chassis:GetBottom() - 130)
+    View.OnResizeStop()
+    ck(View._sizing == nil, "phase 16: …and the drop ended it")
+    local cw2, ch2 = View.chassis:GetWidth(), View.chassis:GetHeight()
+    ck(cw2 >= minW - 1e-6 and ch2 >= minH - 1e-6, "phase 16: the drop is CLAMPED to the minimum")
+    ck(cw2 <= maxW + 1e-6 and ch2 <= maxH + 1e-6, "phase 16: …and to the screen")
+    ck(ns.Skin.moveCommits > sizeCommitsBefore,
+        "phase 16: …committed with the CLIENT's own save verb (pos AND dimensions)")
+    local hw, hh2 = hostR:GetWidth(), hostR:GetHeight()
+    ck(hw > 0 and hh2 > 0, "phase 16: the ENGINE's host window was resized with us")
+    local capR = ns.Config.CaptureWindow(View.HostId())
+    ck(type(capR.ndim) == "table" and capR.ndim[1] > 0 and capR.ndim[2] > 0,
+        "phase 16: the capture carries ndim — the size as a FRACTION of the pixel screen")
+    -- THE GEOMETRY INVARIANT SURVIVES THE RESIZE (defect 3 stays fixed at every size).
+    do
+        local rl2, rb2 = rect(View.strip)
+        local fl2, fb2, fw2, fh2 = rect(View.frames[View.activeId])
+        ck(fb2 ~= nil and rb2 ~= nil and fb2 + fh2 <= rb2 + 1e-6,
+            "phase 16: RED CONTROL — the feed still clears the strip AFTER a resize")
+        ck(fw2 > 0 and fh2 > 0, "phase 16: …and still has a real rect")
+    end
+    -- A tiny drag is refused down to the floor rather than collapsing the box.
+    View.OnResizeStart()
+    Sim.SizeTo(View.chassis, View.chassis:GetLeft() + 10, View.chassis:GetBottom() + 10)
+    View.OnResizeStop()
+    ck(View.chassis:GetWidth() >= minW - 1e-6 and View.chassis:GetHeight() >= minH - 1e-6,
+        "phase 16: RED CONTROL — a collapse-sized drop lands on the MINIMUM, not on nothing")
+    -- …and the size ROUND-TRIPS through the sync snapshot (the aliases lesson:
+    -- a field that is not whitelisted is silently account-local forever).
+    local liveDim = ns.Config.CaptureNormalizedDim(View.HostId())
+    ns.Config.CaptureBack("phase 16 resize")
+    ns.Config.Bump()
+    local snapR = ns.Config.Snapshot()
+    local synced = snapR and snapR.cfg and snapR.cfg.windows
+        and snapR.cfg.windows[View.HostId()]
+    ck(type(synced) == "table" and type(synced.ndim) == "table",
+        "phase 16: RED CONTROL — ndim rides the WIRE payload alongside npos")
+    ck(ns.Config.NearDim(synced.ndim, liveDim),
+        "phase 16: …and it is the size that was actually dropped")
+    -- The reconciler replays it, exactly as it replays npos.
+    local cR = ns.Config.Get()
+    cR.windows[View.HostId()].ndim = { 0.25, 0.20 }
+    local appliedR = ns.Reconcile.ApplySizes(cR)
+    ck(#appliedR > 0, "phase 16: the reconciler APPLIES a stored ndim at login")
+    ck(math.abs(hostR:GetWidth() * hostR:GetEffectiveScale()
+        - 0.25 * Sim.screenPixels[1]) < 2,
+        "phase 16: …denormalized into THIS account's units (the npos discipline)")
+    ck(ns.Reconcile.PositionVerdict():find("resize") ~= nil
+       or ns.Reconcile.lastSizeChange ~= nil,
+        "phase 16: …and a size change is on the verdict ledger")
+
+    -- Put the world back the way phase 13 found it.
+    for id = 3, 5 do
+        local w = Sim.windows[id]
+        w.name, w.shown, w.docked = savedW[id][1], savedW[id][2], savedW[id][3]
+        _G.FloatingChatFrame_Update(id)
+    end
+    View.Refresh()
+    if HT then HT.flush() end
+
     -- ── Phase 12: RED CONTROL 4 — disable/restore leaves the world tidy. ─
     local ebHosted = View._ebHome and View._ebHome.eb
+    -- What the client had up BEFORE we ever touched it, per window, so the
+    -- restore is pinned as a ROUND TRIP rather than as "something is showing".
+    local dressBefore = {}
+    for _, id in ipairs(View.ids) do
+        local frame = View.ClientFrame(id)
+        local rec = View._engineHidden[frame]
+        dressBefore[id] = {}
+        if type(rec) == "table" then
+            for w in pairs(rec.satellites) do dressBefore[id][w] = true end
+        end
+    end
     ns.SetModuleEnabled("view", false)
     if HT then HT.flush() end
     ck(View.active == false, "phase 12: the view is inactive again")
@@ -2062,6 +2914,26 @@ local function testLive(fails, verbose)
     end
     ck(allBack, "phase 12: RED CONTROL — every engine window is SHOWN again")
     ck(next(View._engineHidden) == nil, "phase 12: …and nothing is being held down")
+    -- THE SATELLITE ROUND TRIP: every piece of dress we took down is back, and
+    -- exactly those — a satellite the client already had hidden when we arrived
+    -- (the edit box under chatStyle 'classic') is not "restored" into a state it
+    -- was never in.
+    local dressBack, dressExtra = true, {}
+    for _, id in ipairs(View.ids) do
+        for w in pairs(dressBefore[id] or {}) do
+            if w ~= ebHosted and not w._shown then dressBack = false end
+        end
+        for _, w in ipairs(Sim.SatellitesOf(View.ClientFrame(id))) do
+            if w._shown and not (dressBefore[id] and dressBefore[id][w])
+               and w ~= ebHosted and w._kind ~= "EditBox" then
+                -- Not ours to have shown: the client's own restore beat may
+                -- legitimately raise things, so this is recorded, not failed.
+                dressExtra[#dressExtra + 1] = tostring(w._name)
+            end
+        end
+    end
+    ck(dressBack, "phase 12: RED CONTROL — every satellite the view took down is SHOWN "
+        .. "again (the complete family round-trips, not just the window)")
     ck(ebHosted and ebHosted._parent == _G["ChatFrame" .. View.HostId()],
         "phase 12: the edit box went HOME to its own client window")
     ck(View._ebHome == nil, "phase 12: …and the view holds no claim on it")

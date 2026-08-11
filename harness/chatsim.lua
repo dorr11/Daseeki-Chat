@@ -125,6 +125,8 @@ _G.date = os.date
 local WIDGET_API = {}
 local widgetMeta
 
+Sim._fontStrings = {}
+
 local function newWidget(kind, name, parent)
     local w = {
         _kind = kind, _name = name, _parent = parent,
@@ -134,6 +136,7 @@ local function newWidget(kind, name, parent)
     setmetatable(w, widgetMeta)
     if name then _G[name] = w end
     if parent and parent._children then parent._children[#parent._children + 1] = w end
+    if kind == "FontString" then Sim._fontStrings[#Sim._fontStrings + 1] = w end
     return w
 end
 Sim.NewWidget = newWidget
@@ -203,9 +206,23 @@ function WIDGET_API.GetPoint(self, i)
     return p[1], p[2], p[3], p[4], p[5]
 end
 function WIDGET_API.SetAllPoints(self, target) self._allPoints = target or self._parent end
-function WIDGET_API.SetSize(self, w, h) self._w, self._h = w, h end
-function WIDGET_API.SetWidth(self, w) self._w = w end
-function WIDGET_API.SetHeight(self, h) self._h = h end
+-- view/align sim extension: a REAL size change fires OnSizeChanged, exactly
+-- once, exactly like the client — which is the beat an inner layout reflows on
+-- while a resize drag is still in flight. A redundant SetSize fires nothing.
+local function sizeChanged(self, w, h)
+    if self._w == w and self._h == h then return end
+    self._w, self._h = w, h
+    local fn = self._scripts and self._scripts.OnSizeChanged
+    if fn and not self._inSizeChanged then
+        self._inSizeChanged = true
+        local ok, err = pcall(fn, self, w or 0, h or 0)
+        self._inSizeChanged = nil
+        if not ok then error(err, 0) end
+    end
+end
+function WIDGET_API.SetSize(self, w, h) sizeChanged(self, w, h) end
+function WIDGET_API.SetWidth(self, w) sizeChanged(self, w, self._h) end
+function WIDGET_API.SetHeight(self, h) sizeChanged(self, self._w, h) end
 function WIDGET_API.GetWidth(self) return self._w or 0 end
 function WIDGET_API.GetHeight(self) return self._h or 0 end
 function WIDGET_API.SetScript(self, k, fn) self._scripts[k] = fn end
@@ -314,7 +331,31 @@ function WIDGET_API.SetText(self, text)
 end
 function WIDGET_API.GetText(self) return self._text or "" end
 function WIDGET_API.SetTextColor(self, r, g, b, a) self._textColor = { r, g, b, a } end
-function WIDGET_API.GetStringWidth(self) return #(self._text or "") * 7 end
+-- ── UNKIND STRING WIDTH (view/align sim extension) ───────────────────────────
+-- The kind version of this method answered `#text * 7` for ANY FontString the
+-- moment it existed — including one that had never been given a face. That is
+-- an idealized client. Live on 11509 a FontString measures NOTHING until a font
+-- has been applied to it: the client cannot measure glyphs it has no face for,
+-- so GetStringWidth answers a flat 0 and keeps answering 0 for as long as the
+-- string is faceless. Any layout that sizes a widget FROM that measurement
+-- sizes it from nothing.
+--
+-- THIS IS THE HAZARD THE OVERLAPPING-TAB DEFECT WAS SUSPECTED OF, and the sim
+-- hid it completely: every SetFont call in the view is CONDITIONAL on the
+-- DaseekiUI kit answering, so on a client where it does not, every tab label is
+-- faceless and every width the layout reads is 0. The measured cause turned out
+-- to be arithmetic (see the tab-run pin in view.lua), but the width hazard is
+-- real, it is now modeled, and the fallback that answers it is now pinned
+-- rather than assumed.
+--
+-- The client's OWN long-lived strings are born with a face (makeChatFrame sets
+-- one), so this lands where it is real: on strings an ADDON creates and never
+-- gives a font to.
+function WIDGET_API.GetStringWidth(self)
+    record("GetStringWidth")
+    if not (self._font or self._fontObject) then return 0 end
+    return #(self._text or "") * 7
+end
 function WIDGET_API.SetJustifyH(self, j) self._justifyH = j end
 function WIDGET_API.GetJustifyH(self) return self._justifyH or "LEFT" end
 -- EditBox surface.
@@ -440,6 +481,115 @@ function Sim.ColumnRect(frame)
     return bf._left, bf._bottom, bf._w or 0, bf._h or 0
 end
 
+-- ── THE ANCHOR RESOLVER (view/align sim extension) ───────────────────────────
+-- THE BLIND SPOT THIS CLOSES, named: until now the sim recorded SetPoint calls
+-- but only ever RESOLVED the one special case the position work needed
+-- (BOTTOMLEFT -> BOTTOMLEFT). Every other anchor was write-only, so no test
+-- could ask the question that matters for a drawn layout — "where does this
+-- widget actually END UP" — and a whole class of layout arithmetic (a tab run
+-- that piles four tabs on one x, a feed whose top edge climbs into the tab
+-- strip) was unassertable BY CONSTRUCTION. An unmeasurable client is a kind
+-- client.
+--
+-- The solver is the client's own model: a widget's rect is fixed by its points,
+-- each of which pins one of its own anchor fractions to a coordinate on another
+-- widget's rect. Two points on one axis DETERMINE the size (and, exactly like
+-- the client, they OUTRANK an explicit SetSize — "if both edges are anchored,
+-- setting the width has no effect"); one point plus an explicit size does too.
+-- Anything less is genuinely unresolvable and answers nil rather than a zero.
+local ANCHOR_H = {
+    LEFT = 0, RIGHT = 1, CENTER = 0.5, TOP = 0.5, BOTTOM = 0.5,
+    TOPLEFT = 0, BOTTOMLEFT = 0, TOPRIGHT = 1, BOTTOMRIGHT = 1,
+}
+local ANCHOR_V = {
+    BOTTOM = 0, TOP = 1, CENTER = 0.5, LEFT = 0.5, RIGHT = 0.5,
+    BOTTOMLEFT = 0, BOTTOMRIGHT = 0, TOPLEFT = 1, TOPRIGHT = 1,
+}
+
+local function solveAxis(cs, explicitSize)
+    -- Two constraints at different fractions determine BOTH origin and size.
+    for i = 1, #cs do
+        for j = i + 1, #cs do
+            if cs[i].frac ~= cs[j].frac then
+                local a, b = cs[i], cs[j]
+                local size = (b.at - a.at) / (b.frac - a.frac)
+                return a.at - a.frac * size, size
+            end
+        end
+    end
+    if #cs >= 1 and explicitSize then
+        return cs[1].at - cs[1].frac * explicitSize, explicitSize
+    end
+    return nil
+end
+
+local resolveRect
+resolveRect = function(w, busy)
+    if type(w) ~= "table" then return nil end
+    busy = busy or {}
+    if busy[w] then return nil end                  -- an anchor cycle resolves to nothing
+    busy[w] = true
+    local function done(a, b, c, d) busy[w] = nil return a, b, c, d end
+    if w._allPoints then
+        local l, b, ww, hh = resolveRect(w._allPoints, busy)
+        return done(l, b, ww, hh)
+    end
+    -- A FontString has an IMPLICIT size — its measured text box — which is why
+    -- anchoring off one (the mockup's pip sits after the tab's LABEL, not after
+    -- the tab) resolves at all. Width is the measurement, height the face's own
+    -- line box; both fall out of the model already here.
+    local iw, ih = w._w, w._h
+    if w._kind == "FontString" then
+        if iw == nil then iw = w:GetStringWidth() end
+        if ih == nil then
+            local size = (w._font and tonumber(w._font[2])) or 12
+            ih = size * 1.2
+        end
+    end
+    local pts = w._points or {}
+    if #pts == 0 then
+        if w._left ~= nil and w._bottom ~= nil then
+            return done(w._left, w._bottom, iw or 0, ih or 0)
+        end
+        return done(nil)
+    end
+    local hc, vc = {}, {}
+    for _, p in ipairs(pts) do
+        local mine = tostring(p[1] or ""):upper()
+        local rel  = p[2] or w._parent
+        local theirs = tostring(p[3] or p[1] or ""):upper()
+        local x, y = tonumber(p[4]) or 0, tonumber(p[5]) or 0
+        local rl, rb, rw, rh = resolveRect(rel, busy)
+        if rl ~= nil then
+            if ANCHOR_H[mine] and ANCHOR_H[theirs] then
+                hc[#hc + 1] = { frac = ANCHOR_H[mine], at = rl + (rw or 0) * ANCHOR_H[theirs] + x }
+            end
+            if ANCHOR_V[mine] and ANCHOR_V[theirs] then
+                vc[#vc + 1] = { frac = ANCHOR_V[mine], at = rb + (rh or 0) * ANCHOR_V[theirs] + y }
+            end
+        end
+    end
+    local l, ww = solveAxis(hc, iw)
+    local b, hh = solveAxis(vc, ih)
+    if l == nil or b == nil then return done(nil) end
+    return done(l, b, ww, hh)
+end
+
+-- left, bottom, width, height in the widget's own units — or nil for a widget
+-- the anchors do not determine (never a hopeful zero).
+function Sim.ResolveRect(w) return resolveRect(w) end
+
+-- Do two resolved rects overlap? nil when either cannot be resolved, so a test
+-- can tell "they do not overlap" from "nobody could say".
+function Sim.RectsOverlap(a, b)
+    local al, ab, aw, ah = Sim.ResolveRect(a)
+    local bl, bb, bw, bh = Sim.ResolveRect(b)
+    if al == nil or bl == nil then return nil end
+    if al + aw <= bl or bl + bw <= al then return false end
+    if ab + ah <= bb or bb + bh <= ab then return false end
+    return true
+end
+
 function WIDGET_API.SetScale(self, s) self._scale = tonumber(s) or 1 end
 function WIDGET_API.GetScale(self) return self._scale or 1 end
 function WIDGET_API.GetEffectiveScale(self)
@@ -476,6 +626,7 @@ end
 function WIDGET_API.StopMovingOrSizing(self)
     record("StopMovingOrSizing")
     self._moving = false
+    self._sizing = nil
     -- w2/button-column sim extension: the window landed somewhere new, so the
     -- client re-decides which side its button column belongs on — and re-shows
     -- it in the process. This is the beat that makes two accounts differ.
@@ -501,7 +652,30 @@ function WIDGET_API.GetClampRectInsets(self)
     return c[1], c[2], c[3], c[4]
 end
 function WIDGET_API.IsMouseEnabled(self) return self._mouse ~= false end
-function WIDGET_API.SetResizeBounds(self) end
+-- ── RESIZING (view/align sim extension) ──────────────────────────────────────
+-- The catalog-verified surface (SetResizable / StartSizing /
+-- StopMovingOrSizing / SetResizeBounds on 11509) modeled UNKIND, the way the
+-- clamp above is: SetResizeBounds only RECORDS the numbers — the sim never
+-- enforces them for you — because the live client applies bounds during its own
+-- sizing loop and an addon that leans on that for its MIN/MAX has no answer at
+-- all on the paths it drives itself. Code that wants a floor has to clamp.
+function WIDGET_API.SetResizable(self, on) record("SetResizable") self._resizable = on and true or false end
+function WIDGET_API.IsResizable(self) return self._resizable and true or false end
+function WIDGET_API.SetResizeBounds(self, minW, minH, maxW, maxH)
+    record("SetResizeBounds")
+    self._resizeBounds = { minW, minH, maxW, maxH }
+end
+function WIDGET_API.GetResizeBounds(self)
+    local b = self._resizeBounds
+    if not b then return nil end
+    return b[1], b[2], b[3], b[4]
+end
+function WIDGET_API.StartSizing(self, point)
+    record("StartSizing")
+    if not self._resizable then return end
+    self._sizing = tostring(point or "BOTTOMRIGHT"):upper()
+end
+function WIDGET_API.IsResizing(self) return self._sizing and true or false end
 function WIDGET_API.SetHitRectInsets(self) end
 function WIDGET_API.EnableMouseWheel(self) end
 
@@ -539,6 +713,27 @@ function Sim.DragTo(frame, left, bottom)
     end
     frame._left, frame._bottom = l, b
     return l, b
+end
+
+-- Drag the BOTTOMRIGHT sizing grip so the frame's right edge lands at `right`
+-- and its bottom edge at `bottom` (both in the frame's own units). Only works
+-- while the frame is actually sizing (StartSizing), and — UNKIND, on purpose —
+-- NOTHING is clamped here: the sim will happily size a frame to two units or
+-- past the screen, so a min/max that lives only in SetResizeBounds is a min/max
+-- that never ran. The TOP and LEFT edges are held, which is what a BOTTOMRIGHT
+-- grip means. Returns the landed width, height.
+function Sim.SizeTo(frame, right, bottom)
+    if type(frame) ~= "table" or not frame._sizing then return nil end
+    local l, b, w, h = Sim.ResolveRect(frame)
+    if l == nil then l, b, w, h = frame._left, frame._bottom, frame._w or 0, frame._h or 0 end
+    if l == nil then return nil end
+    local top = b + (h or 0)
+    local nw = (tonumber(right) or l) - l
+    local nh = top - (tonumber(bottom) or b)
+    frame._bottom = top - nh
+    frame._left   = l
+    frame:SetSize(nw, nh)
+    return nw, nh
 end
 
 -- ── THE CLIENT'S CLAMP *ENFORCEMENT* (w2/bounce sim extension) ───────────────
@@ -581,6 +776,16 @@ function Sim.LayoutBeat()
     end
     for id = 1, _G.NUM_CHAT_WINDOWS do beat(Sim.Frame(id)) end
     for _, f in ipairs(Sim.tempFrames or {}) do beat(f) end
+    return n
+end
+
+-- How many FontStrings in the world are FACELESS right now (and therefore
+-- measure 0). Published so a test can pin that a layout survived exactly that.
+function Sim.FacelessStrings()
+    local n = 0
+    for _, w in ipairs(Sim._fontStrings) do
+        if not (w._font or w._fontObject) then n = n + 1 end
+    end
     return n
 end
 -- Chat-frame display knobs (recorded; the skin fading tests read these).
@@ -809,13 +1014,34 @@ local function makeChatFrame(id)
     for _, suffix in ipairs(STOCK_TEXTURES) do
         newWidget("Texture", name .. suffix, f)
     end
-    -- Tab + its text.
-    local tab = newWidget("Button", name .. "Tab", f)
+    -- ── THE TAB IS NOT THE WINDOW'S CHILD (view/align sim extension) ─────────
+    -- THE FACT THE STRAY-TAB DEFECT WAS MADE OF, modeled at last: on 11509 a
+    -- chat window's tab is a SEPARATE frame parented to the DOCK (or to
+    -- UIParent when the window is undocked), never to the window. So
+    -- `frame:Hide()` does not take the tab down with it, and an addon that
+    -- hides the window and expects the tab to follow leaves a stock, gold-
+    -- bordered tab floating over whatever it drew instead. The old sim parented
+    -- the tab to the frame; sim Hide has never cascaded, so the sim happened to
+    -- behave right for the wrong reason — and, crucially, NOTHING in the client
+    -- model ever put the tab BACK, which is the half that actually escaped.
+    local tab = newWidget("Button", name .. "Tab", _G.GeneralDockManager or _G.UIParent)
+    tab._chatFrame = f
+    f.tab = tab                              -- the field shape the client also carries
     tab.Text = newWidget("FontString", name .. "TabText", tab)
     tab.Text._text = name .. "Tab"          -- a real label, so tab WIDTH is measurable
+    tab.Text._font = { "Fonts\\FRIZQT__.TTF", 12, "" }   -- …and a REAL face, like the client's
+    tab._w, tab._h = 60, 24
+    tab._mouse = true
     for _, suffix in ipairs(TAB_TEXTURES) do
         newWidget("Texture", name .. "Tab" .. suffix, tab)
     end
+    -- The alert flash + glow that ride the tab (FCF_FlashTab / FCF_StartAlertFlash
+    -- are catalog-verified on 11509). Separate regions, and the flash is SHOWN by
+    -- the client on an alert whether or not anybody hid the window.
+    tab.flash = newWidget("Texture", name .. "TabFlash", tab)
+    tab.flash._shown = false
+    tab.glow = newWidget("Texture", name .. "TabGlow", tab)
+    tab.glow._shown = false
     -- w2/button-column sim extension: the CHAT BUTTON FRAME — the little
     -- chat-menu + scroll-button column hanging off the window's edge. Modeled
     -- in BOTH client shapes (the frame's own `buttonFrame` field, which is the
@@ -839,6 +1065,26 @@ local function makeChatFrame(id)
         b._bottom = bf._bottom + bf._h - i * 20
         b._mouse = true
     end
+    -- ── THE REST OF THE SATELLITE FAMILY (view/align sim extension) ──────────
+    -- Every one of these is its own frame, hanging off the window in the client
+    -- and NOT following its Hide. The verbs that prove each one exists on 11509
+    -- are named beside it (all catalog-verified globals).
+    --   FCF_MinimizeFrame / FCF_MaximizeFrame / FCF_CreateMinimizedFrame
+    local minB = newWidget("Button", name .. "ButtonFrameMinimizeButton", bf)
+    minB._w, minB._h, minB._mouse = 20, 20, true
+    f.minimizeButton = minB
+    --   FCF_UpdateResizeButton
+    local rez = newWidget("Button", name .. "ResizeButton", f)
+    rez._w, rez._h, rez._mouse = 16, 16, true
+    f.resizeButton = rez
+    --   FCF_FadeInScrollbar / FCF_FadeOutScrollbar
+    local sb = newWidget("Frame", name .. "ScrollBar", f)
+    sb._w, sb._h = 8, f._h
+    f.ScrollBar = sb
+    --   FCFClickAnywhereButton_OnLoad / _UpdateState
+    local cab = newWidget("Button", name .. "ClickAnywhereButton", f)
+    cab._w, cab._h, cab._mouse = f._w, f._h, true
+    f.clickAnywhereButton = cab
     -- Edit box + its stock art regions, parked below the frame like the client.
     local eb = newWidget("EditBox", name .. "EditBox", f)
     eb:SetPoint("TOPLEFT", f, "BOTTOMLEFT", 0, -6)
@@ -940,17 +1186,20 @@ _G.IsShiftKeyDown   = function() return Sim.shiftDown and true or false end
 _G.IsControlKeyDown = function() return Sim.ctrlDown and true or false end
 
 Sim.windows = defaultWindows()
+-- THE DOCK IS A REAL FRAME, and it exists BEFORE the windows do — because a
+-- docked window's TAB is parented to IT, not to the window (see makeChatFrame).
+-- Modeled as a widget rather than a plain table so the tab family has somewhere
+-- honest to hang and a test can ask where the dock bar actually sits.
+_G.GeneralDockManager = newWidget("Frame", "GeneralDockManager", _G.UIParent)
 _G.CHAT_FRAMES = {}
 for i = 1, _G.NUM_CHAT_WINDOWS do
     makeChatFrame(i)
     _G.CHAT_FRAMES[i] = "ChatFrame" .. i
 end
 _G.DEFAULT_CHAT_FRAME = _G.ChatFrame1
-_G.GeneralDockManager = {
-    primary = _G.ChatFrame1,
-    selected = _G.ChatFrame1,
-    DOCKED_CHAT_FRAMES = { _G.ChatFrame1, _G.ChatFrame2 },
-}
+_G.GeneralDockManager.primary  = _G.ChatFrame1
+_G.GeneralDockManager.selected = _G.ChatFrame1
+_G.GeneralDockManager.DOCKED_CHAT_FRAMES = { _G.ChatFrame1, _G.ChatFrame2 }
 
 -- ── THE CLIENT'S CHAT MENU (w2/button-column sim extension) ──────────────────
 -- The one verb the button column offers that nothing else replicates:
@@ -1106,6 +1355,135 @@ _G.FCF_UpdateButtonSide = function(frame)
     return _G.FCF_SetButtonSide(frame, side)
 end
 
+-- ── THE SATELLITE FAMILY, PUBLISHED (view/align sim extension) ───────────────
+-- Everything that hangs off ONE chat window and does NOT follow its Hide. The
+-- roster is data so a test can walk it rather than re-typing a list that will
+-- drift, and so "the addon hides the COMPLETE set" is an assertion instead of a
+-- claim. Each entry names the field the client carries and the global name the
+-- template gives it; either shape may be the one an addon reaches through.
+Sim.SATELLITES = {
+    { field = "tab",                 global = "%sTab" },
+    { field = "editBox",             global = "%sEditBox" },
+    { field = "buttonFrame",         global = "%sButtonFrame" },
+    { field = "minimizeButton",      global = "%sButtonFrameMinimizeButton" },
+    { field = "minFrame",            global = nil },   -- FCF_CreateMinimizedFrame
+    { field = "resizeButton",        global = "%sResizeButton" },
+    { field = "ScrollBar",           global = "%sScrollBar" },
+    { field = "clickAnywhereButton", global = "%sClickAnywhereButton" },
+}
+
+-- Every satellite widget of one window that currently EXISTS, in roster order.
+function Sim.SatellitesOf(frame)
+    local out = {}
+    if type(frame) ~= "table" then return out end
+    local name = frame._name or ""
+    for _, s in ipairs(Sim.SATELLITES) do
+        local w = s.field and frame[s.field] or nil
+        if type(w) ~= "table" and s.global then w = _G[s.global:format(name)] end
+        if type(w) == "table" then out[#out + 1] = w end
+    end
+    return out
+end
+
+-- The ones still SHOWN. The whole stray-tab question, asked in one call.
+function Sim.ShownSatellites(frame)
+    local out = {}
+    for _, w in ipairs(Sim.SatellitesOf(frame)) do
+        if w._shown then out[#out + 1] = w._name or w._kind end
+    end
+    return out
+end
+
+-- ── THE DOCK BAR, AND THE CLIENT PUTTING ITS TABS BACK ───────────────────────
+-- Where a tab actually SITS: docked tabs run left-to-right along the bar that
+-- hugs the dock primary's TOP edge; an undocked window's tab hugs its own. This
+-- geometry is the reason the escaped tab lands MID-PANEL over a view whose
+-- chassis extends above the engine window it rides.
+--
+-- UNKIND, and the half that made the defect: EVERY dock/window beat SHOWS the
+-- tabs again. The store says the window is shown (an addon that hides display
+-- never touches routing), so the client keeps re-asserting its dress. Hiding a
+-- tab once is not a fix; holding the last word is — exactly like the clamp, the
+-- button column and the tab alpha before it.
+Sim.DOCK_TAB_H = 24
+Sim.tabReShows = 0
+
+local function tabRunFor(id)
+    local w = W(id)
+    if not w then return nil end
+    return (w.docked and w.docked ~= 0) and true or false
+end
+
+function Sim.LayoutDockTabs()
+    local primary = _G.GeneralDockManager and _G.GeneralDockManager.primary
+    local pl = (type(primary) == "table") and primary._left or 0
+    local pb = (type(primary) == "table") and primary._bottom or 0
+    local ph = (type(primary) == "table") and (primary._h or 0) or 0
+    local dockL, dockB = pl or 0, (pb or 0) + ph
+    _G.GeneralDockManager._left, _G.GeneralDockManager._bottom = dockL, dockB
+    _G.GeneralDockManager._w = (type(primary) == "table") and (primary._w or 0) or 0
+    _G.GeneralDockManager._h = Sim.DOCK_TAB_H
+    local run = dockL
+    for id = 1, _G.NUM_CHAT_WINDOWS do
+        local f, w = Sim.Frame(id), W(id)
+        local tab = f and f.tab
+        if tab and w then
+            if tabRunFor(id) then
+                tab._left, tab._bottom = run, dockB
+                run = run + (tab._w or 60)
+            else
+                tab._left = f._left or 0
+                tab._bottom = (f._bottom or 0) + (f._h or 0)
+            end
+        end
+    end
+end
+
+-- The client's own tab beat (FCFDock_UpdateTabs is catalog-verified on 11509).
+-- It lays the run out and SHOWS every tab whose window the STORE says is live.
+_G.FCFDock_UpdateTabs = function()
+    record("FCFDock_UpdateTabs")
+    Sim.LayoutDockTabs()
+    for id = 1, _G.NUM_CHAT_WINDOWS do
+        local f, w = Sim.Frame(id), W(id)
+        if f and f.tab and w and ((w.shown and w.shown ~= 0) or (w.docked and w.docked ~= 0)) then
+            if not f.tab._shown then Sim.tabReShows = Sim.tabReShows + 1 end
+            f.tab:Show()
+        end
+    end
+end
+
+_G.FCF_FlashTab = function(frame)
+    record("FCF_FlashTab")
+    if type(frame) == "table" and type(frame.tab) == "table" and frame.tab.flash then
+        frame.tab.flash:Show()
+    end
+end
+
+-- FCF_CreateMinimizedFrame / FCF_MinimizeFrame / FCF_MaximizeFrame: the
+-- minimized stand-in is created LAZILY, which is why an addon that enumerated
+-- the family once at enable and never again can still be surprised by it.
+_G.FCF_CreateMinimizedFrame = function(frame)
+    record("FCF_CreateMinimizedFrame")
+    if type(frame) ~= "table" then return nil end
+    if type(frame.minFrame) == "table" then return frame.minFrame end
+    local mf = newWidget("Frame", (frame._name or "ChatFrame") .. "MinFrame", _G.UIParent)
+    mf._w, mf._h, mf._mouse = 120, 24, true
+    mf._left, mf._bottom = frame._left or 0, frame._bottom or 0
+    frame.minFrame = mf
+    return mf
+end
+_G.FCF_MinimizeFrame = function(frame)
+    record("FCF_MinimizeFrame")
+    local mf = _G.FCF_CreateMinimizedFrame(frame)
+    if mf then mf:Show() end
+    return mf
+end
+_G.FCF_MaximizeFrame = function(frame)
+    record("FCF_MaximizeFrame")
+    if type(frame) == "table" and type(frame.minFrame) == "table" then frame.minFrame:Hide() end
+end
+
 _G.FloatingChatFrame_Update = function(id)
     record("FloatingChatFrame_Update")
     local w, f = W(id), Sim.Frame(id)
@@ -1125,6 +1503,15 @@ _G.FloatingChatFrame_Update = function(id)
     _G.FCF_UpdateButtonSide(f)
     -- …and re-decides the tab's alpha on the same beat.
     if type(_G.FCFTab_UpdateAlpha) == "function" then _G.FCFTab_UpdateAlpha(f) end
+    -- THE TAB RE-SHOW (view/align sim extension): the window update projects the
+    -- STORE onto the window's dress, and the tab is dress. The store still says
+    -- "shown" — hiding a frame is a display act — so the tab comes straight back
+    -- on a beat nobody asked for.
+    if f.tab and ((w.shown and w.shown ~= 0) or (w.docked and w.docked ~= 0)) then
+        if not f.tab._shown then Sim.tabReShows = Sim.tabReShows + 1 end
+        f.tab:Show()
+        Sim.LayoutDockTabs()
+    end
 end
 _G.FCF_DockUpdate = function()
     record("FCF_DockUpdate")
@@ -1132,6 +1519,7 @@ _G.FCF_DockUpdate = function()
         local f = Sim.Frame(id)
         if f then _G.FCF_UpdateButtonSide(f) end
     end
+    _G.FCFDock_UpdateTabs()
 end
 
 _G.FCF_SetWindowName = function(frame, name)
@@ -1911,6 +2299,9 @@ function Sim.Login(addonName)
 end
 
 function Sim.EnterWorld(isLogin, isReload)
+    -- The client lays its own chat dress out before anybody's ENTERING_WORLD
+    -- handler runs: the dock bar is placed and every live window's tab is up.
+    if type(_G.FCFDock_UpdateTabs) == "function" then _G.FCFDock_UpdateTabs() end
     dispatchEvent("PLAYER_ENTERING_WORLD",
         isLogin == nil and true or isLogin, isReload or false)
     -- Zone channels + list population land ~0.5s later; until then every

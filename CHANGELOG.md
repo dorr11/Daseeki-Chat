@@ -71,6 +71,53 @@ What you get:
   the mirror's counters, how many times the game tried to re-show a window we
   had put away, and the line count per tab.
 
+### Alignment fixes, and the chat box can now be resized
+
+The first live look at the drawn window found three things wrong with how it was
+laid out, and one thing missing. All four are fixed.
+
+- **The tabs no longer draw on top of each other.** The row of tabs was placing
+  each tab at a distance measured from the *previous tab's width* instead of
+  from where the previous tab actually ended, so the first tab landed correctly
+  and everything after it piled into the same small band — the garbled
+  "Loot FoDMs" in the screenshot. The row now runs properly, with the design's
+  2-unit gap between tabs, and there is a test that measures where every tab
+  ends up rather than trusting that it is right.
+- **The unread counter sits inside its tab again.** The chip was hanging off the
+  *tab's* right edge instead of off the end of the tab's *label*, which left it
+  floating detached in the gap between two tabs while the tab itself had already
+  been made wider to hold it. The label and the chip are now centred inside the
+  tab as one piece, exactly as the design draws them, and a tab that gains a
+  counter grows to fit it on the very next frame.
+- **No more stray game tabs floating over your chat.** A chat window is not one
+  frame: hanging off each one are its tab (which lives on the game's dock bar,
+  not on the window, so hiding the window never hid it), its typing box, its
+  button column, the column's minimize button, the minimized stand-in, the
+  resize grip, the scrollbar and a click-catcher overlay. Only three of those
+  were being put away, and the game puts its tabs back on beats of its own —
+  which is how a stock gold-bordered "Loot" tab ended up sitting in the middle
+  of the message feed and clipping the top line. The whole family is now put
+  away, held down against every beat the game re-asserts them on, and restored
+  exactly as it was found when the window is switched off.
+- **You can resize it.** Hover the box and a small handle appears in its
+  bottom-right corner; drag it. There is nothing to unlock — the same answer
+  moving has always had. It will not shrink below a usable box (the tab strip,
+  three lines of chat and the typing bar) or grow past your screen, the tab
+  strip, feed, typing bar and side rail all reflow as you drag, and the drop
+  snaps to screen edges and centre lines just like a move does. **The size is
+  synced**, stored the same scale-independent way the position is — as a
+  fraction of your screen — so it means the same thing on every account and
+  every character, and it is restored at login by the same reconciler that
+  restores the position. `/dchat debug reconcile` now reports a resize in the
+  same one-line verdict it reports a move in.
+
+**Moving and resizing, in one paragraph:** drag the tab strip — anywhere on it,
+including past the last tab — to move the box, or hold ALT and drag anywhere on
+it. Drop it near a screen edge, a screen centre line or another edge and it
+snaps flush. To resize, hover the box, then drag the handle in the bottom-right
+corner. Both gestures save immediately and sync to your other characters. There
+is no lock, no unlock and no edit mode.
+
 Foundation, and the work the drawn window is built on top of:
 
 - Repo skeleton, module lifecycle, `/dchat` slash surface with an extensible
