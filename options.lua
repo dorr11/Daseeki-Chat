@@ -172,6 +172,7 @@ Options.BINDINGS = {
     -- Timestamps
     { id = "stamps.module",      kind = "module", module = "stamps" },
     { id = "stamps.format",      kind = "field",  branch = "stamps", key = "format" },
+    { id = "stamps.brackets",    kind = "field",  branch = "stamps", key = "brackets" },
     { id = "stamps.serverTime",  kind = "field",  branch = "stamps", key = "serverTime" },
     { id = "stamps.native",      kind = "field",  branch = "stamps", key = "native" },
     { id = "stamps.colorMode",   kind = "field",  branch = "stamps", key = "colorMode" },
@@ -706,6 +707,12 @@ local function buildTimestamps(flow)
             { value = "hh:MM:SS", text = "1:05:42 PM" },
         },
         get = fieldGet("stamps", "format"), set = fieldSet("stamps", "format"),
+    }))
+    reg(sec:Checkbox({
+        label = "Square brackets around the time",
+        tooltip = "Off is the shipped look - a bare 17:16 in the timestamp column, with the "
+               .. "hairline doing the separating. On wraps it in [ ] the way older builds did.",
+        get = fieldGet("stamps", "brackets"), set = boolSet("stamps", "brackets"),
     }))
     reg(sec:Checkbox({
         label = "Use server time",

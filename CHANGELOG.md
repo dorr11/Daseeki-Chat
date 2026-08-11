@@ -111,24 +111,26 @@ This entry accumulates until 1.0.0 ships. Foundation so far:
   than pretending to be complete.
 - **One box: tabs, text and input on a single surface.** On by default. A chat
   window is now drawn as one panel — the tab strip, the messages and the input
-  bar all share it, separated by thin lines and nothing else. There is no second
-  background anywhere in it: the input bar's own panel is gone, the tab strip has
-  none of its own, and a docked group of windows wears *one* box rather than one
-  per tab. Text fading is off inside the box, because a box that is always there
+  bar all share it. The strip sits on the darker chassis tone and the messages
+  and input bar on the lighter one, exactly as the design does; the input bar's
+  own panel is gone, the tab strip has none of its own, and a docked group of
+  windows wears *one* box rather than one per tab. Text fading is off inside the
+  box, because a box that is always there
   with text that comes and goes is the worst of both; your fading setting is
   remembered rather than rewritten, and the settings page says so out loud.
   Turning the option off gives the previous look back exactly, fading included.
 - **Choose where your tabs sit: top, left or right.** Top is a strip along the
   box's upper edge, and the tab you are reading merges into the message surface —
-  the dividing line stops at its edges and picks up again on the other side — with
-  a colored underline beneath it. Left and right put the tabs on a slim vertical
+  it is painted in the surface's own color, so there is nothing at all between
+  them — with a colored underline beneath it. Left and right put the tabs on a slim vertical
   rail inside that edge, which reads far better once you have several of them and
   leaves the full width for message text; the tab you are reading is marked by a
   colored bar on the rail's inner edge. The tabs are the game's own tab buttons,
   moved rather than replaced, so clicking, dragging a window out of the dock and
   right-clicking a tab all behave exactly as they always did. Unread counts move
   with the tabs: a small pip beside a top tab, a right-aligned number inside a
-  rail row. The icon rail, if you use it, takes the opposite edge automatically.
+  rail row (the pip is a small red chip on the tab itself). The icon rail, if
+  you use it, takes the opposite edge automatically.
   Placement is part of your shared chat configuration — set it once on any
   character and every character on every account lands there.
 - **A color per tab.** Any window's tab can be given a color of your own instead
@@ -138,6 +140,44 @@ This entry accumulates until 1.0.0 ships. Foundation so far:
   changes — the tab keeps deriving its channel's color as before. Tab colors ride
   the shared configuration alongside that window's routing, and survive dragging
   or resizing the window.
+- **The box now matches the mockups.** The first cut of the one box shipped a
+  long way from the design that was approved, and this is the honest list of
+  what was wrong. The **tab you are reading was a filled block** — the game's
+  own chat-tab artwork was never taken down, so every tab kept wearing it; in
+  the design the active tab has no fill of its own, it wears the *message
+  surface's* color so the two read as one piece, and the inactive tabs are the
+  channel's color dimmed with no fill at all. The **whole window was one flat
+  tone and read as pure black** — there are two tones in the design, a darker
+  chassis behind the tab strip and a lighter one behind the messages and the
+  input bar, and the panel was also being drawn slightly see-through. There was
+  **no breathing room anywhere**: text sat against the edges, tabs against each
+  other, the input bar against the text. Every measurement in the design is now
+  applied literally — 14 either side of the message text and 10 above it, tab
+  padding, strip padding, a little air between lines, and 8/12 inside the input
+  bar. The **timestamp divider never appeared**; see the next entry. The
+  **copy button was the loudest thing on the window** and is now a quiet glyph
+  at the far end of the tab strip, brightening only when you point at it. The
+  **unread count floated in the gap between two tabs** and now rides its own
+  tab as a small red chip with white digits, sitting just after the tab's name
+  exactly as the design draws it — the tab widens to hold it. Where the game
+  simply cannot do what the design shows, it is written down rather than faked:
+  rounded corners, letter spacing, tabular figures and the drop shadow all have
+  a named reason in the mapping table at the top of `skin.lua`, which lists
+  every value in the design beside the value that shipped. Turning the box off
+  is still the previous look, exactly.
+- **The timestamp divider actually draws now.** Two separate faults kept it
+  away. It hung off the window's panel, and in the one box a docked window that
+  is not the group's host has *no* panel of its own — so on every tab except the
+  first, the hairline was drawn onto something invisible. And nothing ever
+  re-asked whether timestamps were on: turning them on from the settings page
+  moved the answer and told the skin nothing, so the line stayed away until
+  something unrelated happened to redraw. The hairline belongs to the message
+  window now, and timestamps ring the skin's bell when they come and go. It is
+  also drawn the way the design draws it — a thin line in the soft border color,
+  centred in the gap between the time and the message.
+- **Timestamps are bare by default.** `17:16`, not `[17:16]`, in the design's
+  faint ink, with the hairline doing the separating. If you prefer the brackets
+  there is now a switch for them under **Timestamps**.
 - **A row per chat window in the settings page.** A new **Tabs** group carries
   the tab position and, under it, one row for each of your ten chat windows:
   its color, and whether that window counts unread lines, gets timestamps, and

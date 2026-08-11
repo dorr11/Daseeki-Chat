@@ -44,15 +44,31 @@ local Stamps = {
 }
 ns.Stamps = Stamps
 
+-- THE MOCKUP CONTRACT (2026-08-11) reaches this file in three places, all of
+-- them DEFAULTS rather than behaviour — every shape below is still a choice:
+--   * the stamp is BARE ("17:16"), because the mockup's `.stamp` carries no
+--     brackets. The bracketed shape stays available as `brackets = true`;
+--   * the ink is the mockup's --faint (#5c534c), delivered as the shipped
+--     custom colour so the Theme/Custom control keeps meaning what it meant;
+--   * the SEPARATOR between the stamp and the line is a space run, not one
+--     space, because skin.lua centres the `.stampline` hairline in it and the
+--     mockup wants ~8px of air each side. A chat line is one string in one
+--     FontString, so spaces are the only unit available (see skin.lua's
+--     mapping table, the .stampline row).
 local DEFAULTS = {
     format      = "HH:MM",     -- "HH:MM" | "HH:MM:SS" | "hh:MM" | "hh:MM:SS"
-    colorMode   = "theme",     -- "theme" (colorToken) | "custom" (customColor)
+    brackets    = false,       -- wrap the time in [ ] (the mockup does not)
+    colorMode   = "custom",    -- "theme" (colorToken) | "custom" (customColor)
     colorToken  = "muted",     -- Daseeki-Core theme token for the stamp ink
-    customColor = "979797",    -- RRGGBB when colorMode = "custom"
+    customColor = "5c534c",    -- RRGGBB when colorMode = "custom" (mockup --faint)
     serverTime  = false,       -- format the server clock instead of the local one
     native      = "defer",     -- "defer" | "takeover" (see header)
     windows     = {},          -- [windowId] = false to turn a window off (absent = on)
 }
+
+-- Published so skin.lua can MEASURE it (it never calls into this file): the
+-- gap the divider is centred in.
+Stamps.SEPARATOR = "    "     -- four spaces; see the note above
 
 -- Published so the settings pane can bind controls against the REAL default
 -- shape (and so a control naming a field this module does not have fails a
@@ -114,15 +130,25 @@ function Stamps.FormatStamp()
         if ok then when = dateFn(code, t) end
     end
     if not when then when = dateFn(code) end
-    return ("|cff%s[%s]|r"):format(stampHex(), tostring(when))
+    local body = tostring(when)
+    if c.brackets then body = "[" .. body .. "]" end
+    return ("|cff%s%s|r"):format(stampHex(), body)
+end
+
+-- The separator this build writes between the stamp and the line.
+function Stamps.Separator()
+    local s = Stamps.SEPARATOR
+    return (type(s) == "string" and s ~= "") and s or " "
 end
 
 -- Our own stamp shape, for the batch-replay guard: a leading (or, for right-
--- justified windows, trailing) colored [digits:digits...] block. Tight enough
--- that ordinary chat starting with a colored bracket number is implausible;
--- the entry-identity guard covers the direct-repeat case exactly.
-local STAMP_PRE  = "^|c%x%x%x%x%x%x%x%x%[[%d:%sAPM]+%]|r "
-local STAMP_POST = " |c%x%x%x%x%x%x%x%x%[[%d:%sAPM]+%]|r$"
+-- justified windows, trailing) colored clock block, brackets optional now.
+-- Tight enough that ordinary chat starting with a colored time is implausible;
+-- the entry-identity guard covers the direct-repeat case exactly. Both shapes
+-- are recognised whichever one this session writes, so flipping the bracket
+-- option mid-session cannot make an already-stamped replay gain a second one.
+local STAMP_PRE  = "^|c%x%x%x%x%x%x%x%x%[?[%d:%sAPM]+%]?|r%s"
+local STAMP_POST = "%s|c%x%x%x%x%x%x%x%x%[?[%d:%sAPM]+%]?|r$"
 
 local function windowOn(frame)
     local c = cfg()
@@ -159,9 +185,9 @@ function Stamps.StampNewest(frame)
         local ok, j = pcall(frame.GetJustifyH, frame)
         right = ok and j == "RIGHT"
     end
-    local stamp = Stamps.FormatStamp()
+    local stamp, sep = Stamps.FormatStamp(), Stamps.Separator()
     if stamp ~= "" then
-        entry.message = right and (msg .. " " .. stamp) or (stamp .. " " .. msg)
+        entry.message = right and (msg .. sep .. stamp) or (stamp .. sep .. msg)
     end
     Stamps._lastEntry = entry
 end
@@ -236,6 +262,21 @@ function Stamps.OnEnable()
     ns.Decor.EnsureSeams()   -- the seam serves any consumer; decor need not be enabled
     Stamps._cvarHandler = ns:RegisterEvent("CVAR_UPDATE", onCVarUpdate)
     Stamps.EvaluateNative()
+    Stamps.NoteChanged()
+end
+
+-- THE BELL. skin.lua's timestamp divider exists only while stamps are actually
+-- stamping, and until now nothing told it that answer had moved — turning this
+-- module on from the settings page left the divider away until some unrelated
+-- beat refreshed the skin (the owner's missing hairline, half of it). This
+-- carries NO data: the coordination stays read-only and by measurement, skin
+-- still asks this file nothing. Guarded end to end, so a Chat without skin (or
+-- an older skin) is exactly as it was.
+function Stamps.NoteChanged()
+    local S = ns.Skin
+    if not (S and type(S.NoteStampsChanged) == "function") then return false end
+    local ok = pcall(S.NoteStampsChanged)
+    return ok and true or false
 end
 
 function Stamps.OnDisable()
@@ -263,6 +304,7 @@ function Stamps.OnDisable()
         Stamps._origFormat = nil
     end
     Stamps._lastEntry = nil
+    Stamps.NoteChanged()
 end
 
 ns.RegisterModule("stamps", Stamps)
@@ -299,27 +341,46 @@ local function testStamps(fails)
     ck(e0 and e0.message == "unstamped baseline", "phase 0: no stamp while disabled")
 
     -- ── Phase 1: enable — the newest entry is mutated in place. ──────────────
+    -- THE MOCKUP CONTRACT (2026-08-11): the shipped stamp is BARE and its ink
+    -- is the mockup's --faint, and the separator is the space run the divider
+    -- is centred in. The bracketed shape is still available (phase 1b).
     ns.SetModuleEnabled("stamps", true)
     ck(Stamps.active == true, "phase 1: enabled")
     ck(Stamps.suspended == false, "phase 1: not suspended (native CVar is 'none')")
+    ck(Stamps.DEFAULTS.brackets == false, "phase 1: the shipped stamp is BARE (the mockup's)")
+    ck(Stamps.DEFAULTS.customColor == "5c534c" and Stamps.DEFAULTS.colorMode == "custom",
+        "phase 1: …in the mockup's --faint ink")
+    local SEP = Stamps.Separator()
+    ck(#SEP > 1, "phase 1: the separator is a space RUN (the divider is centred in it)")
     f6:AddMessage("hello", 1, 1, 1)
     local e1 = f6.historyBuffer:GetEntryAtIndex(1)
-    ck(e1 and e1.message:match("^|cff" .. stampHex() .. "%[%d%d:%d%d%]|r hello$") ~= nil,
-        "phase 1: newest entry stamped in place, theme-token ink (got " .. tostring(e1 and e1.message) .. ")")
+    ck(e1 and e1.message:match("^|cff" .. stampHex() .. "%d%d:%d%d|r" .. SEP .. "hello$") ~= nil,
+        "phase 1: newest entry stamped in place, bare and faint (got " .. tostring(e1 and e1.message) .. ")")
+
+    -- ── Phase 1b: brackets are a CHOICE, and the guard knows both shapes. ────
+    ns.db.stamps.brackets = true
+    f6:AddMessage("bracketed", 1, 1, 1)
+    local e1b = f6.historyBuffer:GetEntryAtIndex(1)
+    ck(e1b and e1b.message:match("^|cff%x%x%x%x%x%x%[%d%d:%d%d%]|r") ~= nil,
+        "phase 1b: brackets on -> the older shape is back (got " .. tostring(e1b and e1b.message) .. ")")
+    Stamps.StampNewest(f6)
+    local _, count1b = e1b.message:gsub("%d%d:%d%d", "")
+    ck(count1b == 1, "phase 1b: …and it is still never stamped twice")
+    ns.db.stamps.brackets = false
 
     -- ── Phase 2: THE DECOUPLING PIN — stamping works with the decoration
     -- engine disabled (the seam serves any consumer; anti-Prat structure). ────
     ns.SetModuleEnabled("decor", false)
     f6:AddMessage("engine off", 1, 1, 1)
     local e2 = f6.historyBuffer:GetEntryAtIndex(1)
-    ck(e2 and e2.message:match("%[%d%d:%d%d%]|r engine off$") ~= nil,
+    ck(e2 and e2.message:match("%d%d:%d%d|r" .. SEP .. "engine off$") ~= nil,
         "phase 2 RED CONTROL: stamps still land with the decoration engine disabled")
     ns.SetModuleEnabled("decor", true)
 
     -- ── Phase 3: double-stamp guards. ────────────────────────────────────────
     Stamps.StampNewest(f6)   -- direct re-ask about the same entry
     local e3 = f6.historyBuffer:GetEntryAtIndex(1)
-    local _, stamps3 = e3.message:gsub("%[%d%d:%d%d%]", "")
+    local _, stamps3 = e3.message:gsub("%d%d:%d%d", "")
     ck(stamps3 == 1, "phase 3: re-asking about the same entry never stamps twice")
     -- Sim.ReplayBuffer is the ready-made trap: every replayed line already
     -- wears a stamp and must not gain a second one.
@@ -327,7 +388,7 @@ local function testStamps(fails)
     local clean = true
     for i = 1, f6:GetNumMessages() do
         local msg = f6:GetMessageInfo(i)
-        local _, count = msg:gsub("%[%d?%d:%d%d[:%d%sAPM]*%]", "")
+        local _, count = msg:gsub("%d?%d:%d%d[:%d]*", "")
         if count > 1 then clean = false end
     end
     ck(clean, "phase 3 RED CONTROL: Sim.ReplayBuffer produced no double-stamped line")
@@ -341,7 +402,7 @@ local function testStamps(fails)
     f6:AddMessage("after batch", 1, 1, 1)
     local e4b = f6.historyBuffer:GetEntryAtIndex(1)
     ck(e4b and e4b.message:find("after batch", 1, true) ~= nil
-        and e4b.message:match("%[%d%d:%d%d%]") ~= nil,
+        and e4b.message:match("%d%d:%d%d") ~= nil,
         "phase 4: stamping resumes after EndBatch")
 
     -- ── Phase 5: per-window off switch. ──────────────────────────────────────
@@ -351,30 +412,41 @@ local function testStamps(fails)
     ck(e5 and e5.message == "window six off", "phase 5: a window turned off gets no stamp")
     f7:AddMessage("window seven on", 1, 1, 1)
     local e5b = f7.historyBuffer:GetEntryAtIndex(1)
-    ck(e5b and e5b.message:match("%[%d%d:%d%d%]") ~= nil, "phase 5: other windows still stamp")
+    ck(e5b and e5b.message:match("%d%d:%d%d") ~= nil, "phase 5: other windows still stamp")
     ns.db.stamps.windows[6] = nil
 
     -- ── Phase 6: formats + custom color. ─────────────────────────────────────
     ns.db.stamps.format = "HH:MM:SS"
     f7:AddMessage("with seconds", 1, 1, 1)
     local e6 = f7.historyBuffer:GetEntryAtIndex(1)
-    ck(e6 and e6.message:match("%[%d%d:%d%d:%d%d%]") ~= nil, "phase 6: HH:MM:SS format applies")
+    ck(e6 and e6.message:match("%d%d:%d%d:%d%d") ~= nil, "phase 6: HH:MM:SS format applies")
     ns.db.stamps.format = "hh:MM"
     f7:AddMessage("twelve hour", 1, 1, 1)
     local e6b = f7.historyBuffer:GetEntryAtIndex(1)
-    ck(e6b and e6b.message:match("%[%d%d:%d%d") ~= nil, "phase 6: 12h format applies")
+    ck(e6b and e6b.message:match("%d%d:%d%d") ~= nil, "phase 6: 12h format applies")
     ns.db.stamps.format = "HH:MM"
-    ns.db.stamps.colorMode, ns.db.stamps.customColor = "custom", "123456"
+    ns.db.stamps.customColor = "123456"
     f7:AddMessage("custom ink", 1, 1, 1)
     local e6c = f7.historyBuffer:GetEntryAtIndex(1)
     ck(e6c and e6c.message:find("|cff123456", 1, true) == 1, "phase 6: custom color applies")
+    -- The THEME mode is still a real choice, and still reads Core's token.
     ns.db.stamps.colorMode = "theme"
+    f7:AddMessage("theme ink", 1, 1, 1)
+    local e6d = f7.historyBuffer:GetEntryAtIndex(1)
+    local UI6 = _G.DaseekiUI
+    local tr, tg, tb = UI6.Color(ns.db.stamps.colorToken or "muted")
+    local themeHex = ("%02x%02x%02x"):format(
+        math.floor(tr * 255 + 0.5), math.floor(tg * 255 + 0.5), math.floor(tb * 255 + 0.5))
+    ck(e6d and e6d.message:find("|cff" .. themeHex, 1, true) == 1,
+        "phase 6: theme mode still inks from the Core token")
+    ns.db.stamps.colorMode = Stamps.DEFAULTS.colorMode
+    ns.db.stamps.customColor = Stamps.DEFAULTS.customColor
 
     -- ── Phase 7: right-justified windows get the stamp appended. ─────────────
     f7:SetJustifyH("RIGHT")
     f7:AddMessage("right side", 1, 1, 1)
     local e7 = f7.historyBuffer:GetEntryAtIndex(1)
-    ck(e7 and e7.message:match("^right side |c%x%x%x%x%x%x%x%x%[%d%d:%d%d%]|r$") ~= nil,
+    ck(e7 and e7.message:match("^right side" .. SEP .. "|c%x%x%x%x%x%x%x%x%d%d:%d%d|r$") ~= nil,
         "phase 7: right-justified window appends the stamp")
     f7:SetJustifyH("LEFT")
 
@@ -413,7 +485,7 @@ local function testStamps(fails)
         ck(Stamps.suspended == false, "phase 8b: our stamps run after takeover")
         f6:AddMessage("takeover stamped", 1, 1, 1)
         local eb = f6.historyBuffer:GetEntryAtIndex(1)
-        ck(eb and eb.message:match("%[%d%d:%d%d%]") ~= nil, "phase 8b: stamping active after takeover")
+        ck(eb and eb.message:match("%d%d:%d%d") ~= nil, "phase 8b: stamping active after takeover")
 
         -- (c) the user fights back mid-session: their write STANDS.
         local setsBeforeC = Sim.CallCount("SetCVar")

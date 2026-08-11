@@ -144,36 +144,190 @@ local Skin = {
 }
 ns.Skin = Skin
 
+----------------------------------------------------------------------
+-- ================= THE MOCKUP CONTRACT (2026-08-11) =================
+--
+-- The owner approved chat-mockups.html and then said, of the shipped v3
+-- render: "the mockup is perfect, its exactly what im going for so i would
+-- like to reproduce it as identically as possible."  So the mockup is not a
+-- set of relationships to translate — it is the REPRODUCTION TARGET, and this
+-- table is the contract. It is the single place the box's numbers and colours
+-- are decided; the renderer below reads it and invents nothing.
+--
+-- THE MAPPING TABLE. Three columns: what the mockup's CSS says, what this file
+-- ships, and whether they are IDENTICAL or — never for taste, only for a real
+-- client capability — why they cannot be.
+--
+-- COLOUR (mockup :root custom properties -> PALETTE below, literal hexes)
+--   --ground   #0b0908  -> PALETTE.ground   #0b0908   IDENTICAL
+--   --panel    #16100f  -> PALETTE.panel    #16100f   IDENTICAL (chassis + strip/rail)
+--   --panel2   #1d1514  -> PALETTE.panel2   #1d1514   IDENTICAL (messages + entry + active tab)
+--   --line     #6e1d1a  -> PALETTE.line     #6e1d1a   IDENTICAL (chassis border)
+--   --line-soft#3a1512  -> PALETTE.lineSoft #3a1512   IDENTICAL (entry seam, rail seam, stamp divider)
+--   --accent   #c2402e  -> PALETTE.accent   #c2402e   IDENTICAL (pip fill, hover ink, mark fallback)
+--   --gold     #d9a83f  -> PALETTE.gold     #d9a83f   IDENTICAL (carried; the box itself uses none)
+--   --text     #e6dfd4  -> PALETTE.text     #e6dfd4   IDENTICAL (active tab ink fallback, hover wash source)
+--   --muted    #93887e  -> PALETTE.muted    #93887e   IDENTICAL (inactive tab ink fallback, quiet glyphs)
+--   --faint    #5c534c  -> PALETTE.faint    #5c534c   IDENTICAL (stamp ink — stamps.lua's shipped default)
+--   .chatbox background: solid --panel      alpha 1.0 IDENTICAL (v3 shipped 0.85 and read pure black)
+--   per-channel message colours             CLIENT    the mockup's own footer says so: message ink is
+--                                                     the CLIENT's chat colour table, live, never a hex.
+--
+-- GEOMETRY (1 CSS px = 1 UI unit, literally)
+--   .chatbox border 1px --line             -> CHASSIS_EDGE 1 + PALETTE.line     IDENTICAL
+--   .chatbox border-radius 6px             -> square                            CLIENT LIMIT: a backdrop
+--       edge is a repeated 1px texture; rounded corners need bespoke corner art per radius, and a bad
+--       approximation reads worse than a clean square. Documented, not faked.
+--   .tabs-top padding 6px 8px 0            -> STRIP_PAD_TOP 6 / STRIP_PAD_X 8 / 0 IDENTICAL
+--   .tab padding 5px 14px 6px              -> TAB_PAD_TOP 5 / TAB_PAD_X 14 / TAB_PAD_BOTTOM 6 IDENTICAL
+--   .tab font-size 12.5px, weight 600      -> TAB_TEXT_SIZE 12.5 on the suite's condensed face
+--                                                     IDENTICAL size; WEIGHT is CLIENT LIMIT (one vendored
+--                                                     face, no synthetic bold that does not smear).
+--   .tab letter-spacing .04em              -> not applied                       CLIENT LIMIT: FontString
+--       has no letter-spacing; the only fake is padding each glyph into its own FontString.
+--   .tab line-height 1.45                  -> TAB_LINE_H 18 (12.5 * 1.45 = 18.1) IDENTICAL to the pixel
+--   => tab height 5 + 18 + 6               -> TAB_H 29                          IDENTICAL
+--   => strip height 6 + 29                 -> STRIP_H 35                        IDENTICAL
+--   .tabs-top gap 2px                      -> TAB_GAP 2                         IDENTICAL
+--   .tab border-radius 4px 4px 0 0         -> square                            CLIENT LIMIT (as above)
+--   .tab.active background var(--panel2)   -> the tab wears the MESSAGE SURFACE's own fill, run down
+--       to the strip's bottom edge                                              IDENTICAL
+--   .tab.active::after inset 6px, 2px      -> UL_INSET 6 / UL_HEIGHT 2 / UL_Y 0 IDENTICAL
+--   .tab:hover rgba(255,255,255,.04)       -> PALETTE.text at HOVER_WASH 0.04   IDENTICAL in effect (the
+--       mockup washes with white; the token-honest source of "white" here is the text ink).
+--   .tab .n  (the unread pip)              -> badges.lua: accent fill, white digits, 10.5px, after the
+--       label with a 6px gap, inside the tab                                    IDENTICAL
+--   .tab .n border-radius 8px              -> square chip                       CLIENT LIMIT (as above)
+--   .msgs padding 10px 14px 6px            -> MSG_PAD_TOP 10 / MSG_PAD_X 14 / MSG_PAD_BOTTOM 6 IDENTICAL
+--       (the client's message frame has no text insets — see the note under LAYOUT — so the CHASSIS
+--        pads around the frame, which lands the same pixels)
+--   .msgs font-size 13.5px                 -> the CLIENT's per-window size      SHIPPED BEHAVIOUR: the
+--       Blizzard right-click "Font size" menu stays the authority (skin v1's pinned split). The suite
+--       FACE is the mockup's face; only the size is the player's.
+--   .msgs .row padding 1.5px 0             -> ROW_SPACING 3 (1.5 above + 1.5 below, and the client's
+--       spacing is the gap BETWEEN rows)                                        IDENTICAL
+--   .msgs .row gap 8px + .stampline 1px    -> DIV_WIDTH 1 centred in the stamp separator, STAMP_GAP 8
+--       aimed each side                    APPROXIMATE, CLIENT LIMIT: a chat line is ONE string in ONE
+--       FontString, so the space right of the hairline can only be spelled in spaces — stamps.lua emits
+--       a space-run separator and the hairline is centred in it. The gap therefore follows the face's
+--       space advance instead of being exactly 8.
+--   .stampline background --line-soft      -> PALETTE.lineSoft, alpha 1         IDENTICAL colour;
+--       the mockup draws it per ROW (margin 2px 0), we draw ONE column hairline down the message area
+--       — CLIENT LIMIT: rows are not addressable widgets.
+--   .stamp font-variant-numeric tabular    -> not applied                       CLIENT LIMIT: no OpenType
+--       feature control on a FontString.
+--   .entry padding 8px 12px                -> EB_PAD_Y 8 / EB_PAD_X 12          IDENTICAL
+--   .entry font 13.5px, line-height 1.45   -> EB_HEIGHT 36 (8 + 19.6 + 8)       IDENTICAL
+--   .entry border-top 1px --line-soft      -> SEAM_W 1, PALETTE.lineSoft, and NO gap (EB_GAP 0) IDENTICAL
+--   .entry background var(--panel2)        -> shares the message surface        IDENTICAL
+--   .entry .hinttxt "always visible..."    -> not shipped                       it is the MOCKUP'S OWN
+--       annotation of the design (it describes the behaviour, it is not a control); there is nothing
+--       in the product for it to label.
+--   .tabs-side width 112px                 -> TABRAIL_W 112                     IDENTICAL
+--   .tabs-side padding 8px 6px             -> RAIL_PAD_Y 8 / RAIL_PAD_X 6       IDENTICAL
+--   .tabs-side border-left 1px --line-soft -> SEAM_W 1, PALETTE.lineSoft        IDENTICAL
+--   .stab padding 7px 10px                 -> RAIL_TAB_PAD_Y 7 / RAIL_TAB_PAD_X 10 IDENTICAL
+--   => rail row height 7 + 18 + 7          -> TAB_ROW_H 32                      IDENTICAL
+--   .stab.active::before 2px, inset 5px    -> EDGEBAR_W 2 / EDGEBAR_INSET 5     IDENTICAL
+--   .stab .n float:right                   -> badges.lua right-aligns in the row at RAIL_TAB_PAD_X IDENTICAL
+--   box-shadow 0 8px 30px rgba(0,0,0,.55)  -> not shipped                       CLIENT LIMIT: no drop
+--       shadow primitive; the honest fake is a nine-slice glow texture, which is bespoke art.
+--
+-- NOT IN THE MOCKUP, kept from skin v2/v3 because the mockup is silent on them:
+--   the icon rail, the copy affordance (styled to the rail's quiet-glyph idiom), the button-column
+--   posture, alt-drag, the persistent edit box, the clamp. None of them paint inside the box.
+--
+-- WHEN THE BOX IS OFF (unifiedChassis = false) NONE of the above applies: the v2 treatment is byte for
+-- byte what it was, tokens and all. Every mockup value below is read only through the unified path.
+----------------------------------------------------------------------
+
+-- THE PALETTE. Literal mockup hexes, and the ONE place they live: a future
+-- re-theme is one edit here. Core-token reactivity for the box is deliberate
+-- future work — "identical now" is the requirement the owner set, and a
+-- derived tone cannot be identical to a hex by construction.
+local PALETTE = {
+    ground   = 0x0b0908,
+    panel    = 0x16100f,
+    panel2   = 0x1d1514,
+    line     = 0x6e1d1a,
+    lineSoft = 0x3a1512,
+    accent   = 0xc2402e,
+    gold     = 0xd9a83f,
+    text     = 0xe6dfd4,
+    muted    = 0x93887e,
+    faint    = 0x5c534c,
+}
+
+-- r, g, b, a for a palette entry. Published (Skin.Ink) so stamps.lua and
+-- badges.lua paint from the same table rather than each keeping a copy.
+function Skin.Ink(name, alpha)
+    local v = PALETTE[name]
+    if not v then return nil end
+    return math.floor(v / 65536) % 256 / 255,
+           math.floor(v / 256) % 256 / 255,
+           (v % 256) / 255,
+           alpha or 1
+end
+
+-- The palette itself, read-only by convention (the settings page and the
+-- harness both want to name a colour without re-typing it).
+function Skin.Palette() return PALETTE end
+
 -- Layout constants (measures, not colors).
-local BG_ALPHA    = 0.85   -- chat backdrop fill alpha over the world
-local PAD         = 4      -- backdrop overhang around the message area
-local EB_HEIGHT   = 24     -- attached edit box bar height
-local EB_GAP      = 2      -- gap between chat frame and the edit box bar
+local BG_ALPHA    = 0.85   -- v2 chat backdrop fill alpha over the world
+local PAD         = 4      -- v2 backdrop overhang around the message area
 local TAB_DIM     = 0.6    -- unselected docked tab alpha (survey: ElvUI behavior)
 local COPY_IDLE   = 0.35   -- copy affordance alpha until hovered
 local COPY_MAX    = 512    -- copy window: max lines pulled from a frame
-local UL_HEIGHT   = 2      -- active-tab accent underline thickness
-local UL_INSET    = 4      -- underline inset from each tab edge (never under the badge)
-local UL_Y        = 1      -- underline lift off the tab's bottom edge
-local DIV_WIDTH   = 1      -- timestamp divider hairline width
-local DIV_GAP     = 2      -- gap between the stamp column and the hairline
-local DIV_ALPHA   = 0.55   -- hairline alpha (subtle, per the reference)
+local UL_HEIGHT   = 2      -- active-tab underline thickness       (mockup ::after height)
+local UL_INSET    = 6      -- underline inset from each tab edge    (mockup left/right 6px)
+local UL_Y        = 0      -- underline lift off the tab's bottom   (mockup bottom 0)
+local DIV_WIDTH   = 1      -- timestamp divider hairline width      (mockup .stampline width)
+local DIV_GAP     = 2      -- v2 gap between the stamp column and the hairline
+local DIV_ALPHA   = 0.55   -- v2 hairline alpha (subtle, per the reference)
+local STAMP_GAP   = 8      -- mockup .msgs .row gap, aimed each side of the hairline
 local RAIL_WIDTH  = 16     -- icon rail strip width
 local RAIL_BTN    = 16     -- one rail button's square edge
 local RAIL_GAP    = 2      -- gap between the rail and the window
 local RAIL_IDLE   = 0.35   -- rail alpha until hovered
 local EB_IDLE     = 0.55   -- persistent edit box alpha while unfocused (placeholder)
 local EB_ACTIVE   = 1.0    -- …and while it holds focus
--- skin v3 (the one box). Measures only; every color is still a token.
-local STRIP_H       = 22   -- top tab strip band inside the chassis
-local TABRAIL_W     = 112  -- side tab rail band (the mockup's 112px)
-local TAB_GAP       = 2    -- gap between two tabs in the strip/rail
-local TAB_PAD       = 6    -- strip/rail padding around the tab run
-local TAB_ROW_H     = 20   -- one tab's height on a rail
-local SEAM_W        = 1    -- internal hairline thickness
-local SEAM_ALPHA    = 0.55 -- …at the divider's own subtle measure
-local EDGEBAR_W     = 2    -- active-tab edge bar on a rail
-local EDGEBAR_INSET = 5    -- its inset from the tab's top/bottom edges
+-- THE ONE BOX, straight off the mapping table above.
+local CHASSIS_EDGE  = 1    -- .chatbox border width
+local STRIP_PAD_TOP = 6    -- .tabs-top padding-top
+local STRIP_PAD_X   = 8    -- .tabs-top padding-left/right
+local TAB_TEXT_SIZE = 12.5 -- .tab font-size
+local TAB_LINE_H    = 18   -- .tab line-height (12.5 * 1.45)
+local TAB_PAD_TOP   = 5    -- .tab padding-top
+local TAB_PAD_X     = 14   -- .tab padding-left/right
+local TAB_PAD_BOT   = 6    -- .tab padding-bottom
+local TAB_H         = TAB_PAD_TOP + TAB_LINE_H + TAB_PAD_BOT      -- 29
+local STRIP_H       = STRIP_PAD_TOP + TAB_H                       -- 35
+local TAB_GAP       = 2    -- .tabs-top gap
+local MSG_PAD_TOP   = 10   -- .msgs padding-top
+local MSG_PAD_X     = 14   -- .msgs padding-left/right
+local MSG_PAD_BOT   = 6    -- .msgs padding-bottom
+local ROW_SPACING   = 3    -- .msgs .row padding 1.5px each side
+local EB_HEIGHT     = 36   -- .entry: 8 + (13.5 * 1.45) + 8
+local EB_PAD_X      = 12   -- .entry padding-left/right
+local EB_PAD_Y      = 8    -- .entry padding-top/bottom
+-- The mockup's entry bar is FLUSH (the hairline is the whole seam), which the
+-- box expresses with SEAM_W; EB_GAP is the v2 path's own gap and stays at the
+-- value v2 shipped, so turning the box off really is byte for byte.
+local EB_GAP        = 2
+local TABRAIL_W     = 112  -- .tabs-side width
+local RAIL_PAD_Y    = 8    -- .tabs-side padding-top/bottom
+local RAIL_PAD_X    = 6    -- .tabs-side padding-left/right
+local RAIL_TAB_PAD_Y = 7   -- .stab padding-top/bottom
+local RAIL_TAB_PAD_X = 10  -- .stab padding-left/right
+local TAB_ROW_H     = RAIL_TAB_PAD_Y + TAB_LINE_H + RAIL_TAB_PAD_Y  -- 32
+local SEAM_W        = 1    -- .entry border-top / .tabs-side border-left
+local EDGEBAR_W     = 2    -- .stab.active::before width
+local EDGEBAR_INSET = 5    -- …its top/bottom inset
+local HOVER_WASH    = 0.04 -- .tab:hover rgba(255,255,255,.04)
+local PIP_GAP       = 6    -- .tab .n margin-left
+-- v2 kept these names; the box no longer uses them, and the v2 path still does.
+local TAB_PAD       = 6    -- v2 strip/rail padding around the tab run
 
 -- Skin v2 config fields, declared ADDITIVELY from this module (the badges.lua
 -- precedent) so core.lua's DEFAULTS block stays this module's business only.
@@ -568,6 +722,17 @@ local function applyFrameFont(frame, id)
     local size = tonumber(fontSize)
     if not size or size <= 0 then size = 14 end   -- truthy-zero guard (Class 5)
     pcall(frame.SetFont, frame, UI.FontFile(), size, "")
+    -- THE ROW RHYTHM (mockup `.msgs .row{padding:1.5px 0}` — 1.5 above and 1.5
+    -- below each row, which is 3 between two of them). SetSpacing is the ONE
+    -- typographic lever a ScrollingMessageFrame offers, and this is exactly
+    -- what it does; the original is saved so a disable hands it back.
+    if type(frame.SetSpacing) == "function" then
+        if rec and rec.origSpacing == nil and type(frame.GetSpacing) == "function" then
+            local okS, sp = pcall(frame.GetSpacing, frame)
+            rec.origSpacing = (okS and tonumber(sp)) or false
+        end
+        pcall(frame.SetSpacing, frame, Skin.Unified() and ROW_SPACING or (rec and tonumber(rec.origSpacing) or 0))
+    end
 end
 
 ----------------------------------------------------------------------
@@ -657,18 +822,28 @@ end
 -- window's own units. PURE-ish (it reads config only) so the geometry the
 -- suite pins is the geometry the renderer uses. Returns left, right, top,
 -- bottom.
+--
+-- THE MESSAGE PADDING LIVES HERE, and it has to: the client's message frame is
+-- a ScrollingMessageFrame, which has NO text insets (SetTextInsets is an
+-- EditBox/SimpleHTML verb — catalog-checked on 11509; the message frame offers
+-- SetSpacing for the row rhythm and nothing for the margins). So the mockup's
+-- `.msgs{padding:10px 14px 6px}` is expressed as the CHASSIS growing that far
+-- PAST the frame on each side, which lands the same pixels: text at 14 from the
+-- box's left edge, 10 below the strip, 6 above the entry seam.
 function Skin.ChassisInsets()
-    local l, r, t, b = PAD, PAD, PAD, PAD
-    if not Skin.Unified() then return l, r, t, b end
+    if not Skin.Unified() then return PAD, PAD, PAD, PAD end
+    local l, r = MSG_PAD_X, MSG_PAD_X
+    local t, b = MSG_PAD_TOP, MSG_PAD_BOT
     local placement = Skin.TabPlacement()
     if placement == "left" then l = l + TABRAIL_W
     elseif placement == "right" then r = r + TABRAIL_W
     else t = t + STRIP_H end
-    -- The entry bar is part of the box, on whichever edge it is configured to.
+    -- The entry bar is part of the box, on whichever edge it is configured to,
+    -- flush against the message area with the hairline as the only separation.
     if (cfg().editBox or "BOTTOM"):upper() == "TOP" then
-        t = t + EB_GAP + EB_HEIGHT
+        t = t + SEAM_W + EB_HEIGHT
     else
-        b = b + EB_GAP + EB_HEIGHT
+        b = b + SEAM_W + EB_HEIGHT
     end
     return l, r, t, b
 end
@@ -681,11 +856,34 @@ local function anchorChassis(bd, frame)
     bd:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", r, -b)
 end
 
+-- THE CHASSIS' OWN INK. In the box it is the mockup's `.chatbox`: a SOLID
+-- --panel fill (v3 shipped it at 0.85 over the world, which is exactly why the
+-- owner's screenshot reads pure black) inside a 1px --line border. With the box
+-- off it is skin v2's token treatment, untouched.
+local function paintChassis(bd)
+    local UI = UIKit()
+    if not (UI and bd) then return end
+    if Skin.Unified() then
+        if type(bd.SetBackdrop) == "function" then bd:SetBackdrop(UI.FLAT_BACKDROP) end
+        if type(bd.SetBackdropColor) == "function" then bd:SetBackdropColor(Skin.Ink("panel")) end
+        if type(bd.SetBackdropBorderColor) == "function" then
+            bd:SetBackdropBorderColor(Skin.Ink("line"))
+        end
+        return
+    end
+    if type(bd.SetBackdrop) == "function" then bd:SetBackdrop(UI.FLAT_BACKDROP) end
+    if type(bd.SetBackdropColor) == "function" then bd:SetBackdropColor(UI.Color("panel", BG_ALPHA)) end
+    if type(bd.SetBackdropBorderColor) == "function" then
+        bd:SetBackdropBorderColor(UI.Color("border"))
+    end
+end
+
 local function ensureBackdrop(frame, rec)
     local UI = UIKit()
     if not UI then return end
     if rec.backdrop then
         rec.backdrop:Show()
+        paintChassis(rec.backdrop)
         anchorChassis(rec.backdrop, frame)
         return
     end
@@ -694,17 +892,62 @@ local function ensureBackdrop(frame, rec)
         local okL, lvl = pcall(frame.GetFrameLevel, frame)
         pcall(bd.SetFrameLevel, bd, math.max(0, (okL and lvl or 1) - 1))
     end
-    UI.Skin(bd, function(self)
-        if type(self.SetBackdrop) == "function" then self:SetBackdrop(UI.FLAT_BACKDROP) end
-        if type(self.SetBackdropColor) == "function" then
-            self:SetBackdropColor(UI.Color("panel", BG_ALPHA))
-        end
-        if type(self.SetBackdropBorderColor) == "function" then
-            self:SetBackdropBorderColor(UI.Color("border"))
-        end
-    end)
+    UI.Skin(bd, paintChassis)
     rec.backdrop = bd
     anchorChassis(bd, frame)
+end
+
+----------------------------------------------------------------------
+-- THE MESSAGE SURFACE (the mockup's --panel2 step).
+--
+-- The mockup is unambiguous about this and skin v3 read it the other way: the
+-- strip sits on the chassis tone (--panel) and EVERYTHING BELOW IT — the
+-- message area and the entry bar — sits on a second, lighter tone (--panel2).
+-- The active tab is painted in that SAME tone and run down to the strip's
+-- bottom edge, and THAT is the "fused" look. v3 expressed the fusion with a
+-- broken hairline instead, which left the active tab wearing the client's own
+-- tab art (the filled red block in the owner's screenshot) and the whole box on
+-- one flat tone.
+--
+-- It is not a "second background inside the box" in the sense the v3 design
+-- contract forbade: it is the same single chassis frame carrying one fill
+-- texture over the region the mockup fills. Nothing here is a second BACKDROP,
+-- nothing has a border, and there is still exactly one chassis per group.
+----------------------------------------------------------------------
+
+local function ensureSurface(rec)
+    if rec.surface then return rec.surface end
+    local bd = rec.backdrop
+    if not (bd and type(bd.CreateTexture) == "function") then return nil end
+    local tex = bd:CreateTexture(nil, "BACKGROUND")
+    -- Above the backdrop's own centre fill, still behind every frame in the box.
+    if type(tex.SetDrawLayer) == "function" then pcall(tex.SetDrawLayer, tex, "BACKGROUND", 1) end
+    tex:Hide()
+    rec.surface = tex
+    return tex
+end
+
+local function layoutSurface(rec)
+    local tex = ensureSurface(rec)
+    local bd = rec.backdrop
+    if not (tex and bd) then return nil end
+    if not Skin.Unified() then
+        tex:Hide()
+        return nil
+    end
+    if type(tex.SetColorTexture) == "function" then tex:SetColorTexture(Skin.Ink("panel2")) end
+    local placement = Skin.TabPlacement()
+    tex:ClearAllPoints()
+    -- Inside the chassis' own 1px border, and clear of whichever band the tab
+    -- strip/rail occupies — the strip keeps the chassis tone.
+    local l, r, t, b = CHASSIS_EDGE, -CHASSIS_EDGE, -CHASSIS_EDGE, CHASSIS_EDGE
+    if placement == "left" then l = TABRAIL_W
+    elseif placement == "right" then r = -TABRAIL_W
+    else t = -STRIP_H end
+    tex:SetPoint("TOPLEFT", bd, "TOPLEFT", l, t)
+    tex:SetPoint("BOTTOMRIGHT", bd, "BOTTOMRIGHT", r, b)
+    tex:Show()
+    return tex
 end
 
 ----------------------------------------------------------------------
@@ -739,23 +982,148 @@ local function ensureUnderline(tab, rec)
     local UI = UIKit()
     if not (UI and type(tab.CreateTexture) == "function") then return nil end
     local tex = tab:CreateTexture(nil, "OVERLAY")
-    -- Inset from BOTH tab edges: the badge sits past the tab's right edge and
-    -- must never be crossed by this line.
+    -- Inset from BOTH tab edges (the mockup's ::after left/right 6px), and the
+    -- pip now lives INSIDE the tab, so the inset is also what keeps the line
+    -- off it.
     tex:SetPoint("BOTTOMLEFT", tab, "BOTTOMLEFT", UL_INSET, UL_Y)
     tex:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", -UL_INSET, UL_Y)
     if type(tex.SetHeight) == "function" then tex:SetHeight(UL_HEIGHT) end
     UI.Skin(tex, function(self)
         if type(self.SetColorTexture) ~= "function" then return end
-        -- skin v3: the underline wears the TAB's own colour (the mockup's
-        -- --tabc), with the accent token as its own fallback — so a theme
-        -- change still moves an unresolved tab's mark.
+        -- The underline wears the TAB's own colour (the mockup's --tabc), with
+        -- the accent as its own fallback.
         local mc = rec.markColor
         if mc then self:SetColorTexture(mc[1], mc[2], mc[3])
-        else self:SetColorTexture(UI.Color("accent")) end
+        else self:SetColorTexture(Skin.Ink("accent")) end
     end)
     tex:Hide()
     rec.underline = tex
     return tex
+end
+
+----------------------------------------------------------------------
+-- THE TAB'S OWN SURFACES (delta 1, the biggest miss).
+--
+-- The mockup's tab has NO fill of its own when it is inactive, and when it is
+-- active its fill IS the message surface's (--panel2) so the two read as one
+-- piece. skin v3 stripped the message frame's stock art but never the TAB's,
+-- so every tab kept wearing the client's own chat-tab textures — which is the
+-- filled block in the owner's screenshot, not anything this file painted.
+--
+-- Three surfaces, all reversible:
+--   * the CLIENT's tab textures are alpha'd to 0 and remembered (the same
+--     restorable treatment stripStock gives the message frame);
+--   * `tabFill` is the active tab's --panel2, run PAST the tab's bottom edge to
+--     the strip's, so no seam survives between tab and messages;
+--   * `tabHover` is the mockup's rgba(255,255,255,.04) wash, shown only while
+--     the pointer is on an INACTIVE tab.
+----------------------------------------------------------------------
+
+-- The client's per-tab dress. Era's chat tab is a three-slice button with a
+-- selected set and a highlight; the names are $parentTab<suffix>, and the
+-- template also hangs some of them on the button itself.
+local TAB_TEXTURES = {
+    "Left", "Middle", "Right",
+    "SelectedLeft", "SelectedMiddle", "SelectedRight",
+    "HighlightLeft", "HighlightMiddle", "HighlightRight",
+    "ActiveLeft", "ActiveMiddle", "ActiveRight",
+    "Glow",
+}
+
+local function stripTabArt(frame, tab, rec)
+    if not Skin.Unified() then return end
+    local base = tab.GetName and tab:GetName()
+    rec.tabStock = rec.tabStock or {}
+    for _, suffix in ipairs(TAB_TEXTURES) do
+        local region = (base and _G[base .. suffix]) or tab[suffix:sub(1, 1):lower() .. suffix:sub(2)]
+        if region and type(region.SetAlpha) == "function" then
+            if rec.tabStock[suffix] == nil then
+                local okA, a = pcall(region.GetAlpha, region)
+                rec.tabStock[suffix] = okA and a or 1
+            end
+            pcall(region.SetAlpha, region, 0)
+        end
+    end
+end
+
+local function restoreTabArt(tab, rec)
+    if not (tab and rec.tabStock) then return end
+    local base = tab.GetName and tab:GetName()
+    for suffix, alpha in pairs(rec.tabStock) do
+        local region = (base and _G[base .. suffix]) or tab[suffix:sub(1, 1):lower() .. suffix:sub(2)]
+        if region and type(region.SetAlpha) == "function" then
+            pcall(region.SetAlpha, region, alpha)
+        end
+    end
+    rec.tabStock = nil
+end
+
+local function ensureTabFill(tab, rec)
+    if rec.tabFill then return rec.tabFill end
+    if type(tab.CreateTexture) ~= "function" then return nil end
+    local tex = tab:CreateTexture(nil, "BACKGROUND")
+    tex:Hide()
+    rec.tabFill = tex
+    return tex
+end
+
+local function ensureTabHover(tab, rec)
+    if rec.tabHover then return rec.tabHover end
+    if type(tab.CreateTexture) ~= "function" then return nil end
+    local tex = tab:CreateTexture(nil, "BACKGROUND")
+    if type(tex.SetDrawLayer) == "function" then pcall(tex.SetDrawLayer, tex, "BACKGROUND", 1) end
+    tex:SetPoint("TOPLEFT", tab, "TOPLEFT", 0, 0)
+    tex:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", 0, 0)
+    tex:Hide()
+    rec.tabHover = tex
+    -- The hover state is the client's own pointer, watched additively.
+    if type(tab.HookScript) == "function" and not rec.tabHoverRig then
+        rec.tabHoverRig = true
+        tab:HookScript("OnEnter", function() rec.hovered = true; Skin.UpdateTabWash(rec) end)
+        tab:HookScript("OnLeave", function() rec.hovered = false; Skin.UpdateTabWash(rec) end)
+    end
+    return tex
+end
+
+-- The wash is the ONE thing that moves without a re-layout, so it gets its own
+-- cheap beat (the hover scripts call it directly).
+function Skin.UpdateTabWash(rec)
+    local tex = rec and rec.tabHover
+    if not tex then return end
+    if Skin.active and Skin.Unified() and rec.hovered and not rec.tabActive then
+        if type(tex.SetColorTexture) == "function" then
+            tex:SetColorTexture(Skin.Ink("text", HOVER_WASH))
+        end
+        tex:Show()
+    else
+        tex:Hide()
+    end
+end
+
+-- Paint (or put away) one tab's fill + wash. `isSel` decides which.
+local function updateTabSurfaces(rec, tab, isSel)
+    rec.tabActive = isSel and true or false
+    if not Skin.Unified() then
+        if rec.tabFill then rec.tabFill:Hide() end
+        if rec.tabHover then rec.tabHover:Hide() end
+        restoreTabArt(tab, rec)     -- the box went off: the client's tab is back
+        return
+    end
+    local fill = ensureTabFill(tab, rec)
+    ensureTabHover(tab, rec)
+    if fill then
+        if type(fill.SetColorTexture) == "function" then fill:SetColorTexture(Skin.Ink("panel2")) end
+        fill:ClearAllPoints()
+        -- THE FUSION, literally: the active tab wears the message surface's own
+        -- fill over its whole rect, and the strip's bottom padding is zero (the
+        -- mockup's `.tabs-top{padding:6px 8px 0}`), so the tab's bottom edge IS
+        -- the message surface's top edge and the two are one --panel2 field
+        -- with nothing drawn between them.
+        fill:SetPoint("TOPLEFT", tab, "TOPLEFT", 0, 0)
+        fill:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", 0, 0)
+        if isSel then fill:Show() else fill:Hide() end
+    end
+    Skin.UpdateTabWash(rec)
 end
 
 ----------------------------------------------------------------------
@@ -816,6 +1184,7 @@ function Skin.UpdateTabColors()
     if not UI then return end
     local sel = selectedDockFrame()
     local dim = Skin.DimFactor()
+    local unified = Skin.Unified()
     for _, frame in ipairs(Skin.order) do
         local tab, text = tabText(frame)
         local rec = Skin.styled[frame]
@@ -831,6 +1200,12 @@ function Skin.UpdateTabColors()
                 -- Active: full strength. Inactive: the SAME ink, dimmed through
                 -- the token-derived factor (never a second color).
                 if not isSel then r, g, b = r * dim, g * dim, b * dim end
+            elseif unified then
+                -- The mockup's own fallback: `--tabc` unset means the tab wears
+                -- --text when active and --muted when not.
+                r, g, b = Skin.Ink(isSel and "text" or "muted")
+                mr, mg, mb = Skin.Ink("accent")
+                source = "palette"
             else
                 r, g, b = UI.Color(isSel and "accent" or "muted")
                 mr, mg, mb = UI.Color("accent")
@@ -844,8 +1219,12 @@ function Skin.UpdateTabColors()
                 text:SetTextColor(r, g, b)
             end
             if type(tab.SetAlpha) == "function" then
-                tab:SetAlpha(isSel and 1 or TAB_DIM)
+                -- In the box the DIM lives in the ink (the mockup dims the
+                -- channel colour, not the whole button — dimming the button
+                -- would take the pip and the underline down with it).
+                tab:SetAlpha((unified or isSel) and 1 or TAB_DIM)
             end
+            updateTabSurfaces(rec, tab, isSel)
             Skin.UpdateTabMarks(frame, rec, tab, isSel)
         end
     end
@@ -859,6 +1238,14 @@ local function styleTab(frame, rec)
     if type(text.SetFontObject) == "function" then
         text:SetFontObject(UI.fonts.small)
     end
+    -- In the box the tab label is the mockup's own 12.5px on the suite face
+    -- (the Core role only carries the face; the SIZE is the mockup contract's).
+    if Skin.Unified() and type(text.SetFont) == "function" then
+        pcall(text.SetFont, text, UI.FontFile(), TAB_TEXT_SIZE, "")
+    end
+    -- The client's own tab art comes down in the box (delta 1: it is the filled
+    -- block, and the mockup's tab has no fill of its own).
+    stripTabArt(frame, tab, rec)
     -- Save the tab's original ink once so a disable can hand it back (the
     -- client does not always expose GetTextColor; when it does not, the tab
     -- simply keeps the last ink, which is Wave 1's behavior).
@@ -884,18 +1271,49 @@ end
 ----------------------------------------------------------------------
 
 -- The widest literal a format can produce (digits are the same width class as
--- the sample zeros; the trailing space is the separator stamps writes).
+-- the sample zeros). The BRACKETS are a stamps option now — the mockup's stamp
+-- column is bare "17:16" — so the sample is built from the same two pieces
+-- stamps writes, and the trailing SEPARATOR is measured separately because the
+-- hairline is CENTRED in it (see UpdateDivider).
 local STAMP_SAMPLES = {
-    ["HH:MM"]    = "[00:00] ",
-    ["HH:MM:SS"] = "[00:00:00] ",
-    ["hh:MM"]    = "[00:00 PM] ",
-    ["hh:MM:SS"] = "[00:00:00 PM] ",
+    ["HH:MM"]    = "00:00",
+    ["HH:MM:SS"] = "00:00:00",
+    ["hh:MM"]    = "00:00 PM",
+    ["hh:MM:SS"] = "00:00:00 PM",
 }
 
+-- The separator stamps puts between the stamp and the line. Read through the
+-- sibling's PUBLISHED constant, defended like every peer read; the fallback is
+-- the one space skin v2 assumed.
+local function stampSeparator()
+    local S = ns.Stamps
+    local sep = type(S) == "table" and S.SEPARATOR or nil
+    return (type(sep) == "string" and sep ~= "") and sep or " "
+end
+
+-- The stamps config as stamps itself would read it (the live branch first, the
+-- module's own published defaults second) — never a second copy of the shape.
+local function stampsCfg()
+    local live = ns.db and ns.db.stamps
+    if type(live) == "table" then return live end
+    local S = ns.Stamps
+    return (type(S) == "table" and type(S.DEFAULTS) == "table") and S.DEFAULTS or nil
+end
+
 function Skin.StampSample()
-    local s = ns.db and ns.db.stamps
+    local s = stampsCfg()
     local fmt = type(s) == "table" and s.format or nil
-    return STAMP_SAMPLES[fmt] or STAMP_SAMPLES["HH:MM"]
+    local body = STAMP_SAMPLES[fmt] or STAMP_SAMPLES["HH:MM"]
+    if type(s) == "table" and s.brackets then body = "[" .. body .. "]" end
+    return body .. stampSeparator()
+end
+
+-- The stamp body WITHOUT the separator: the divider is centred in the
+-- separator, so the two are measured apart.
+function Skin.StampBody()
+    local sample, sep = Skin.StampSample(), stampSeparator()
+    if sample:sub(-#sep) == sep then return sample:sub(1, #sample - #sep) end
+    return sample
 end
 
 -- Is a stamp actually being written right now? (Read-only observation of the
@@ -907,13 +1325,15 @@ function Skin.StampsShowing()
     return (S.active == true and S.suspended ~= true) and true or false
 end
 
-function Skin.MeasureStampColumn(frame, rec)
+-- Measure one string in THIS window's own font. The probe is a child of the
+-- CHAT FRAME (see the parenting note in UpdateDivider) so it can never be
+-- carried off by a hidden chassis.
+function Skin.MeasureText(frame, rec, text)
     if not (frame and rec) then return 0 end
     local probe = rec.stampProbe
     if not probe then
-        local host = rec.backdrop or frame
-        if type(host.CreateFontString) ~= "function" then return 0 end
-        probe = host:CreateFontString(nil, "ARTWORK")
+        if type(frame.CreateFontString) ~= "function" then return 0 end
+        probe = frame:CreateFontString(nil, "ARTWORK")
         probe:Hide()
         rec.stampProbe = probe
     end
@@ -922,11 +1342,35 @@ function Skin.MeasureStampColumn(frame, rec)
         local ok, face, size, flags = pcall(frame.GetFont, frame)
         if ok and face then pcall(probe.SetFont, probe, face, size, flags) end
     end
-    if type(probe.SetText) == "function" then probe:SetText(Skin.StampSample()) end
+    if type(probe.SetText) == "function" then probe:SetText(text or "") end
     if type(probe.GetStringWidth) ~= "function" then return 0 end
     local ok, w = pcall(probe.GetStringWidth, probe)
     return (ok and tonumber(w)) or 0
 end
+
+function Skin.MeasureStampColumn(frame, rec)
+    return Skin.MeasureText(frame, rec, Skin.StampSample())
+end
+
+----------------------------------------------------------------------
+-- WHY THE DIVIDER WAS ABSENT IN THE OWNER'S SCREENSHOT — two real causes, both
+-- fixed here, both now pinned:
+--
+--   1. PARENTING. The hairline (and its measuring probe) were created on
+--      rec.backdrop. In the ONE BOX a docked window that is not its group's
+--      HOST has its own backdrop HIDDEN — that is the single-chassis rule — so
+--      every tab except the dock's primary carried a divider that existed,
+--      was "shown", and rendered nothing, because its parent frame was hidden.
+--      The divider belongs to the MESSAGE FRAME, which is always shown, and it
+--      is created there now.
+--   2. THE GATE WAS NEVER RE-ASKED. `stampDivider AND stamps-are-stamping` was
+--      evaluated only on skin's own beats (style, selection, theme, recolor,
+--      the showTimestamps CVar). Turning the stamps MODULE on mid-session — the
+--      settings page's own checkbox — moved the answer and told nobody, so the
+--      divider stayed away until something else happened to refresh the skin.
+--      Skin.NoteStampsChanged is the bell for that, and OnEnable re-asks once
+--      on the next beat so login ORDER cannot decide the answer either.
+----------------------------------------------------------------------
 
 function Skin.UpdateDivider(frame)
     local rec = Skin.styled[frame]
@@ -938,19 +1382,40 @@ function Skin.UpdateDivider(frame)
     end
     local UI = UIKit()
     if not UI then return end
-    local x = Skin.MeasureStampColumn(frame, rec) + DIV_GAP
+    local unified = Skin.Unified()
+    local x
+    if unified then
+        -- THE MOCKUP: `.msgs .row{gap:8px}` puts 8px each side of the 1px
+        -- `.stampline`. A chat line is one string in one FontString, so the
+        -- room right of the hairline is whatever stamps' separator spells —
+        -- the hairline is CENTRED in it, which splits the gap evenly and lands
+        -- on 8/8 as closely as the face's space advance allows.
+        local body = Skin.MeasureText(frame, rec, Skin.StampBody())
+        local sep  = Skin.MeasureText(frame, rec, stampSeparator())
+        x = body + math.max(1, (sep - DIV_WIDTH) / 2)
+    else
+        x = Skin.MeasureStampColumn(frame, rec) + DIV_GAP
+    end
     local div = rec.divider
     if not div then
-        local host = rec.backdrop or frame
-        if type(host.CreateTexture) ~= "function" then return end
-        div = host:CreateTexture(nil, "BORDER")
+        -- ON THE MESSAGE FRAME, never on the chassis (root cause 1 above).
+        if type(frame.CreateTexture) ~= "function" then return end
+        div = frame:CreateTexture(nil, "BORDER")
         if type(div.SetWidth) == "function" then div:SetWidth(DIV_WIDTH) end
         UI.Skin(div, function(self)
-            if type(self.SetColorTexture) == "function" then
+            if type(self.SetColorTexture) ~= "function" then return end
+            if Skin.Unified() then
+                self:SetColorTexture(Skin.Ink("lineSoft"))     -- .stampline
+            else
                 self:SetColorTexture(UI.Color("border", DIV_ALPHA))
             end
         end)
         rec.divider = div
+    end
+    -- The ink follows the box going on or off, not just a theme change.
+    if type(div.SetColorTexture) == "function" then
+        if unified then div:SetColorTexture(Skin.Ink("lineSoft"))
+        else div:SetColorTexture(UI.Color("border", DIV_ALPHA)) end
     end
     if type(div.ClearAllPoints) == "function" then
         div:ClearAllPoints()
@@ -963,6 +1428,16 @@ end
 
 function Skin.UpdateDividers()
     for _, frame in ipairs(Skin.order) do Skin.UpdateDivider(frame) end
+end
+
+-- THE BELL (root cause 2). stamps.lua rings it from its own OnEnable/OnDisable
+-- and carries NO data: the coordination is still read-only and by measurement —
+-- skin never asks stamps anything, it is only told that the answer may have
+-- moved. A build of stamps that does not ring it is no worse off than today.
+function Skin.NoteStampsChanged()
+    if not Skin.active then return false end
+    Skin.UpdateDividers()
+    return true
 end
 
 ----------------------------------------------------------------------
@@ -1053,18 +1528,30 @@ local function styleEditBox(frame, rec)
         end
     end
 
-    -- Attach as a bar: full window width, below (default) or above.
+    -- Attach as a bar: full window width, below (default) or above. In the box
+    -- the bar spans the chassis' inner width (the mockup's entry runs the whole
+    -- box) and sits flush against the message area's own bottom padding, with
+    -- the hairline as the only thing between them.
+    local unified = Skin.Unified()
+    -- …out to the chassis' INNER edge (past the message padding, inside the
+    -- 1px border), so the bar's own 12-unit text inset lands the prefix exactly
+    -- where the mockup's `.entry{padding:8px 12px}` puts it.
+    local sideOut = unified and (MSG_PAD_X - CHASSIS_EDGE) or PAD
+    local onTop   = (cfg().editBox or "BOTTOM"):upper() == "TOP"
+    local away    = unified and ((onTop and MSG_PAD_TOP or MSG_PAD_BOT) + SEAM_W)
+                             or (EB_GAP + PAD)
+    local barH    = unified and EB_HEIGHT or 24
     if type(eb.ClearAllPoints) == "function" then
         pcall(eb.ClearAllPoints, eb)
-        if (cfg().editBox or "BOTTOM"):upper() == "TOP" then
-            pcall(eb.SetPoint, eb, "BOTTOMLEFT", frame, "TOPLEFT", -PAD, EB_GAP + PAD)
-            pcall(eb.SetPoint, eb, "BOTTOMRIGHT", frame, "TOPRIGHT", PAD, EB_GAP + PAD)
+        if onTop then
+            pcall(eb.SetPoint, eb, "BOTTOMLEFT", frame, "TOPLEFT", -sideOut, away)
+            pcall(eb.SetPoint, eb, "BOTTOMRIGHT", frame, "TOPRIGHT", sideOut, away)
         else
-            pcall(eb.SetPoint, eb, "TOPLEFT", frame, "BOTTOMLEFT", -PAD, -(EB_GAP + PAD))
-            pcall(eb.SetPoint, eb, "TOPRIGHT", frame, "BOTTOMRIGHT", PAD, -(EB_GAP + PAD))
+            pcall(eb.SetPoint, eb, "TOPLEFT", frame, "BOTTOMLEFT", -sideOut, -away)
+            pcall(eb.SetPoint, eb, "TOPRIGHT", frame, "BOTTOMRIGHT", sideOut, -away)
         end
     end
-    if type(eb.SetHeight) == "function" then pcall(eb.SetHeight, eb, EB_HEIGHT) end
+    if type(eb.SetHeight) == "function" then pcall(eb.SetHeight, eb, barH) end
 
     -- Flat themed panel behind the input (control-surface tokens: this is an
     -- input, so it steps up from the window's panel ground).
@@ -1074,13 +1561,14 @@ local function styleEditBox(frame, rec)
     -- and nothing else — a second background here is the exact thing the
     -- approved design forbids. An existing panel is put away, not destroyed, so
     -- turning the box off brings it straight back.
-    if Skin.Unified() then
+    if unified then
         if rec.ebSkin then rec.ebSkin:Hide() end
         if type(eb.SetFontObject) == "function" then
             pcall(eb.SetFontObject, eb, UI.fonts.body)
         end
+        -- The mockup's `.entry{padding:8px 12px}`, literally.
         if type(eb.SetTextInsets) == "function" then
-            pcall(eb.SetTextInsets, eb, 8, 8, 0, 0)
+            pcall(eb.SetTextInsets, eb, EB_PAD_X, EB_PAD_X, EB_PAD_Y, EB_PAD_Y)
         end
         local hdr = rec.ebHeader or editBoxHeader(eb)
         rec.ebHeader = hdr
@@ -2011,26 +2499,40 @@ local function ensureCopyButton(frame, rec)
         return
     end
     if rec.copyBtn then rec.copyBtn:Show() return end
+    -- DELTA 4: this used to be the word "copy" in a 38-wide block, and it was
+    -- the loudest thing on the owner's window. It is a QUIET GLYPH now — the
+    -- icon rail's own idiom, same square, same idle alpha, muted until the
+    -- pointer is on it and accent when it is.
     local btn = _G.CreateFrame("Button", nil, frame)
-    btn:SetSize(38, 16)
+    btn:SetSize(RAIL_BTN, RAIL_BTN)
     btn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", PAD, PAD)
     if btn.SetAlpha then btn:SetAlpha(COPY_IDLE) end
     local label = btn:CreateFontString(nil, "OVERLAY")
     label:SetFontObject(UI.fonts.small)
     label:SetPoint("CENTER", btn, "CENTER", 0, 0)
-    label:SetText("copy")    -- ASCII by law
-    UI.Skin(label, function(self)
-        if type(self.SetTextColor) == "function" then self:SetTextColor(UI.Color("muted")) end
-    end)
+    label:SetText("C")       -- ASCII by law; the rail's copy glyph, same verb
+    local function quiet()
+        if type(label.SetTextColor) ~= "function" then return end
+        if Skin.Unified() then label:SetTextColor(Skin.Ink("muted"))
+        else label:SetTextColor(UI.Color("muted")) end
+    end
+    local function loud()
+        if type(label.SetTextColor) ~= "function" then return end
+        if Skin.Unified() then label:SetTextColor(Skin.Ink("accent"))
+        else label:SetTextColor(UI.Color("accent")) end
+    end
+    UI.Skin(label, quiet)
     btn:SetScript("OnEnter", function(self)
         if self.SetAlpha then self:SetAlpha(1) end
-        if type(label.SetTextColor) == "function" then label:SetTextColor(UI.Color("accent")) end
+        loud()
     end)
     btn:SetScript("OnLeave", function(self)
         if self.SetAlpha then self:SetAlpha(COPY_IDLE) end
-        if type(label.SetTextColor) == "function" then label:SetTextColor(UI.Color("muted")) end
+        quiet()
     end)
     btn:SetScript("OnClick", function() Skin.OpenCopy(frame) end)
+    btn._label = label
+    btn._quiet = quiet
     rec.copyBtn = btn
 end
 
@@ -2295,7 +2797,7 @@ local function anchorStrip(strip, rec)
     else
         -- The top band — below the entry bar when the entry bar is the one on
         -- top, so the two never sit on the same pixels.
-        local dy = entryTop and -(EB_GAP + EB_HEIGHT) or 0
+        local dy = entryTop and -(SEAM_W + EB_HEIGHT) or 0
         strip:SetPoint("TOPLEFT", bd, "TOPLEFT", 0, dy)
         strip:SetPoint("TOPRIGHT", bd, "TOPRIGHT", 0, dy)
         if type(strip.SetHeight) == "function" then strip:SetHeight(STRIP_H) end
@@ -2303,16 +2805,18 @@ local function anchorStrip(strip, rec)
 end
 
 ----------------------------------------------------------------------
--- The internal hairlines. Border-token, at the divider's own subtle alpha —
--- the ONLY separation inside the box.
+-- The internal hairlines — EXACTLY the two the mockup draws, in --line-soft:
 --
--- THE FUSED ACTIVE TAB (top placement): the seam between the strip and the
--- message surface is drawn as TWO pieces that stop at the active tab's edges,
--- so the surface runs continuously through it. That is the mockup's "the
--- active tab fuses with the message surface", expressed with hairlines instead
--- of the second background the design contract forbids.
--- On a RAIL the seam is continuous and the active tab is marked by its edge
--- bar instead (again, the mockup).
+--   `.entry{border-top:1px solid var(--line-soft)}`  — the entry seam;
+--   `.tabs-side{border-left:1px solid var(--line-soft)}` — the rail's inner edge.
+--
+-- AND NOT A THIRD. The mockup draws NOTHING between the tab strip and the
+-- messages: `.tabs-top` is --panel, `.msgs` is --panel2, and the tone step is
+-- the whole separation. skin v3 read the fusion as a hairline broken at the
+-- active tab, which is why the shipped box has a line the mockup does not and
+-- lacks the tone step the mockup does. The two-piece seam is retired: the
+-- fusion is now literal (the active tab wears the surface's own fill), so
+-- tabSeamA/B stay down under top tabs and tabSeamA carries the rail's edge.
 ----------------------------------------------------------------------
 
 local function ensureSeam(rec, key)
@@ -2322,7 +2826,7 @@ local function ensureSeam(rec, key)
     local tex = bd:CreateTexture(nil, "OVERLAY")
     UI.Skin(tex, function(self)
         if type(self.SetColorTexture) == "function" then
-            self:SetColorTexture(UI.Color("border", SEAM_ALPHA))
+            self:SetColorTexture(Skin.Ink("lineSoft"))
         end
     end)
     tex:Hide()
@@ -2337,47 +2841,41 @@ local function layoutSeams(host, rec, activeTab)
     if not (seamA and seamB and entry and strip) then return end
     local placement = Skin.TabPlacement()
     local entryTop = (cfg().editBox or "BOTTOM"):upper() == "TOP"
+    for _, tex in ipairs({ seamA, seamB, entry }) do
+        if type(tex.SetColorTexture) == "function" then tex:SetColorTexture(Skin.Ink("lineSoft")) end
+    end
 
-    -- The entry bar's hairline, across the message area's own width.
+    -- The entry bar's hairline: the mockup's `border-top`, flush on the bar's
+    -- own edge, spanning the chassis' inner width. Anchored to the CHASSIS on
+    -- both points so it really does run the whole box (the message frame is
+    -- narrower than the box by the message padding).
+    local bd = rec.backdrop
     entry:ClearAllPoints()
     if type(entry.SetHeight) == "function" then entry:SetHeight(SEAM_W) end
     if entryTop then
-        entry:SetPoint("BOTTOMLEFT", host, "TOPLEFT", 0, EB_GAP / 2)
-        entry:SetPoint("BOTTOMRIGHT", host, "TOPRIGHT", 0, EB_GAP / 2)
+        entry:SetPoint("TOPLEFT", bd, "TOPLEFT", CHASSIS_EDGE, -EB_HEIGHT)
+        entry:SetPoint("TOPRIGHT", bd, "TOPRIGHT", -CHASSIS_EDGE, -EB_HEIGHT)
     else
-        entry:SetPoint("TOPLEFT", host, "BOTTOMLEFT", 0, -EB_GAP / 2)
-        entry:SetPoint("TOPRIGHT", host, "BOTTOMRIGHT", 0, -EB_GAP / 2)
+        entry:SetPoint("BOTTOMLEFT", bd, "BOTTOMLEFT", CHASSIS_EDGE, EB_HEIGHT)
+        entry:SetPoint("BOTTOMRIGHT", bd, "BOTTOMRIGHT", -CHASSIS_EDGE, EB_HEIGHT)
     end
     entry:Show()
 
     seamA:ClearAllPoints()
     seamB:ClearAllPoints()
+    seamB:Hide()
     if placement == "left" or placement == "right" then
-        -- Continuous, on the rail's INNER side.
+        -- Continuous, on the rail's INNER side (`.tabs-side` border).
         if type(seamA.SetWidth) == "function" then seamA:SetWidth(SEAM_W) end
         local edge = (placement == "left") and "RIGHT" or "LEFT"
         seamA:SetPoint("TOP" .. edge, strip, "TOP" .. edge, 0, 0)
         seamA:SetPoint("BOTTOM" .. edge, strip, "BOTTOM" .. edge, 0, 0)
         seamA:Show()
-        seamB:Hide()
         return
     end
-    if type(seamA.SetHeight) == "function" then seamA:SetHeight(SEAM_W) end
-    if type(seamB.SetHeight) == "function" then seamB:SetHeight(SEAM_W) end
-    if activeTab then
-        -- BROKEN at the active tab: the fused-tab relationship.
-        seamA:SetPoint("BOTTOMLEFT", strip, "BOTTOMLEFT", 0, 0)
-        seamA:SetPoint("BOTTOMRIGHT", activeTab, "BOTTOMLEFT", 0, 0)
-        seamB:SetPoint("BOTTOMLEFT", activeTab, "BOTTOMRIGHT", 0, 0)
-        seamB:SetPoint("BOTTOMRIGHT", strip, "BOTTOMRIGHT", 0, 0)
-        seamA:Show()
-        seamB:Show()
-    else
-        seamA:SetPoint("BOTTOMLEFT", strip, "BOTTOMLEFT", 0, 0)
-        seamA:SetPoint("BOTTOMRIGHT", strip, "BOTTOMRIGHT", 0, 0)
-        seamA:Show()
-        seamB:Hide()
-    end
+    -- TOP TABS: the mockup draws no line here at all. The tone step between
+    -- --panel (strip) and --panel2 (messages, and the active tab) is it.
+    seamA:Hide()
 end
 
 ----------------------------------------------------------------------
@@ -2454,12 +2952,30 @@ local function rememberTab(rec, tab, text)
         local ok, j = pcall(text.GetJustifyH, text)
         rec.tabJustify = (ok and type(j) == "string") and j or false
     end
+    if text then rec.tabTextPoints = savePoints(text) or false end
+end
+
+-- What the unread pip costs this tab's width, through badges' OWN published
+-- seam (the courtesy this file already pays it with Relayout). Zero when there
+-- is no badge, when badges is off, or when it is not loaded at all.
+local function pipExtent(frame)
+    local B = ns.Badges
+    if not (B and type(B.PipWidth) == "function") then return 0 end
+    local ok, w = pcall(B.PipWidth, frame)
+    return (ok and tonumber(w)) or 0
 end
 
 local function restoreTab(frame, rec)
     local tab, text = tabText(frame)
     if not tab or rec.tabPoints == nil then return end
     if rec.tabPoints then restorePoints(tab, rec.tabPoints) end
+    -- The label's own anchors, but only if there were any to remember: handing
+    -- back an EMPTY point list would clear the client's anchor and leave the
+    -- label nowhere, which is worse than leaving ours in place.
+    if text and type(rec.tabTextPoints) == "table" and #rec.tabTextPoints > 0 then
+        restorePoints(text, rec.tabTextPoints)
+    end
+    rec.tabTextPoints = nil
     if rec.tabSize then
         if rec.tabSize[1] and type(tab.SetWidth) == "function" then
             pcall(tab.SetWidth, tab, rec.tabSize[1])
@@ -2477,6 +2993,21 @@ end
 
 function Skin.LayoutTabs()
     if not Skin.active then return 0 end
+    -- Class 9: the pip's width feeds the tab's width, and badges is told to
+    -- re-anchor at the end of this pass — the latch is what keeps a future
+    -- badge beat that re-enters here from spinning.
+    if Skin._tabLayoutDepth and Skin._tabLayoutDepth > 0 then return 0 end
+    Skin._tabLayoutDepth = (Skin._tabLayoutDepth or 0) + 1
+    local ok, res = pcall(Skin.__LayoutTabs)
+    Skin._tabLayoutDepth = Skin._tabLayoutDepth - 1
+    if not ok then
+        if ns.RouteError then ns.RouteError(res) end
+        return 0
+    end
+    return res or 0
+end
+
+function Skin.__LayoutTabs()
     local placement = Skin.TabPlacement()
     local rail = Skin.TabsOnRail()
     local moved = 0
@@ -2492,9 +3023,11 @@ function Skin.LayoutTabs()
                 if rec and tab then
                     rememberTab(rec, tab, text)
                     pcall(tab.ClearAllPoints, tab)
+                    local pip = pipExtent(frame)
                     if rail then
+                        -- `.tabs-side{padding:8px 6px}` + `.stab{padding:7px 10px}`.
                         if type(tab.SetWidth) == "function" then
-                            pcall(tab.SetWidth, tab, TABRAIL_W - 2 * TAB_PAD)
+                            pcall(tab.SetWidth, tab, TABRAIL_W - 2 * RAIL_PAD_X)
                         end
                         if type(tab.SetHeight) == "function" then
                             pcall(tab.SetHeight, tab, TAB_ROW_H)
@@ -2502,32 +3035,44 @@ function Skin.LayoutTabs()
                         if prev then
                             tab:SetPoint("TOPLEFT", prev, "BOTTOMLEFT", 0, -TAB_GAP)
                         else
-                            tab:SetPoint("TOPLEFT", strip, "TOPLEFT", TAB_PAD, -TAB_PAD)
+                            tab:SetPoint("TOPLEFT", strip, "TOPLEFT", RAIL_PAD_X, -RAIL_PAD_Y)
                         end
                         if text and type(text.SetJustifyH) == "function" then
                             pcall(text.SetJustifyH, text, "LEFT")
                         end
+                        -- The label sits at the row's own left padding.
+                        if text and type(text.ClearAllPoints) == "function" then
+                            pcall(text.ClearAllPoints, text)
+                            text:SetPoint("LEFT", tab, "LEFT", RAIL_TAB_PAD_X, 0)
+                        end
                     else
-                        -- The client sizes a top tab to its own text; hand the
-                        -- remembered size back before letting it do so again,
-                        -- so a rail's forced row shape never survives the
-                        -- switch back to the top.
-                        if rec.tabSize and type(tab.SetWidth) == "function" and rec.tabSize[1] then
-                            pcall(tab.SetWidth, tab, rec.tabSize[1])
-                        end
-                        if rec.tabSize and type(tab.SetHeight) == "function" and rec.tabSize[2] then
-                            pcall(tab.SetHeight, tab, rec.tabSize[2])
-                        end
+                        -- `.tab{padding:5px 14px 6px}` around the label, plus the
+                        -- pip's own room (`.tab .n` lives INSIDE the tab, after
+                        -- the text, with a 6px gap) — so the tab is exactly as
+                        -- wide as the mockup's content box.
+                        local textW = (text and widgetNum(text, "GetStringWidth")) or 0
+                        local w = textW + 2 * TAB_PAD_X + (pip > 0 and (PIP_GAP + pip) or 0)
+                        if type(tab.SetWidth) == "function" then pcall(tab.SetWidth, tab, w) end
+                        if type(tab.SetHeight) == "function" then pcall(tab.SetHeight, tab, TAB_H) end
                         if prev then
                             tab:SetPoint("BOTTOMLEFT", prev, "BOTTOMRIGHT", TAB_GAP, 0)
                         else
-                            tab:SetPoint("BOTTOMLEFT", strip, "BOTTOMLEFT", TAB_PAD, 0)
+                            tab:SetPoint("BOTTOMLEFT", strip, "BOTTOMLEFT", STRIP_PAD_X, 0)
                         end
                         if text and type(text.SetJustifyH) == "function" then
-                            pcall(text.SetJustifyH, text, "CENTER")
+                            pcall(text.SetJustifyH, text, "LEFT")
+                        end
+                        -- Left-anchored at the tab's own padding: with the tab
+                        -- sized to its content that is the same place CENTER
+                        -- would put it when there is no pip, and the only place
+                        -- it can be when there is one.
+                        if text and type(text.ClearAllPoints) == "function" then
+                            pcall(text.ClearAllPoints, text)
+                            text:SetPoint("LEFT", tab, "LEFT", TAB_PAD_X, 0)
                         end
                     end
                     rec.tabLaid = placement    -- which shape this tab is wearing
+                    rec.tabPip  = pip
                     prev = tab
                     moved = moved + 1
                 end
@@ -2543,6 +3088,17 @@ function Skin.LayoutTabs()
     local B = ns.Badges
     if B and type(B.Relayout) == "function" then pcall(B.Relayout) end
     return moved
+end
+
+-- THE BELL FROM BADGES. A pip appearing (or its digits growing) changes how
+-- wide its tab has to be, and badges cannot know that — it owns the counter,
+-- this file owns the tab. Same shape as NoteStampsChanged: no data, just "the
+-- answer may have moved", and the latch above makes it safe to ring from
+-- inside badges' own render.
+function Skin.NoteBadgeChanged()
+    if not (Skin.active and Skin.Unified()) then return false end
+    Skin.LayoutTabs()
+    return true
 end
 
 ----------------------------------------------------------------------
@@ -2571,12 +3127,15 @@ local function anchorCopyButton(frame, rec)
     if not strip then where = "corner" end
     pcall(btn.ClearAllPoints, btn)
     if where == "railFoot" then
-        btn:SetPoint("BOTTOMRIGHT", strip, "BOTTOMRIGHT", -TAB_PAD, TAB_PAD)
+        btn:SetPoint("BOTTOMRIGHT", strip, "BOTTOMRIGHT", -RAIL_PAD_X, RAIL_PAD_Y)
     elseif where == "stripEnd" then
-        btn:SetPoint("RIGHT", strip, "RIGHT", -TAB_PAD, 0)
+        -- The strip's far end, on the tab run's own baseline (the strip's top
+        -- padding is the mockup's 6, so this sits level with the labels).
+        btn:SetPoint("RIGHT", strip, "RIGHT", -STRIP_PAD_X, -STRIP_PAD_TOP / 2)
     else
         btn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", PAD, PAD)
     end
+    if btn._quiet then pcall(btn._quiet) end
     rec.copyAnchor = where
     return where
 end
@@ -2611,7 +3170,9 @@ function Skin.__UpdateChassis()
     for _, frame in ipairs(Skin.order) do
         local rec = Skin.styled[frame]
         if rec and rec.backdrop then
+            paintChassis(rec.backdrop)
             anchorChassis(rec.backdrop, frame)
+            layoutSurface(rec)
             if unified and not frameLive(frame) then
                 rec.backdrop:Hide()          -- a closed window has no box
             elseif unified and not isHost[frame] then
@@ -2742,8 +3303,15 @@ local function restoreWindow(frame, rec)
     -- where the client had it (points, size and justification all remembered
     -- on the first move).
     if rec.strip then rec.strip:Hide() end
-    for _, key in ipairs({ "tabSeamA", "tabSeamB", "entrySeam", "edgebar" }) do
+    for _, key in ipairs({ "tabSeamA", "tabSeamB", "entrySeam", "edgebar",
+                           "surface", "tabFill", "tabHover" }) do
         if rec[key] then rec[key]:Hide() end
+    end
+    -- The client's own tab art, and the row rhythm, come back exactly.
+    restoreTabArt((select(1, tabText(frame))), rec)
+    if rec.origSpacing ~= nil and type(frame.SetSpacing) == "function" then
+        pcall(frame.SetSpacing, frame, tonumber(rec.origSpacing) or 0)
+        rec.origSpacing = nil
     end
     restoreTab(frame, rec)
     restoreEditBox(frame, rec)
@@ -2948,6 +3516,14 @@ function Skin.OnEnable()
     ns:RegisterEvent("CVAR_UPDATE", Skin._cvarHandler)
     ns:RegisterEvent("PLAYER_REGEN_ENABLED", Skin._regenHandler)
     Skin.StyleAll()
+    -- THE DIVIDER'S LOGIN BEAT (root cause 2, the ordering half). Module enable
+    -- order is file order, so whether stamps had come up before us decided
+    -- whether the divider was ever drawn. One deferred re-ask makes the answer
+    -- order-independent; without C_Timer (headless) StyleAll's own pass stands.
+    local CT = _G.C_Timer
+    if CT and type(CT.After) == "function" then
+        CT.After(0, function() if Skin.active then Skin.UpdateDividers() end end)
+    end
 end
 
 function Skin.OnDisable()
@@ -3009,6 +3585,24 @@ ns.RegisterDebugCommand("skin", "skin state: styled windows, config, tab inks", 
         :format(tostring(c.unifiedChassis), Skin.TabPlacement(), Skin.RailSide()))
     ns:Print(("  chassis insets l/r/t/b = %d/%d/%d/%d, fading effective: %s (stored %s)")
         :format(cl, cr, ctp, cb, tostring(Skin.FadingEffective()), tostring(c.fading)))
+    -- THE MOCKUP CONTRACT, readable in-game: the numbers and the palette the
+    -- box is drawn from, so "does it match the mockup" is a diff, not a debate.
+    ns:Print(("  mockup contract: strip %d (pad %d/%d), tab %d (pad %d/%d/%d), entry %d (pad %d/%d)")
+        :format(STRIP_H, STRIP_PAD_TOP, STRIP_PAD_X, TAB_H,
+                TAB_PAD_TOP, TAB_PAD_X, TAB_PAD_BOT, EB_HEIGHT, EB_PAD_Y, EB_PAD_X))
+    ns:Print(("    messages pad %d/%d/%d, row spacing %d, rail %d (pad %d/%d, row %d)")
+        :format(MSG_PAD_TOP, MSG_PAD_X, MSG_PAD_BOT, ROW_SPACING,
+                TABRAIL_W, RAIL_PAD_Y, RAIL_PAD_X, TAB_ROW_H))
+    local names = { "panel", "panel2", "line", "lineSoft", "accent", "text", "muted", "faint" }
+    local swatch = {}
+    for _, n in ipairs(names) do
+        local r, g, b = Skin.Ink(n)
+        swatch[#swatch + 1] = ("%s=%02x%02x%02x"):format(n,
+            math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
+    end
+    ns:Print("    palette: " .. table.concat(swatch, " "))
+    ns:Print(("    divider x=%s (stamp '%s'), corners: SQUARE (client limit: no rounded backdrop edge)")
+        :format(tostring((Skin.styled[_G.ChatFrame1] or {}).dividerX or "-"), Skin.StampBody()))
     for _, host in ipairs(Skin.ChassisHosts()) do
         local names = {}
         for _, f in ipairs(Skin.GroupMembers(host)) do
@@ -4302,46 +4896,85 @@ local function testOneBox(fails, verbose)
         "V2: …and NO second background behind the entry bar")
     ck(rec1.strip ~= nil and rec1.strip._backdrop == nil,
         "V2: …and the tab strip is a BARE frame (it never got a backdrop of its own)")
-    ck(near3(rec1.backdrop._backdropColor, UI.Color("panel")),
-        "V2: the chassis is still the PANEL token (not a color)")
-    ck(near3(rec1.tabSeamA._color, UI.Color("border")) and rec1.tabSeamA._color[4] == SEAM_ALPHA,
-        "V2: the internal hairline is the BORDER token at the divider's own alpha")
 
-    -- ── Phase V3: TOP placement geometry. ────────────────────────────────────
+    -- ── Phase V2b: THE MOCKUP CONTRACT'S COLOURS, literally. ─────────────────
+    -- The owner's ask is "as identically as possible", so these are the
+    -- mockup's own hexes, and the assertion is against the PALETTE — a token
+    -- could not satisfy it and neither could a re-typed hex.
+    local function hex3(v)
+        return math.floor(v / 65536) % 256 / 255,
+               math.floor(v / 256) % 256 / 255,
+               (v % 256) / 255
+    end
+    ck(near3(rec1.backdrop._backdropColor, hex3(0x16100f)),
+        "V2b: the chassis is the mockup's --panel #16100f")
+    ck(rec1.backdrop._backdropColor[4] == 1,
+        "V2b: …SOLID (v3 shipped 0.85 over the world, which read as pure black)")
+    ck(near3(rec1.backdrop._backdropBorderColor, hex3(0x6e1d1a)),
+        "V2b: …inside the mockup's --line #6e1d1a border")
+    ck(rec1.surface and rec1.surface._shown == true
+        and near3(rec1.surface._color, hex3(0x1d1514)),
+        "V2b: THE SECOND TONE — the message area wears the mockup's --panel2 #1d1514")
+    ck(near3(rec1.entrySeam._color, hex3(0x3a1512)),
+        "V2b: the entry hairline is the mockup's --line-soft #3a1512")
+    ck(Skin.Ink("faint") ~= nil and select(1, Skin.Ink("accent")) == 0xc2 / 255,
+        "V2b: the whole palette is one table (Skin.Ink), so a re-theme is one edit")
+
+    -- ── Phase V3: TOP placement geometry, straight off the mapping table. ────
     ck(Skin.TabPlacement() == "top", "V3: the shipped placement is top")
     local l, r, t, b = Skin.ChassisInsets()
-    ck(l == PAD and r == PAD and t == PAD + STRIP_H and b == PAD + EB_GAP + EB_HEIGHT,
-        "V3: the box grows over the strip above and the entry bar below")
+    ck(l == 14 and r == 14, "V3: `.msgs{padding:… 14px}` — the box holds the text 14 off each side")
+    ck(t == 10 + STRIP_H, "V3: …10 above it, under the 35-unit strip")
+    ck(b == 6 + SEAM_W + EB_HEIGHT,
+        "V3: …6 below it, then the hairline and the 36-unit entry bar")
+    ck(STRIP_H == 35 and TAB_H == 29 and EB_HEIGHT == 36,
+        "V3: the mockup's own measures (strip 6+29, tab 5+18+6, entry 8+19.6+8)")
     local tl = pointNamed(rec1.backdrop, "TOPLEFT")
     local br = pointNamed(rec1.backdrop, "BOTTOMRIGHT")
-    ck(tl and tl[2] == cf1 and tl[4] == -PAD and tl[5] == PAD + STRIP_H,
+    ck(tl and tl[2] == cf1 and tl[4] == -14 and tl[5] == 10 + STRIP_H,
         "V3: …and the chassis is anchored to exactly those insets")
-    ck(br and br[4] == PAD and br[5] == -(PAD + EB_GAP + EB_HEIGHT),
+    ck(br and br[4] == 14 and br[5] == -(6 + SEAM_W + EB_HEIGHT),
         "V3: …on the entry-bar side too")
     ck(rec1.strip._h == STRIP_H, "V3: the strip is the chassis' top band")
     local sp = pointNamed(rec1.strip, "TOPLEFT")
     ck(sp and sp[2] == rec1.backdrop, "V3: …anchored to the chassis itself")
     local t1p = pointNamed(tab1, "BOTTOMLEFT")
-    ck(t1p and t1p[2] == rec1.strip and t1p[4] == TAB_PAD,
-        "V3: the first tab sits at the strip's left edge")
+    ck(t1p and t1p[2] == rec1.strip and t1p[4] == STRIP_PAD_X,
+        "V3: the first tab sits at the strip's own 8-unit padding")
     local t2p = pointNamed(tab2, "BOTTOMLEFT")
     ck(t2p and t2p[2] == tab1 and t2p[3] == "BOTTOMRIGHT" and t2p[4] == TAB_GAP,
         "V3: …and the next tab runs off it, left to right")
+    ck(tab1._h == TAB_H, "V3: a top tab is the mockup's 29 units tall")
+    local labelW = _G.ChatFrame1TabText:GetStringWidth()
+    ck(tab1._w == labelW + 2 * TAB_PAD_X,
+        "V3: …and exactly its label plus `.tab{padding:… 14px}` either side")
+    local lp = pointNamed(_G.ChatFrame1TabText, "LEFT")
+    ck(lp and lp[2] == tab1 and lp[4] == TAB_PAD_X,
+        "V3: …with the label sitting on that padding")
 
-    -- THE FUSED ACTIVE TAB: the strip/message hairline is drawn in two pieces
-    -- that STOP at the active tab's edges, so the surface runs through it. A
-    -- single unbroken hairline could not express this, and a second background
-    -- is forbidden — this is the mockup's relationship, in hairlines.
-    ck(rec1.tabSeamA._shown == true and rec1.tabSeamB._shown == true,
-        "V3: FUSED TAB — the seam is drawn in two pieces")
-    local aRight = pointNamed(rec1.tabSeamA, "BOTTOMRIGHT")
-    local bLeft  = pointNamed(rec1.tabSeamB, "BOTTOMLEFT")
-    ck(aRight and aRight[2] == tab1 and aRight[3] == "BOTTOMLEFT",
-        "V3: …the left piece stops at the ACTIVE tab's left edge")
-    ck(bLeft and bLeft[2] == tab1 and bLeft[3] == "BOTTOMRIGHT",
-        "V3: …and the right piece starts again at its right edge")
+    -- THE FUSED ACTIVE TAB, as the mockup actually draws it: the active tab
+    -- wears the MESSAGE SURFACE's own --panel2 fill, the inactive ones wear no
+    -- fill at all, and there is NO hairline between strip and messages — the
+    -- tone step is the whole separation. (skin v3 drew a broken hairline here
+    -- and left the client's own tab art on, which is the filled block the owner
+    -- photographed.)
+    ck(rec1.tabFill and rec1.tabFill._shown == true
+        and near3(rec1.tabFill._color, hex3(0x1d1514)),
+        "V3: FUSED TAB — the active tab is painted in the message surface's own --panel2")
+    ck(rec2.tabFill == nil or rec2.tabFill._shown == false,
+        "V3: …and an INACTIVE tab has no fill of its own (the mockup's `.tab` has none)")
+    ck(rec1.tabSeamA._shown == false and rec1.tabSeamB._shown == false,
+        "V3: …and NOTHING is drawn between the strip and the messages")
+    ck(rec1.tabStock ~= nil and _G.ChatFrame1TabLeft
+        and _G.ChatFrame1TabLeft._alpha == 0,
+        "V3: THE MISS, FIXED — the CLIENT's own tab art is stripped in the box")
+    ck(tab1._alpha == 1 and tab2._alpha == 1,
+        "V3: the dim lives in the INK, never in the button's alpha (it would take the pip too)")
     ck(rec1.underline and rec1.underline._shown == true,
         "V3: the active tab wears its underline on top")
+    local ulp = pointNamed(rec1.underline, "BOTTOMLEFT")
+    ck(ulp and ulp[4] == UL_INSET and ulp[5] == UL_Y and rec1.underline._h == UL_HEIGHT,
+        "V3: …2 units tall, inset 6 from each edge, on the tab's bottom (the mockup's ::after)")
     -- NEVER A FIGHT LOOP: an idle beat over a box that is already assembled
     -- builds nothing and calls the client's own dock layout not at all.
     Sim.ResetCalls()
@@ -4365,33 +4998,60 @@ local function testOneBox(fails, verbose)
     ck(pointNamed(rec1.copyBtn, "RIGHT") ~= nil and pointNamed(rec1.copyBtn, "TOPRIGHT") == nil,
         "V3: …and its old corner anchor is gone, not stacked on top")
 
-    -- Selecting the other tab moves the break with it.
+    -- Selecting the other tab moves the fill with it.
     _G.FCF_SelectDockFrame(cf2)
-    aRight = pointNamed(rec1.tabSeamA, "BOTTOMRIGHT")
-    ck(aRight and aRight[2] == tab2,
-        "V3: the break follows the selection to the newly active tab")
+    ck(rec2.tabFill and rec2.tabFill._shown == true
+        and rec1.tabFill._shown == false,
+        "V3: the fused fill follows the selection to the newly active tab")
     _G.FCF_SelectDockFrame(cf1)
+
+    -- ── Phase V3b: THE HOVER WASH and the ROW RHYTHM. ────────────────────────
+    -- `.tab:hover{background:rgba(255,255,255,.04)}` — on inactive tabs only,
+    -- because the active one already carries the surface fill.
+    local rec2hover = rec2.tabHover
+    ck(rec2hover ~= nil, "V3b: an inactive tab carries a hover wash")
+    tab2:GetScript("OnEnter")(tab2)
+    ck(rec2.tabHover._shown == true and rec2.tabHover._color[4] == HOVER_WASH,
+        "V3b: …shown at the mockup's 4% while the pointer is on it")
+    ck(near3(rec2.tabHover._color, hex3(0xe6dfd4)),
+        "V3b: …washing with the text ink (the mockup's white)")
+    tab2:GetScript("OnLeave")(tab2)
+    ck(rec2.tabHover._shown == false, "V3b: …and gone when the pointer leaves")
+    tab1:GetScript("OnEnter")(tab1)
+    ck(rec1.tabHover == nil or rec1.tabHover._shown == false,
+        "V3b: the ACTIVE tab never washes (it already wears the surface)")
+    tab1:GetScript("OnLeave")(tab1)
+    -- `.msgs .row{padding:1.5px 0}` -> the one lever a message frame has.
+    ck(cf1._spacing == ROW_SPACING,
+        "V3b: the row rhythm is the mockup's 1.5 above + 1.5 below (got "
+        .. tostring(cf1._spacing) .. ")")
+    -- `.entry{padding:8px 12px}` on the bar itself.
+    local eb1v = _G.ChatFrame1EditBox
+    local il, ir, it, ib = eb1v:GetTextInsets()
+    ck(il == EB_PAD_X and ir == EB_PAD_X and it == EB_PAD_Y and ib == EB_PAD_Y,
+        "V3b: the entry bar wears the mockup's own 8/12 padding")
+    ck(eb1v._h == EB_HEIGHT, "V3b: …and its 36-unit height")
 
     -- ── Phase V4: LEFT rail geometry. ────────────────────────────────────────
     ck(C.SetTabPlacement("left") == true, "V4: the placement is a live config edit")
     Skin.Refresh()
     ck(Skin.TabPlacement() == "left" and Skin.TabsOnRail() == true, "V4: the tabs are on a rail")
     l, r, t, b = Skin.ChassisInsets()
-    ck(l == PAD + TABRAIL_W and r == PAD and t == PAD,
-        "V4: the box grows out on the LEFT by the rail's width, and no longer above")
+    ck(l == 14 + TABRAIL_W and r == 14 and t == 10,
+        "V4: the box grows out on the LEFT by the mockup's 112-unit rail, and no longer above")
     ck(rec1.strip._w == TABRAIL_W, "V4: the rail is that band")
     local rp = pointNamed(rec1.strip, "TOPLEFT")
     local rb = pointNamed(rec1.strip, "BOTTOMLEFT")
     ck(rp and rp[2] == rec1.backdrop and rb and rb[2] == rec1.backdrop,
         "V4: …running the chassis' whole height, beside the entry bar as well")
     local rt1 = pointNamed(tab1, "TOPLEFT")
-    ck(rt1 and rt1[2] == rec1.strip and rt1[4] == TAB_PAD and rt1[5] == -TAB_PAD,
-        "V4: the first tab sits at the rail's top")
+    ck(rt1 and rt1[2] == rec1.strip and rt1[4] == RAIL_PAD_X and rt1[5] == -RAIL_PAD_Y,
+        "V4: the first tab sits on `.tabs-side{padding:8px 6px}`")
     local rt2 = pointNamed(tab2, "TOPLEFT")
     ck(rt2 and rt2[2] == tab1 and rt2[3] == "BOTTOMLEFT" and rt2[5] == -TAB_GAP,
         "V4: …and the tabs STACK down it")
-    ck(tab1._w == TABRAIL_W - 2 * TAB_PAD and tab1._h == TAB_ROW_H,
-        "V4: a rail tab is a full-width row")
+    ck(tab1._w == TABRAIL_W - 2 * RAIL_PAD_X and tab1._h == TAB_ROW_H,
+        "V4: a rail tab is a full-width row at `.stab{padding:7px 10px}` (32 tall)")
     ck(_G.ChatFrame1TabText._justifyH == "LEFT", "V4: …with its label left-aligned in that row")
 
     -- THE EDGE BAR replaces the underline, on the rail's INNER side.
@@ -4409,6 +5069,8 @@ local function testOneBox(fails, verbose)
         "V4: the rail's inner hairline is continuous")
     local rsA = pointNamed(rec1.tabSeamA, "TOPRIGHT")
     ck(rsA and rsA[2] == rec1.strip, "V4: …drawn on the rail's inner edge")
+    ck(near3(rec1.tabSeamA._color, hex3(0x3a1512)),
+        "V4: …in `.tabs-side{border-left:1px solid var(--line-soft)}`")
     -- THE NON-COLLISION RULE: the icon rail takes the opposite edge.
     ck(Skin.RailSide() == "right",
         "V4: THE PIN — with tabs on the left the ICON rail moves to the right edge")
@@ -4416,7 +5078,7 @@ local function testOneBox(fails, verbose)
     Skin.Refresh()
     local iconRail = rec1.rail
     local irp = pointNamed(iconRail, "TOPLEFT")
-    ck(irp and irp[3] == "TOPRIGHT" and irp[4] == PAD + RAIL_GAP,
+    ck(irp and irp[3] == "TOPRIGHT" and irp[4] == 14 + RAIL_GAP,
         "V4: …anchored off the window's right, clearing the chassis' own inset there")
     ns.db.skin.iconRail = false
     Skin.Refresh()
@@ -4425,7 +5087,7 @@ local function testOneBox(fails, verbose)
     ck(C.SetTabPlacement("right") == true, "V5: switched to the right")
     Skin.Refresh()
     l, r = Skin.ChassisInsets()
-    ck(l == PAD and r == PAD + TABRAIL_W, "V5: the box grows out on the RIGHT instead")
+    ck(l == 14 and r == 14 + TABRAIL_W, "V5: the box grows out on the RIGHT instead")
     ck(pointNamed(rec1.strip, "TOPRIGHT") ~= nil, "V5: the rail is the chassis' right band")
     local ebp5 = pointNamed(rec1.edgebar, "TOPLEFT")
     ck(ebp5 and ebp5[3] == "TOPLEFT",
@@ -4438,11 +5100,11 @@ local function testOneBox(fails, verbose)
     ck(C.SetTabPlacement("top") == true, "V6: back to the top")
     Skin.Refresh()
     local back = pointNamed(tab1, "BOTTOMLEFT")
-    ck(back and back[2] == rec1.strip and back[4] == TAB_PAD,
+    ck(back and back[2] == rec1.strip and back[4] == STRIP_PAD_X,
         "V6: THE ROUND TRIP — the tab is laid out exactly as it was the first time")
-    local size1 = Skin.styled[cf1].tabSize
-    ck(size1 and tab1._w == size1[1] and tab1._h == size1[2],
-        "V6: …and the rail's forced row shape was handed back, width and height")
+    ck(tab1._w == _G.ChatFrame1TabText:GetStringWidth() + 2 * TAB_PAD_X
+        and tab1._h == TAB_H,
+        "V6: …and the rail's forced row shape gave way to the top tab's own again")
     ck(rec1.underline._shown == true and rec1.edgebar._shown == false,
         "V6: …and the marks swapped back with it")
     ck(C.SetTabPlacement("top") == false, "V6: re-setting the same placement is a NO-OP (no sync storm)")
@@ -4511,13 +5173,17 @@ local function testOneBox(fails, verbose)
         "V7: an UNKNOWN spec falls through to the derivation (never a wrong colour)")
 
     -- …and no colour at all, on a window with no derivable identity, is the
-    -- accent/muted token — the end of the chain, unchanged since Wave 1.
+    -- mockup's own `--tabc` fallback: --muted when inactive, --text when active.
     ck(C.SetTabColor(5, nil) == true, "V7: clearing the colour is a real edit")
     cfgStore.windows[5].groups = { "GUILD", "PARTY" }      -- two identities: none
     Skin.Refresh()
-    ck(near3(inkOf(cf5), UI.Color("muted")),
-        "V7: no explicit colour and no dominant channel = the MUTED token (the pinned fallback)")
-    ck(Skin.styled[cf5].inkSource == "token", "V7: …recorded as the token fallback")
+    ck(near3(inkOf(cf5), hex3(0x93887e)),
+        "V7: no explicit colour and no dominant channel = the mockup's --muted #93887e")
+    ck(Skin.styled[cf5].inkSource == "palette", "V7: …recorded as the palette fallback")
+    _G.FCF_SelectDockFrame(cf5)
+    ck(near3(inkOf(cf5), hex3(0xe6dfd4)),
+        "V7: …and --text #e6dfd4 when it is the ACTIVE tab (`.tab.active{color:var(--text)}`)")
+    _G.FCF_SelectDockFrame(cf1)
 
     -- THE CAPTURE-BACK PIN: a colour is config-only, and a wholesale capture of
     -- the client (which knows nothing about it) must not delete it.
@@ -4543,9 +5209,19 @@ local function testOneBox(fails, verbose)
         local bw = Badges.widgets[cf5]
         local tab5 = _G.ChatFrame5Tab
         ck(bw and bw.holder._shown == true, "V8: the badge renders in the box")
+        -- THE MOCKUP'S `.tab .n`: a chip AFTER THE LABEL, inside the tab, with
+        -- a 6px gap — not floating in the 2px gutter between two tabs, which is
+        -- where anchoring off the TAB's right edge put it.
         local pip = pointNamed(bw.holder, "LEFT")
-        ck(pip and pip[2] == tab5 and pip[3] == "RIGHT",
-            "V8: on TOP tabs it is a PIP just past the tab's right edge")
+        ck(pip and pip[2] == tab5.Text and pip[3] == "RIGHT" and pip[4] == 6,
+            "V8: on TOP tabs the pip rides its tab, 6 units past the LABEL")
+        ck(bw.chip and bw.chip._shown == true and near3(bw.chip._color, hex3(0xc2402e)),
+            "V8: …as an accent-filled chip (`.tab .n{background:var(--accent)}`)")
+        ck(near3(bw.fs._textColor, 1, 1, 1), "V8: …with white digits")
+        -- The tab has to be WIDE enough for it: the pip lives inside the tab.
+        ck(Badges.PipWidth(cf5) > 0, "V8: the badge publishes what it costs its tab")
+        ck(tab5._w == tab5.Text:GetStringWidth() + 2 * TAB_PAD_X + 6 + Badges.PipWidth(cf5),
+            "V8: …and the tab is laid out that much wider, so the chip is INSIDE it")
         C.SetTabPlacement("left")
         Skin.Refresh()
         ck(Badges.Placement() == "rail", "V8: …and the badge reads skin's placement seam")
@@ -4569,6 +5245,48 @@ local function testOneBox(fails, verbose)
         Badges.Clear(cf5)
         if not badgesWas then ns.SetModuleEnabled("badges", false) end
     end
+
+    -- ── Phase V8b: THE TIMESTAMP DIVIDER, IN THE COMPOSED RENDER. ────────────
+    -- The owner's screenshot had stamps on and no hairline. Two causes, both
+    -- reproduced here as the red controls they are:
+    --   1. it hung off the CHASSIS, and in the box a docked member's chassis is
+    --      HIDDEN — so on every tab except the dock's primary the divider was a
+    --      texture on a hidden frame;
+    --   2. nothing re-asked "are stamps stamping" when the stamps MODULE moved,
+    --      so turning timestamps on from the settings page changed nothing.
+    local stampsWas = ns.Stamps and ns.Stamps.active
+    ns.SetModuleEnabled("stamps", true)
+    ck(Skin.StampsShowing() == true, "V8b: stamps are stamping")
+    -- CAUSE 2: the module came up AFTER this beat and told skin nothing.
+    local recD1, recD2 = Skin.styled[cf1], Skin.styled[cf2]
+    ck(recD1.divider and recD1.divider._shown == true,
+        "V8b: THE BELL — enabling the stamps MODULE brought the divider with it, on its own")
+    ck(recD2.divider and recD2.divider._shown == true,
+        "V8b: …on the docked member too")
+    -- CAUSE 1: the parent is the MESSAGE FRAME, which is always shown; the
+    -- docked member's chassis is not, and that is exactly the trap.
+    ck(recD2.divider._parent == cf2,
+        "V8b: THE PIN — the hairline hangs off the message frame, never the chassis")
+    ck(recD2.backdrop._shown == false,
+        "V8b: …which matters, because that window's chassis IS hidden (one box per dock)")
+    ck(recD1.stampProbe and recD1.stampProbe._parent == cf1,
+        "V8b: …and so does the measuring probe")
+    -- THE MOCKUP'S `.stampline`: --line-soft, and centred in the separator so
+    -- the 8px-each-side gap is split evenly.
+    ck(near3(recD1.divider._color, hex3(0x3a1512)),
+        "V8b: the hairline is the mockup's --line-soft #3a1512")
+    ck(recD1.divider._color[4] == 1, "V8b: …solid, as the mockup draws it")
+    local bodyW = Skin.MeasureText(cf1, recD1, Skin.StampBody())
+    local sepW  = Skin.MeasureText(cf1, recD1, "    ")
+    ck(math.abs(recD1.dividerX - (bodyW + (sepW - 1) / 2)) < 1e-6,
+        "V8b: …and it sits CENTRED in the stamp separator (equal air either side)")
+    ck(Skin.StampBody():find("%[") == nil,
+        "V8b: the shipped stamp column is BARE (`.stamp` carries no brackets)")
+    -- And the bell rings the other way too.
+    ns.SetModuleEnabled("stamps", false)
+    ck(recD1.divider._shown == false,
+        "V8b: turning timestamps off takes the hairline with them, on the same beat")
+    if stampsWas then ns.SetModuleEnabled("stamps", true) end
 
     -- ── Phase V9: FADING IS INERT IN THE BOX, and the store is untouched. ────
     ns.db.skin.fading = true
