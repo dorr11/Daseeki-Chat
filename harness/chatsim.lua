@@ -618,10 +618,36 @@ widgetMeta = {
     end,
 }
 
+-- ── THE CREATABLE ScrollingMessageFrame (D2/view sim extension) ──────────────
+-- Until the view existed, the ONLY message-bearing frames in this sim were the
+-- client's own ten, built by makeChatFrame. An addon that creates its OWN
+-- ScrollingMessageFrame therefore got a bare widget whose AddMessage was an
+-- auto-vivified no-op — and a mirror into a no-op looks exactly like a mirror
+-- that works. An absent API is a kinder client (Class 9's secondary blind spot,
+-- named), so CreateFrame("ScrollingMessageFrame", ...) now hands back a REAL
+-- buffer-backed frame: same ring buffer, same wrapped fields, same
+-- AddMessage / GetNumMessages / GetMessageInfo / Clear semantics as a client
+-- window's.
+--
+-- AND THE UNKIND HALF: every frame created this way is recorded in
+-- Sim.createdSMFs, and NOTHING in this file's client machinery ever walks that
+-- list. The client's fade beat, its re-clamp, its button-side decision and its
+-- window update all iterate ChatFrame1..NUM_CHAT_WINDOWS plus Sim.tempFrames —
+-- the frames the CLIENT knows about. That is the point: a test can run every
+-- client beat there is and assert that an addon-created frame did not move,
+-- which is a structural claim rather than a pinning contest.
+local attachMessageSurface   -- forward declaration (the buffer lives below)
+
+Sim.createdSMFs = {}
+
 _G.CreateFrame = function(kind, name, parent, template)
     record("CreateFrame")
     local w = newWidget(kind or "Frame", name, parent or _G.UIParent)
     w._template = template
+    if kind == "ScrollingMessageFrame" and attachMessageSurface then
+        attachMessageSurface(w)
+        Sim.createdSMFs[#Sim.createdSMFs + 1] = w
+    end
     return w
 end
 _G.CreateFont = function(name)
@@ -743,6 +769,27 @@ local function chatGetMessageInfo(self, i)   -- 1 = OLDEST (display order)
     if not e then return nil end
     return e.message, e.r, e.g, e.b
 end
+local function chatClear(self)
+    record("Clear")
+    self.historyBuffer.list = {}
+end
+
+-- The message surface a ScrollingMessageFrame carries, whether the CLIENT built
+-- it (makeChatFrame below) or an ADDON did (the CreateFrame branch above). One
+-- implementation, so an addon's own frame cannot accidentally be a kinder one.
+attachMessageSurface = function(f, cap)
+    f.historyBuffer  = newBuffer(cap or DEFAULT_BUFFER_CAP)
+    f.AddMessage     = chatAddMessage
+    f.GetNumMessages = chatGetNumMessages
+    f.GetMessageInfo = chatGetMessageInfo
+    f.Clear          = chatClear
+    -- An addon-created frame inherits the CLIENT's own default posture: fading
+    -- ON. A view that wants it off has to actually say so, at creation, and the
+    -- suite can tell the difference between "off because we asked" and "off
+    -- because the sim never turned it on".
+    f._fading, f._timeVisible = true, 120
+    return f
+end
 
 local function makeChatFrame(id)
     local name = "ChatFrame" .. id
@@ -756,10 +803,8 @@ local function makeChatFrame(id)
     f._w, f._h = 430, 120
     f._left, f._bottom = 32, 32
     f._mouse = true
-    f.historyBuffer = newBuffer(DEFAULT_BUFFER_CAP)
-    f.AddMessage      = chatAddMessage
-    f.GetNumMessages  = chatGetNumMessages
-    f.GetMessageInfo  = chatGetMessageInfo
+    attachMessageSurface(f, DEFAULT_BUFFER_CAP)
+    f._fading, f._timeVisible = true, 120
     -- Stock dress textures, global-named like the client's.
     for _, suffix in ipairs(STOCK_TEXTURES) do
         newWidget("Texture", name .. suffix, f)

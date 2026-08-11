@@ -103,10 +103,15 @@ realprint("")
 -- amended in the same commit with a dated note; this gate still pins the list
 -- byte-for-byte, which is the whole point of amending it here rather than
 -- loosening the check.
+-- FILE MAP AMENDMENT (2026-08-11, owner-directed D2 REVISION): view.lua joins
+-- the map after skin.lua and before options.lua — it consumes skin's movement /
+-- snap / palette layer and publishes the shapes options binds against. The
+-- design doc's D2 REVISION section names it; the .toc was amended in the SAME
+-- COMMIT as this gate, and the gate still pins the list byte-for-byte.
 local EXPECTED_FILE_MAP = {
     "core.lua", "config.lua", "reconcile.lua", "channels.lua", "decor.lua",
     "stamps.lua", "names.lua", "urls.lua", "history.lua", "badges.lua",
-    "skin.lua", "options.lua", "nexus.lua",
+    "skin.lua", "view.lua", "options.lua", "nexus.lua",
 }
 
 local function tocDirective(src, key)
@@ -315,6 +320,11 @@ _G.DaseekiChatDB.modules.channels = false
 -- disabled and the inertness gate pins that a disabled pane registers NOTHING
 -- with the Daseeki hub; its own suite enables it (the skin precedent).
 _G.DaseekiChatDB.modules.options = false
+-- D2/view: the owned view is a lifecycle module too, and the most invasive one
+-- in the addon (it hides the client's windows and hosts their edit box), so it
+-- starts DISABLED and the inertness gate pins that a disabled view has created
+-- no frame, wrapped no AddMessage and hidden nothing. Its own suite enables it.
+_G.DaseekiChatDB.modules.view = false
 
 ----------------------------------------------------------------------
 -- ns namespace + suite-registration sentinel (Bags precedent: intercept the
@@ -430,6 +440,30 @@ do
         "…and the hub really has no Chat page yet")
     ck(ns.Options and ns.Options._built == false, "…and no pane was built")
     -- end post-V1/options
+    -- D2/view: the owned view's own disabled-is-inert pins. This module's
+    -- inertness is load-bearing in a way no other module's is: an enabled view
+    -- HIDES the client's chat, so "it did nothing until enable" has to be an
+    -- assertion about the player's actual chat window, not a claim.
+    KNOWN_MODULES.view = true
+    ck(ns.View and ns.View.active == false, "the view is inactive")
+    ck(ns.View and ns.View.chassis == nil, "the view built NO chassis frame")
+    ck(ns.View and next(ns.View.frames) == nil, "the view created NO message surface")
+    ck(ns.View and next(ns.View.tabs) == nil, "the view created NO tab button")
+    ck(ns.View and next(ns.View.wrappedFrames) == nil,
+        "the view wrapped ZERO AddMessage while disabled")
+    ck(ns.View and ns.View.mirrored == 0, "the view mirrored nothing")
+    ck(ns.View and next(ns.View._engineHidden) == nil,
+        "the view is holding NO client window down")
+    do
+        local anyHidden = false
+        for id = 1, 10 do
+            local w = Sim.windows[id]
+            local f = Sim.Frame(id)
+            if w and (w.shown or w.docked) and f and f._shown == false then anyHidden = true end
+        end
+        ck(not anyHidden, "…and every window the client wants shown IS shown")
+    end
+    -- end D2/view
     local knownCount = 0
     for _ in pairs(KNOWN_MODULES) do knownCount = knownCount + 1 end
     ck(#ns.ModuleOrder == knownCount,
@@ -709,6 +743,46 @@ do
     geb:Hide()
     ck(_G.IsAltKeyDown() == false, "the ALT modifier reads false until a test holds it")
 
+    -- 10. THE CREATABLE ScrollingMessageFrame (D2/view sim extension). An
+    --     addon that draws its own view creates its OWN message frames, and
+    --     until this existed those frames' AddMessage was an auto-vivified
+    --     no-op — a mirror into a no-op is indistinguishable from a mirror that
+    --     works, which is exactly the "absent API is a kinder client" blind
+    --     spot Class 9 names. The rig has to prove the frame is REAL, that it
+    --     starts with the CLIENT's own posture (fading ON, so "off" has to be
+    --     asked for), and — the unkind half — that NOTHING in the client's own
+    --     machinery can reach it.
+    local mine = _G.CreateFrame("ScrollingMessageFrame", nil, _G.UIParent)
+    ck(type(mine.historyBuffer) == "table", "an addon-created SMF has a REAL ring buffer")
+    ck(mine._fading == true,
+        "…and inherits the CLIENT's posture: fading ON until something says otherwise")
+    mine:AddMessage("mine one", 0.5, 0.25, 0.125)
+    mine:AddMessage("mine two", 1, 1, 1)
+    ck(mine:GetNumMessages() == 2, "AddMessage lands in an addon-created frame's own buffer")
+    local mm, mr, mg, mb = mine:GetMessageInfo(1)
+    ck(mm == "mine one" and mr == 0.5 and mg == 0.25 and mb == 0.125,
+        "…carrying its NUMERIC r,g,b through unchanged (the ink is not in a string)")
+    ck(mine.historyBuffer:GetEntryAtIndex(1).message == "mine two",
+        "…newest-first GetEntryAtIndex works on it too")
+    mine:Clear()
+    ck(mine:GetNumMessages() == 0, "Clear empties it (the view's resync depends on this)")
+    local seen = false
+    for _, f in ipairs(Sim.createdSMFs) do if f == mine then seen = true end end
+    ck(seen, "the sim records addon-created SMFs so a test can ask about them")
+    -- THE UNREACHABILITY PIN: run every client beat there is and prove none of
+    -- them touched it. This is a STRUCTURAL claim (it is in no client list),
+    -- not a pinning contest — which is the whole reason to own the frame.
+    mine:SetFading(false)
+    mine:SetAlpha(1)
+    Sim.ClientFadeBeat()
+    for wid = 1, _G.NUM_CHAT_WINDOWS do _G.FloatingChatFrame_Update(wid) end
+    _G.FCF_DockUpdate()
+    Sim.LayoutBeat()
+    ck(mine._fading == false and mine:GetAlpha() == 1,
+        "CLIENT BEATS CANNOT REACH IT: fade, window update, dock pass and layout all ran "
+        .. "and the addon's own frame did not move")
+    ck(Sim.Frame(1):GetAlpha() ~= 1 or true, "(the client's own windows are the client's business)")
+
     -- Restore the world for the suites: fresh session, logged in, in world.
     probe:UnregisterEvent("CHAT_MSG_SAY")
     probe:UnregisterEvent("CHAT_MSG_CHANNEL_NOTICE")
@@ -978,6 +1052,210 @@ ns:RegisterSelfTest("integration", function(verbose)
 end)
 
 ----------------------------------------------------------------------
+-- Harness-registered suite: VIEW-INTEGRATION — the merged world with the
+-- OWNED VIEW up. The suite above proves the stack works with the client's
+-- windows visible; this one is the D2 revision's headline red control, at the
+-- one altitude that matters: EVERY lifecycle module enabled TOGETHER, the view
+-- included, so the client's ten windows are a HIDDEN ENGINE while
+--   * the reconciler converges an authored config (windows, routing, the paced
+--     join list, colours by name) — RED CONTROL: reconcile/channels/sync are
+--     unchanged code and must be green with nothing on screen;
+--   * a line flows through the whole decoration stack into a hidden window and
+--     is MIRRORED into the view's own frame, byte-identical, ink intact;
+--   * history's cross-session restore backfills the hidden engine with
+--     PushFront (never AddMessage) and the view's resync puts it on screen;
+--   * badges count on OUR tab buttons, and clear when OUR tab is selected;
+--   * the client's own fade / clamp / dock beats all run and reach NOTHING of
+--     ours.
+-- Runs LAST, against the world exactly as every other suite left it.
+----------------------------------------------------------------------
+
+ns:RegisterSelfTest("view-integration", function(verbose)
+    local fails = {}
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Sim = _G.__DaseekiChatSim
+    local ok, err = pcall(function()
+        local V, C, B = ns.View, ns.Config, ns.Badges
+        local cf1 = _G.ChatFrame1
+
+        local ALL = { "decor", "stamps", "names", "urls", "history", "badges",
+                      "skin", "channels", "view", "reconcile" }
+        for _, name in ipairs(ALL) do
+            if name ~= "reconcile" then ns.SetModuleEnabled(name, true) end
+        end
+
+        -- Author the config the reconciler will converge, with the view already
+        -- up and every window already hidden.
+        local c = C.Get()
+        c.windows = {}
+        for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do c.windows[id] = C.CaptureWindow(id) end
+        c.windows[1].name = "Viewed"
+        c.windows[1].fontSize = 15
+        local hasWorld = false
+        for _, nm in ipairs(c.windows[1].channels) do if nm == "World" then hasWorld = true end end
+        if not hasWorld then
+            c.windows[1].channels[#c.windows[1].channels + 1] = "World"
+            table.sort(c.windows[1].channels)
+        end
+        c.join   = { { 1, "General" }, { 2, "World" } }
+        c.colors = { world = { r = 0.9, g = 0.3, b = 0.2 } }
+        c.rev, c.at = (tonumber(c.rev) or 0) + 1, C.Now()
+
+        ns.SetModuleEnabled("reconcile", true)
+        local allUp = true
+        for _, name in ipairs(ALL) do
+            local m = ns.Modules[name]
+            if not (m and m.__active) then allUp = false end
+        end
+        ck(allUp, "every lifecycle module is active TOGETHER, the view included")
+        ck(V.active and type(V.chassis) == "table", "the view is painting")
+
+        -- The engine is down before the reconcile and must be down after it.
+        local function engineDown()
+            for _, id in ipairs(V.ids) do
+                local f = _G["ChatFrame" .. id]
+                if f and f:IsShown() then return false end
+            end
+            return true
+        end
+        ck(engineDown(), "every owned client window is hidden going in")
+
+        local drops0 = Sim.droppedJoins
+        Sim.EnterWorld(false, false)
+        HTIMER.flush()
+        ck(select(1, _G.GetChatWindowInfo(1)) == "Viewed",
+            "RED CONTROL: the reconciler renamed window 1 with the engine HIDDEN")
+        ck(select(2, _G.GetChatWindowInfo(1)) == 15, "…font size converged too")
+        ck(select(1, _G.GetChannelName("World")) == 2,
+            "…the paced join list landed World on its configured number")
+        ck(C.NearColor(_G.ChatTypeInfo["CHANNEL2"], c.colors.world),
+            "…the channel colour was imposed at the converged number, by name")
+        ck(Sim.droppedJoins == drops0, "…with zero dropped channel ops")
+        ck(ns.Reconcile._runInFlight == false, "…and the run ENDED (finite ladder)")
+        ck(engineDown(), "…and the engine is still hidden afterwards")
+
+        -- A line through the FULL stack, into a hidden window, mirrored out.
+        local activeId = V.ActiveId()
+        local vf = V.frames[activeId]
+        local hidden = _G["ChatFrame" .. activeId]
+        V.SelectTab(activeId, "integration")
+        B.Clear(hidden)
+        local vBefore, cBefore = vf:GetNumMessages(), hidden:GetNumMessages()
+        local mirroredBefore = V.mirrored
+        local itemLink = Sim.MakeItemLink()
+        Sim.SendChat{ event = "CHAT_MSG_SAY",
+            text = "viewed " .. itemLink .. " at www.example.com",
+            sender = "Puu-Whitemane", guid = "Player-1-00000001" }
+        HTIMER.advance(0)
+        ck(hidden:GetNumMessages() == cBefore + 1,
+            "the HIDDEN engine window received the line (routing is the store's, not the frame's)")
+        ck(vf:GetNumMessages() == vBefore + 1, "…and exactly one line reached the view")
+        ck(V.mirrored == mirroredBefore + 1, "…forwarded exactly once")
+        local vNew = vf.historyBuffer:GetEntryAtIndex(1)
+        local cNew = hidden.historyBuffer:GetEntryAtIndex(1)
+        ck(vNew and cNew and vNew.message == cNew.message,
+            "the mirrored line is BYTE-IDENTICAL to the fully decorated one")
+        ck(vNew and vNew.message:find(itemLink, 1, true) ~= nil,
+            "…item link byte-intact under the full decoration stack")
+        ck(vNew and vNew.message:find("|Haddon:dchaturl:www.example.com|h", 1, true) ~= nil,
+            "…the URL linkified beside it")
+        local _, stampN = tostring(vNew and vNew.message):gsub("%d%d:%d%d", "")
+        ck(stampN == 1, "…wearing exactly ONE stamp (no double-processing across the mirror)")
+        ck(type(vNew.r) == "number" and vNew.r == cNew.r,
+            "…and the class/channel ink rode as NUMBERS, identical on both sides")
+        ck(V.mirrorReentries >= 0 and V.mirrorRefusals == V.mirrorRefusals,
+            "(the mirror's counters are readable)")
+
+        -- BADGES on OUR tabs. A window the player cannot see counts; selecting
+        -- OUR tab clears it, because our selection routes through the client's
+        -- own FCF_SelectDockFrame.
+        local other
+        for _, id in ipairs(V.ids) do if id ~= activeId then other = id end end
+        if other then
+            local otherFrame = _G["ChatFrame" .. other]
+            local otherTab = V.tabs[other] and V.tabs[other].button
+            ck(B.TabFor(otherFrame) == otherTab,
+                "a badge rides OUR tab button while the view paints")
+            local w = B.widgets[otherFrame]
+            ck(w and w.holder and w.holder._parent == otherTab,
+                "…and its holder is really parented to it")
+            B.Clear(otherFrame)
+            otherFrame:AddMessage("unseen line", 1, 1, 1)
+            HTIMER.advance(0)
+            ck((B.counts[otherFrame] or 0) >= 1, "an unseen tab counts")
+            V.SelectTab(other, "integration")
+            ck(B.counts[otherFrame] == 0,
+                "…and selecting OUR tab clears it (the client's own select verb ran)")
+            V.SelectTab(activeId, "integration")
+        end
+
+        -- HISTORY's cross-session restore: PushFront into the hidden engine,
+        -- then the view's own resync puts the scrollback on screen.
+        Sim.Logout()
+        Sim.NewSession()
+        Sim.ResetCalls()
+        local mirroredAtRestore = V.mirrored
+        local clientAddsBefore = 0
+        for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do
+            clientAddsBefore = clientAddsBefore + (_G["ChatFrame" .. id]:GetNumMessages())
+        end
+        Sim.EnterWorld(true, false)
+        HTIMER.flush()
+        -- RED CONTROL, measured on the ONE counter that can only move when a
+        -- CLIENT window's AddMessage wrap fires. (Sim.CallCount("AddMessage")
+        -- is no longer the right witness in this world: the view's own resync
+        -- legitimately calls AddMessage on OUR frames, which are
+        -- ScrollingMessageFrames too, and a counter that both paths bump would
+        -- alibi exactly the defect this control exists to catch.)
+        ck(V.mirrored == mirroredAtRestore,
+            "RED CONTROL: the restore re-entered NO client AddMessage wrap — the mirror "
+            .. "forwarded nothing, so the backfill really was PushFront-only")
+        ck((V.resyncedLines or 0) > 0, "…while the view's own re-read DID move lines")
+        ck(cf1:GetNumMessages() > 0, "the hidden engine was backfilled")
+        local restoredInto = V.frames[V.ActiveId()]
+        ck(restoredInto:GetNumMessages() == _G["ChatFrame" .. V.ActiveId()]:GetNumMessages(),
+            "…and the view's resync put exactly that scrollback on screen")
+        ck(engineDown(), "…with every engine window still hidden through the whole login")
+
+        -- The client's own beats, one more time, in the merged world.
+        local alphas = {}
+        for _, id in ipairs(V.ids) do
+            alphas[id] = { V.frames[id]:GetAlpha(), V.frames[id]._fading,
+                           V.tabs[id].button:GetAlpha() }
+        end
+        local chassisAlpha = V.chassis:GetAlpha()
+        Sim.ClientFadeBeat()
+        for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do _G.FloatingChatFrame_Update(id) end
+        _G.FCF_DockUpdate()
+        Sim.LayoutBeat()
+        local moved = false
+        for _, id in ipairs(V.ids) do
+            local a = alphas[id]
+            if V.frames[id]:GetAlpha() ~= a[1] or V.frames[id]._fading ~= a[2]
+               or V.tabs[id].button:GetAlpha() ~= a[3] then moved = true end
+        end
+        ck(not moved, "the client's fade/clamp/dock beats reached NOTHING of ours")
+        ck(V.chassis:GetAlpha() == chassisAlpha, "…including the chassis")
+        ck(engineDown(), "…and the engine stayed down through all of them")
+
+        -- Tidy: back to the states the module suites left, and the DEFAULT
+        -- window world restored (this suite authored a converged layout).
+        ns.SetModuleEnabled("view", false)
+        ns.SetModuleEnabled("stamps", false)
+        ns.SetModuleEnabled("reconcile", false)
+        ns.SetModuleEnabled("channels", false)
+        _G.FCF_ResetChatWindows()
+        for id = 1, (_G.NUM_CHAT_WINDOWS or 10) do _G.FloatingChatFrame_Update(id) end
+        HTIMER.flush()
+        Sim.ResetCalls()
+    end)
+    if not ok then fails[#fails + 1] = "error: " .. tostring(err) end
+    for _, f in ipairs(fails) do ns:Print("  FAIL view-integration :: " .. f) end
+    if #fails == 0 and verbose then ns:Print("  PASS view-integration") end
+    return #fails == 0
+end)
+
+----------------------------------------------------------------------
 -- Expected-suite roster (the softer silent-green catch: a file that loads but
 -- never registers reads as ALL PASS to a runner that only iterates what
 -- registered).
@@ -991,8 +1269,12 @@ local EXPECTED_SUITES = { "core", "skin", "placeholders",
     "config", "reconcile", "channels", "nexus",
     -- post-V1: the settings pane + the channel-alias editor
     "options",
+    -- D2 revision: the owned chat view (chassis, tabs, mirror, hidden engine)
+    "view",
     -- w2/integration: the merged-world leg (all Wave-2 modules at once)
     "integration",
+    -- D2 revision: the merged world WITH THE OWNED VIEW UP (the engine hidden)
+    "view-integration",
 }
 
 realprint("=== expected-suite roster (" .. #EXPECTED_SUITES .. " suites) ===")

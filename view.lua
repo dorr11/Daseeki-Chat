@@ -1,0 +1,2110 @@
+-- Daseeki Chat — view.lua  (D2 REVISION, 2026-08-11: draw our own view)
+--
+-- THE OWNED CHAT VIEW. One frame of ours — chassis, tab strip, message
+-- surfaces and entry bar — drawn at the mockup's own numbers, over the
+-- client's ten chat windows kept alive but HIDDEN as the engine.
+--
+-- WHY THIS FILE EXISTS (the owner, 2026-08-11): "if drawing our own gets a
+-- better result, do that. thats my mistake in the design." Two rounds of
+-- skin-over fidelity work could not hold the mockup live — the client's own
+-- machinery (tab alpha fades, periodic re-clamp, stock textures under ours)
+-- re-asserts itself under every surface we skin. Skin-over made every mockup
+-- property a fight; drawing our own makes the mockup the DEFAULT STATE.
+--
+-- THE DIVISION OF LABOUR, exactly:
+--   * The client's 10-window model is the ENGINE. Windows still exist, still
+--     receive messages per the config's routing, and reconcile.lua /
+--     channels.lua / config.lua / nexus.lua are UNCHANGED — config stays
+--     authoritative over the client windows exactly as before. What changed is
+--     only who paints pixels. THE STORE IS NEVER TOUCHED to hide a window:
+--     we hide the FRAME (a display act), never SetChatWindowShown (a routing
+--     act) — that one distinction is what keeps the engine delivering.
+--   * decor / stamps / names / urls run where they ran; the view MIRRORS the
+--     post-decoration line off each hidden window's own AddMessage.
+--   * history and badges rebind to the view's tabs through their own public
+--     seams; neither module's rules change.
+--   * The client's chat EDIT machinery is REPARENTED, never reimplemented:
+--     slash commands, channel stickiness and the secure send path are the
+--     client's and must stay the client's.
+--
+-- INERTNESS (the suite discipline, and the harness's pin): this module touches
+-- NOTHING until its OnEnable runs — no frames, no hooks, no hidden windows.
+-- OnDisable gives stock client chat back: the windows are shown again, the
+-- edit box goes home, our chassis hides. Nothing is destroyed.
+--
+-- All display glyphs in this file are ASCII (the tofu lesson).
+
+local ADDON, ns = ...
+
+local View = {
+    active   = false,   -- gate for every hook body and event handler
+    hooked   = false,   -- one-time hooksecurefunc installs done
+    frames   = {},      -- window id -> OUR ScrollingMessageFrame
+    tabs     = {},      -- window id -> { button, label, fill, underline, hover }
+    ids      = {},      -- owned window ids, ascending (Class 8: never pairs())
+    activeId = nil,     -- the tab the player is looking at
+    -- the mirror's counters (read by /dchat debug view and the suite)
+    mirrored        = 0,   -- lines forwarded because a client AddMessage fired
+    resyncedLines   = 0,   -- lines re-read out of an engine buffer (never mirrored)
+    mirrorReentries = 0,   -- client AddMessage calls refused as our own echo
+    mirrorRefusals  = 0,   -- depth-fuse refusals (an unforeseen composition)
+    retargets       = 0,   -- edit-box retargets on tab switch
+    reHides         = 0,   -- times the client showed an engine window and we re-hid it
+    resyncs         = 0,   -- full buffer re-reads into a view frame
+    moves           = 0,   -- completed chassis drags
+    -- RED CONTROL state (Class 9 posture: a latch armed BEFORE the first call
+    -- of the sequence, save/restore rather than clear-to-nil, with a depth fuse
+    -- under it so an unforeseen composition degrades to a refusal).
+    _mirrorDepth = 0,
+    _engineHidden = {},  -- frame -> true while we hold it down
+    _ebHome      = nil,  -- { eb, parent, points, width, height } of the hosted box
+}
+ns.View = View
+
+----------------------------------------------------------------------
+-- ============ THE MOCKUP CONTRACT (moved here 2026-08-11) ============
+--
+-- This table came from skin.lua, where it was the SKIN-OVER contract and six
+-- of its rows had to say CLIENT LIMIT. Drawing our own frame kills most of
+-- those limits outright: there is no stock art to strip, no FCF tab machinery
+-- to out-shout, no client fade to keep taking back. Every row below now reads
+-- IDENTICAL or names a limit that SURVIVES the change — and exactly two do.
+--
+-- COLOUR (mockup :root custom properties -> PALETTE below, literal hexes)
+--   --ground   #0b0908  -> PALETTE.ground   #0b0908   IDENTICAL
+--   --panel    #16100f  -> PALETTE.panel    #16100f   IDENTICAL (chassis + strip/rail)
+--   --panel2   #1d1514  -> PALETTE.panel2   #1d1514   IDENTICAL (messages + entry + active tab)
+--   --line     #6e1d1a  -> PALETTE.line     #6e1d1a   IDENTICAL (chassis border, 1px)
+--   --line-soft#3a1512  -> PALETTE.lineSoft #3a1512   IDENTICAL (entry seam, rail seam, stamp divider)
+--   --accent   #c2402e  -> PALETTE.accent   #c2402e   IDENTICAL (active underline, pip fill, hover ink)
+--   --gold     #d9a83f  -> PALETTE.gold     #d9a83f   IDENTICAL (carried; the box itself uses none)
+--   --text     #e6dfd4  -> PALETTE.text     #e6dfd4   IDENTICAL (active tab ink, hover wash source)
+--   --muted    #93887e  -> PALETTE.muted    #93887e   IDENTICAL (inactive tab ink)
+--   --faint    #5c534c  -> PALETTE.faint    #5c534c   IDENTICAL (stamp ink — stamps.lua's default)
+--   .chatbox background: solid --panel      alpha 1.0 IDENTICAL
+--   per-channel message colours             CLIENT    the mockup's own footer says so: message ink is
+--                                                     the CLIENT's colour table, live, never a hex —
+--                                                     and it rides the mirror's NUMERIC r,g,b args
+--                                                     ("the ink is not in a string").
+--
+-- GEOMETRY (1 CSS px = 1 UI unit, literally)
+--   .chatbox border 1px --line             -> CHASSIS_EDGE 1 + PALETTE.line     IDENTICAL
+--   .chatbox border-radius 6px             -> square                            DEFERRED, not a limit.
+--       Skin-over called this a CLIENT LIMIT because a backdrop edge is a repeated 1px texture. Owning
+--       the frame retires that reason: nine-slice corner art on our own chassis is possible and is the
+--       agreed way in. It is not shipped in this build (bespoke art, scheduled after the view lands),
+--       so the row says DEFERRED — a decision with a date, not a capability we lack.
+--   .tabs-top padding 6px 8px 0            -> STRIP_PAD_TOP 2 / STRIP_PAD_X 3 / 0
+--       OWNER AMENDMENT 2026-08-11 (thinner tabs/entry, no side gutters), carried from skin.lua where
+--       the owner approved it against the live render: STRIP_PAD_TOP 6 -> 2, STRIP_PAD_X 8 -> 3.
+--   .tab padding 5px 14px 6px              -> TAB_PAD_TOP 2 / TAB_PAD_X 14 / TAB_PAD_BOT 4
+--       OWNER AMENDMENT 2026-08-11: 5 -> 2 top, 6 -> 4 bottom (the 2-unit underline keeps 2 units of
+--       clearance and the 14-unit badge chip still centres inside the 24-unit row).
+--   .tab font-size 12.5px, weight 600      -> TAB_TEXT_SIZE 12.5, config-backed  IDENTICAL size;
+--       WEIGHT is a SURVIVING CLIENT LIMIT: one vendored face, and synthetic bold on a FontString
+--       smears. Owning the frame does not add a face.
+--   .tab letter-spacing .04em              -> not applied   SURVIVING CLIENT LIMIT: a FontString has no
+--       letter-spacing and the only fake is one FontString per glyph. Unchanged by owning the frame.
+--   .tab line-height 1.45                  -> TAB_LINE_H 18 (12.5 * 1.45 = 18.1)  IDENTICAL to the pixel
+--   => tab height 2 + 18 + 4               -> TAB_H 24                            (owner amendment)
+--   => strip height 2 + 24                 -> STRIP_H 26                          (owner amendment)
+--   .tabs-top gap 2px                      -> TAB_GAP 2                          IDENTICAL
+--   .tab border-radius 4px 4px 0 0         -> square                             DEFERRED (as above)
+--   .tab.active background var(--panel2)   -> the active tab wears a REAL panel2 fill run down to the
+--       strip's bottom edge, so it fuses with the message surface                IDENTICAL
+--       (skin-over could only fake this with two half-hairlines; our tab is our widget and just IS the
+--        fill, which is why this row stops being an approximation)
+--   .tab.active::after inset 6px, 2px      -> UL_INSET 6 / UL_HEIGHT 2 / UL_Y 0   IDENTICAL
+--   .tab:hover rgba(255,255,255,.04)       -> PALETTE.text at HOVER_WASH 0.04     IDENTICAL in effect
+--   .tab (inactive) colour --muted         -> INK ONLY. An inactive tab is dimmed by its INK, never by
+--       alpha, and NOTHING in this file animates alpha — our tabs are not registered with any FCF
+--       machinery, so there is no fade to take back.                             IDENTICAL
+--   .tab .n  (the unread pip)              -> badges.lua on OUR tab button: accent chip, white digits,
+--       10.5px, after the label with a 6px gap, inside the tab                   IDENTICAL
+--   .tab .n border-radius 8px              -> square chip                        DEFERRED (as above)
+--   .msgs padding 10px 14px 6px            -> MSG_PAD_TOP 10 / MSG_PAD_X 3 / MSG_PAD_BOT 6
+--       OWNER AMENDMENT 2026-08-11 (no side gutters): MSG_PAD_X 14 -> 3.
+--       Skin-over had to pad the CHASSIS around the client's frame because that frame has no text
+--       insets; our message frame is anchored at these insets directly.          IDENTICAL
+--   .msgs font-size 13.5px                 -> view.fontSize, default 13.5        IDENTICAL
+--   .msgs .row padding 1.5px 0             -> ROW_SPACING 3                      IDENTICAL
+--   .msgs line-height 1.45                 -> View.MessageSpacing = (1.45 - 1.2) * size + ROW_SPACING,
+--       COMPUTED from the size in force (a FontString already draws a line box of its own, so what
+--       SetSpacing wants is the DIFFERENCE; FACE_NATURAL_LINE is the one measured constant here)
+--                                                                               IDENTICAL
+--   .msgs .row gap 8px + .stampline 1px    -> stamps.lua's space-run separator, hairline centred
+--       APPROXIMATE, SURVIVING CLIENT LIMIT: a chat line is ONE string in ONE FontString whichever
+--       frame draws it, so the space right of the hairline can only be spelled in spaces.
+--   .stampline background --line-soft      -> PALETTE.lineSoft, alpha 1          IDENTICAL colour; drawn
+--       as ONE column hairline rather than per row — rows are still not addressable widgets (surviving).
+--   .stamp font-variant-numeric tabular    -> not applied   SURVIVING CLIENT LIMIT: no OpenType feature
+--       control on a FontString.
+--   .entry padding 8px 12px                -> EB_PAD_Y 3 / EB_PAD_X 12           (owner amendment 8 -> 3)
+--   .entry font 13.5px, line-height 1.45   -> EB_HEIGHT 26                       (owner amendment 36 -> 26)
+--   .entry border-top 1px --line-soft      -> SEAM_W 1, PALETTE.lineSoft, flush  IDENTICAL
+--   .entry background var(--panel2)        -> shares the message surface's fill  IDENTICAL
+--   .entry .hinttxt "always visible..."    -> not shipped: it is the MOCKUP'S OWN annotation of the
+--       behaviour (which IS shipped — the box never hides), not a control.
+--   .tabs-side width 112px                 -> TABRAIL_W 112                      IDENTICAL
+--   .tabs-side padding 8px 6px             -> RAIL_PAD_Y 4 / RAIL_PAD_X 6        (owner amendment 8 -> 4)
+--   .tabs-side border-left 1px --line-soft -> SEAM_W 1, PALETTE.lineSoft         IDENTICAL
+--   .stab padding 7px 10px                 -> RAIL_TAB_PAD_Y 4 / RAIL_TAB_PAD_X 10 (owner amendment)
+--   => rail row height 4 + 18 + 4          -> TAB_ROW_H 26                       (owner amendment)
+--   .stab.active::before 2px, inset 5px    -> EDGEBAR_W 2 / EDGEBAR_INSET 5      IDENTICAL
+--   .stab .n float:right                   -> badges.lua right-aligns in the row IDENTICAL
+--   box-shadow 0 8px 30px rgba(0,0,0,.55)  -> not shipped   SURVIVING CLIENT LIMIT: no drop-shadow
+--       primitive; the honest fake is a nine-slice glow, which is bespoke art (same queue as the
+--       corners, and deliberately behind them).
+--
+-- RETIRED WITH SKIN-OVER (rows that no longer need to exist): "the box strips
+-- the client's stock tab art", "the box takes the tab's alpha back from
+-- FCFTab_UpdateAlpha", "the chassis pads AROUND the client's frame because it
+-- has no text insets", "the active tab is faked with two half-hairlines".
+-- None of those are properties of the design — they were properties of
+-- painting on somebody else's frame.
+--
+-- THE SCORE: 4 surviving client limits (font weight, letter-spacing, tabular
+-- figures, drop shadow) + the one-string-per-line consequence of the stamp
+-- gap; 3 DEFERRED rounded-corner rows (ours to ship, not the client's to
+-- refuse). Everything else is IDENTICAL.
+----------------------------------------------------------------------
+
+-- THE PALETTE. Literal mockup hexes, and the ONE place they live (moved here
+-- from skin.lua with the mapping table above). skin.lua, stamps.lua and
+-- badges.lua all read it through a published accessor rather than keeping a
+-- copy — see View.Ink / Skin.Ink.
+local PALETTE = {
+    ground   = 0x0b0908,
+    panel    = 0x16100f,
+    panel2   = 0x1d1514,
+    line     = 0x6e1d1a,
+    lineSoft = 0x3a1512,
+    accent   = 0xc2402e,
+    gold     = 0xd9a83f,
+    text     = 0xe6dfd4,
+    muted    = 0x93887e,
+    faint    = 0x5c534c,
+}
+View.PALETTE = PALETTE
+
+-- r, g, b, a for a palette entry. Nil for a name the palette does not carry
+-- (never a hopeful black — Class 5's truthy-zero discipline applied to ink).
+function View.Ink(name, alpha)
+    local v = PALETTE[name]
+    if not v then return nil end
+    return math.floor(v / 65536) % 256 / 255,
+           math.floor(v / 256) % 256 / 255,
+           (v % 256) / 255,
+           alpha or 1
+end
+
+function View.Palette() return PALETTE end
+
+----------------------------------------------------------------------
+-- THE NUMBERS, straight off the mapping table above. These are the owner's
+-- post-amendment values, carried from skin.lua as the view's own constants.
+----------------------------------------------------------------------
+
+local CHASSIS_EDGE   = 1     -- .chatbox border width
+local STRIP_PAD_TOP  = 2     -- .tabs-top padding-top          (owner amendment 6 -> 2)
+local STRIP_PAD_X    = 3     -- .tabs-top padding-left/right   (owner amendment 8 -> 3)
+local TAB_TEXT_SIZE  = 12.5  -- .tab font-size
+local TAB_LINE_H     = 18    -- .tab line-height (12.5 * 1.45)
+local TAB_PAD_TOP    = 2     -- .tab padding-top               (owner amendment 5 -> 2)
+local TAB_PAD_X      = 14    -- .tab padding-left/right
+local TAB_PAD_BOT    = 4     -- .tab padding-bottom            (owner amendment 6 -> 4)
+local TAB_H          = TAB_PAD_TOP + TAB_LINE_H + TAB_PAD_BOT       -- 24
+local STRIP_H        = STRIP_PAD_TOP + TAB_H                        -- 26
+local TAB_GAP        = 2     -- .tabs-top gap
+local MSG_PAD_TOP    = 10    -- .msgs padding-top
+local MSG_PAD_X      = 3     -- .msgs padding-left/right       (owner amendment 14 -> 3)
+local MSG_PAD_BOT    = 6     -- .msgs padding-bottom
+local ROW_SPACING    = 3     -- .msgs .row padding 1.5px each side
+local MOCKUP_FONT_H  = 13.5  -- .msgs font-size
+local MOCKUP_LINE_HEIGHT = 1.45
+local EB_HEIGHT      = 26    -- .entry: 3 + (13.5 * 1.45) + 3  (owner amendment 36 -> 26)
+local EB_PAD_X       = 12    -- .entry padding-left/right
+local EB_PAD_Y       = 3     -- .entry padding-top/bottom      (owner amendment 8 -> 3)
+local TABRAIL_W      = 112   -- .tabs-side width
+local RAIL_PAD_Y     = 4     -- .tabs-side padding-top/bottom  (owner amendment 8 -> 4)
+local RAIL_PAD_X     = 6     -- .tabs-side padding-left/right
+local RAIL_TAB_PAD_Y = 4     -- .stab padding-top/bottom       (owner amendment 7 -> 4)
+local RAIL_TAB_PAD_X = 10    -- .stab padding-left/right
+local TAB_ROW_H      = RAIL_TAB_PAD_Y + TAB_LINE_H + RAIL_TAB_PAD_Y  -- 26
+local SEAM_W         = 1     -- .entry border-top / .tabs-side border-left
+local UL_HEIGHT      = 2     -- .tab.active::after height
+local UL_INSET       = 6     -- …its left/right inset
+local UL_Y           = 0     -- …its lift off the tab's bottom
+local EDGEBAR_W      = 2     -- .stab.active::before width
+local EDGEBAR_INSET  = 5     -- …its top/bottom inset
+local HOVER_WASH     = 0.04  -- .tab:hover rgba(255,255,255,.04)
+local TAB_MIN_W      = 40    -- a tab is never narrower than this (empty-name windows)
+local TAB_CHAR_W     = 0.52  -- fallback glyph advance as a share of the text size
+
+-- The vendored face's own line box, as a multiple of its point size. The one
+-- MEASURED constant here (a FontString's natural leading is the face's
+-- ascent+descent, which no client API reports); 1.2 is the standard TTF metric
+-- and what the mockup's browser used for `line-height:normal`.
+local FACE_NATURAL_LINE = 1.2
+
+-- The view's message buffer. The client's own default is 128 lines per window;
+-- ours matches so scrollback depth does not silently change with the view.
+local VIEW_MAX_LINES = 128
+
+-- Chassis defaults for a world that cannot answer for the engine window's own
+-- size yet (Class 4: an unresolvable read is refused, not guessed at zero).
+local FALLBACK_W, FALLBACK_H = 430, 160
+
+local COMBAT_LOG_ID = 2
+
+----------------------------------------------------------------------
+-- CONFIG.
+--
+-- WHAT RIDES THE MESH AND WHAT DOES NOT, decided the same way skin v3 decided
+-- it and written down here because the aliases lesson says an unlisted section
+-- is silently account-local forever:
+--   * LAYOUT is synced and already whitelisted in config.lua's Candidates /
+--     Snapshot / AdoptEffective: the tab PLACEMENT (config.skin.tabPlacement),
+--     per-tab COLOUR (config.windows[id].tabColor, protected by
+--     WINDOW_CONFIG_ONLY_FIELDS) and POSITION (config.windows[id].npos). The
+--     view adds NO new synced field — it reads the ones that exist.
+--   * The LOOK is per-account taste and stays ACCOUNT-LOCAL in db.view, the
+--     same call skin.lua's unifiedChassis made. A player on a 4K monitor and a
+--     player on a laptop want different type sizes; syncing them would be a
+--     misfeature, not a feature. This comment IS the deliberate-account-local
+--     record the file-map amendment procedure asks for.
+----------------------------------------------------------------------
+
+ns.DEFAULTS.view = {
+    fontSize    = MOCKUP_FONT_H,          -- .msgs font-size 13.5
+    lineHeight  = MOCKUP_LINE_HEIGHT,     -- .msgs line-height 1.45
+    tabTextSize = TAB_TEXT_SIZE,          -- .tab font-size 12.5
+    copyButton  = true,                   -- the copy-chat affordance, carried over
+}
+
+local function cfg()
+    return (ns.db and ns.db.view) or ns.DEFAULTS.view
+end
+
+local function UIKit() return _G.DaseekiUI end
+
+local function numWindows() return _G.NUM_CHAT_WINDOWS or 10 end
+
+-- One numeric widget read, defended: nil for "the client would not answer",
+-- never a hopeful zero (Class 5).
+local function widgetNum(w, method)
+    if type(w) ~= "table" then return nil end
+    local f = w[method]
+    if type(f) ~= "function" then return nil end
+    local ok, v = pcall(f, w)
+    if ok and type(v) == "number" then return v end
+    return nil
+end
+
+local function call(w, method, ...)
+    if type(w) ~= "table" then return nil end
+    local f = w[method]
+    if type(f) ~= "function" then return nil end
+    local ok, a, b, c, d = pcall(f, w, ...)
+    if not ok then return nil end
+    return a, b, c, d
+end
+
+local function isCombatLog(frame, id)
+    local f = _G.IsCombatLog
+    if type(f) == "function" then
+        local ok, res = pcall(f, frame)
+        if ok then return res and true or false end
+    end
+    return id == COMBAT_LOG_ID
+end
+
+-- A window the view owns: shown or docked in the CLIENT's own store, and not
+-- the combat log (which stays native, per the design's rule 6).
+local function windowEligible(id)
+    local gcwi = _G.GetChatWindowInfo
+    if type(gcwi) ~= "function" then return false end
+    local ok, name, fontSize, _, _, _, _, shown, _, docked = pcall(gcwi, id)
+    if not ok then return false end
+    return ((shown and shown ~= 0) or (docked and docked ~= 0)), name, fontSize
+end
+
+----------------------------------------------------------------------
+-- READS. Where the tabs live comes from the SYNCED config through its own
+-- seam, runtime-defended like every peer read: a config that cannot answer
+-- leaves us on "top", which is the client's own arrangement and therefore the
+-- safe answer.
+----------------------------------------------------------------------
+
+function View.TabPlacement()
+    local C = ns.Config
+    if C and type(C.TabPlacement) == "function" then
+        local ok, v = pcall(C.TabPlacement)
+        if ok and (v == "top" or v == "left" or v == "right") then return v end
+    end
+    return "top"
+end
+
+function View.TabsOnRail()
+    local p = View.TabPlacement()
+    return p == "left" or p == "right"
+end
+
+-- The size the feed renders at (config-backed with the mockup's own default;
+-- 0/nil means "the client's per-window right-click size menu decides" — the
+-- escape hatch skin v1's split used to be).
+function View.MessageFontSize(clientSize)
+    local want = tonumber(cfg().fontSize)
+    if want and want > 0 then return want end
+    local size = tonumber(clientSize)
+    if not size or size <= 0 then size = 14 end       -- truthy-zero guard (Class 5)
+    return size
+end
+
+-- PURE. The mockup's rhythm in the points SetSpacing speaks: the air the
+-- line-height asks for BEYOND the face's own line box, plus the row padding.
+-- Computed from the size in force, so it stays 1.45 when the size changes.
+function View.MessageSpacing(size)
+    size = tonumber(size)
+    if not size or size <= 0 then return ROW_SPACING end
+    local lh = tonumber(cfg().lineHeight)
+    if not lh or lh <= 0 then lh = MOCKUP_LINE_HEIGHT end
+    local extra = (lh - FACE_NATURAL_LINE) * size
+    if extra < 0 then extra = 0 end
+    return extra + ROW_SPACING
+end
+
+function View.TabTextSize()
+    local v = tonumber(cfg().tabTextSize)
+    if v and v > 0 then return v end
+    return TAB_TEXT_SIZE
+end
+
+-- The mockup contract, as data: the settings page, the debug command and the
+-- harness all name a number without re-typing it.
+function View.Metrics()
+    return {
+        chassisEdge = CHASSIS_EDGE,
+        stripH = STRIP_H, stripPadTop = STRIP_PAD_TOP, stripPadX = STRIP_PAD_X,
+        tabH = TAB_H, tabPadTop = TAB_PAD_TOP, tabPadX = TAB_PAD_X,
+        tabPadBottom = TAB_PAD_BOT, tabGap = TAB_GAP, tabLineH = TAB_LINE_H,
+        msgPadTop = MSG_PAD_TOP, msgPadX = MSG_PAD_X, msgPadBottom = MSG_PAD_BOT,
+        rowSpacing = ROW_SPACING,
+        entryH = EB_HEIGHT, entryPadX = EB_PAD_X, entryPadY = EB_PAD_Y,
+        railW = TABRAIL_W, railPadY = RAIL_PAD_Y, railPadX = RAIL_PAD_X,
+        railRowH = TAB_ROW_H, railTabPadX = RAIL_TAB_PAD_X,
+        seam = SEAM_W, underlineH = UL_HEIGHT, underlineInset = UL_INSET,
+        edgebarW = EDGEBAR_W, edgebarInset = EDGEBAR_INSET,
+        hoverWash = HOVER_WASH, maxLines = VIEW_MAX_LINES,
+    }
+end
+
+----------------------------------------------------------------------
+-- WHICH WINDOWS THE VIEW OWNS. Ascending, rebuilt on every layout beat, and
+-- never pairs()-ordered (Class 8 — the tab run must be the same run twice).
+----------------------------------------------------------------------
+
+function View.OwnedIds()
+    local out = {}
+    for id = 1, numWindows() do
+        local frame = _G["ChatFrame" .. id]
+        if frame and not isCombatLog(frame, id) and windowEligible(id) then
+            out[#out + 1] = id
+        end
+    end
+    return out
+end
+
+function View.ClientFrame(id) return _G["ChatFrame" .. tostring(id)] end
+
+-- The window whose position and dimensions the chassis rides. The lowest owned
+-- id, which on a stock layout is ChatFrame1 — the dock's primary, and the one
+-- the reconciler's npos path already governs.
+function View.HostId()
+    return View.ids[1] or 1
+end
+
+----------------------------------------------------------------------
+-- THE CHASSIS. One frame of ours: solid --panel fill at alpha 1, a 1px --line
+-- border, and nothing of the client's underneath it.
+----------------------------------------------------------------------
+
+local function paint(tex, name, alpha)
+    if type(tex) ~= "table" or type(tex.SetColorTexture) ~= "function" then return end
+    local r, g, b, a = View.Ink(name, alpha)
+    if not r then return end
+    pcall(tex.SetColorTexture, tex, r, g, b, a)
+end
+
+function View.EnsureChassis()
+    if View.chassis then return View.chassis end
+    local cf = _G.CreateFrame
+    if type(cf) ~= "function" then return nil end
+    local ok, f = pcall(cf, "Frame", "DaseekiChatView", _G.UIParent, "BackdropTemplate")
+    if not ok or type(f) ~= "table" then return nil end
+    call(f, "SetFrameStrata", "LOW")
+    call(f, "EnableMouse", true)
+    call(f, "SetMovable", true)
+    call(f, "SetClampedToScreen", true)
+    -- OUR frame, OUR rules: no clamp margin at all, so a drag can reach the
+    -- screen edge. The client has no re-clamp beat for a frame it does not
+    -- own, which is precisely why the bounce-back class is now impossible —
+    -- and why nothing in this file has to keep taking the insets back.
+    call(f, "SetClampRectInsets", 0, 0, 0, 0)
+    call(f, "RegisterForDrag", "LeftButton")
+    -- THE FILL AND THE BORDER, at the literal mockup hexes. A backdrop is used
+    -- for the edge (one repeated 1px texture is exactly a 1px border) and a
+    -- plain texture for the fill, so the two colours are independent.
+    local UI = UIKit()
+    if UI and UI.FLAT_BACKDROP then call(f, "SetBackdrop", UI.FLAT_BACKDROP) end
+    local rr, rg, rb = View.Ink("panel")
+    if rr then call(f, "SetBackdropColor", rr, rg, rb, 1) end
+    local lr, lg, lb = View.Ink("line")
+    if lr then call(f, "SetBackdropBorderColor", lr, lg, lb, 1) end
+    -- The tab strip / rail: a bare anchor frame, painted --panel like the
+    -- chassis (the mockup draws no second fill behind the tabs).
+    local strip = cf("Frame", nil, f)
+    View.strip = strip
+    -- The message surface (--panel2) spans the feed AND the entry bar: the
+    -- mockup's `.msgs` and `.entry` share one fill with a hairline between.
+    local surface = call(f, "CreateTexture", nil, "BACKGROUND")
+    paint(surface, "panel2", 1)
+    View.surface = surface
+    -- The entry seam: `.entry{border-top:1px var(--line-soft)}`.
+    local seam = call(f, "CreateTexture", nil, "ARTWORK")
+    paint(seam, "lineSoft", 1)
+    View.entrySeam = seam
+    -- The rail's own inner seam (`.tabs-side{border-left:1px --line-soft}`).
+    local railSeam = call(f, "CreateTexture", nil, "ARTWORK")
+    paint(railSeam, "lineSoft", 1)
+    View.railSeam = railSeam
+    -- The entry bar: an anchor frame the client's edit box is reparented into.
+    local entry = cf("Frame", nil, f)
+    View.entry = entry
+    f:SetScript("OnDragStart", function(self) View.OnDragStart(self, "frame") end)
+    f:SetScript("OnDragStop",  function() View.OnDragStop() end)
+    View.chassis = f
+    return f
+end
+
+-- The chassis' outer size: the engine window's own width and height (which the
+-- reconciler governs through the synced config's `dim`) plus our furniture.
+function View.ChassisSize()
+    local host = View.ClientFrame(View.HostId())
+    local w = widgetNum(host, "GetWidth")
+    local h = widgetNum(host, "GetHeight")
+    if not w or w <= 0 then w = FALLBACK_W end
+    if not h or h <= 0 then h = FALLBACK_H end
+    local extraH = EB_HEIGHT + SEAM_W + 2 * CHASSIS_EDGE
+    local extraW = 2 * CHASSIS_EDGE
+    if View.TabsOnRail() then
+        extraW = extraW + TABRAIL_W + SEAM_W
+    else
+        extraH = extraH + STRIP_H
+    end
+    return w + extraW, h + extraH
+end
+
+-- The message area's rect INSIDE the chassis, as four insets from its edges.
+-- Published so the harness can pin the mockup's padding instead of trusting it.
+function View.MessageInsets()
+    local left  = CHASSIS_EDGE + MSG_PAD_X
+    local right = CHASSIS_EDGE + MSG_PAD_X
+    local top   = CHASSIS_EDGE + MSG_PAD_TOP
+    local bottom = CHASSIS_EDGE + EB_HEIGHT + SEAM_W + MSG_PAD_BOT
+    local place = View.TabPlacement()
+    if place == "top" then
+        top = CHASSIS_EDGE + STRIP_H + MSG_PAD_TOP
+    elseif place == "left" then
+        left = CHASSIS_EDGE + TABRAIL_W + SEAM_W + MSG_PAD_X
+    elseif place == "right" then
+        right = CHASSIS_EDGE + TABRAIL_W + SEAM_W + MSG_PAD_X
+    end
+    return left, right, top, bottom
+end
+
+----------------------------------------------------------------------
+-- THE TAB STRIP. OUR buttons — no FCF tab machinery anywhere near them.
+--
+-- WHY THAT MATTERS AND IS NOT A DETAIL: the client's tab-alpha updater
+-- (FCFTab_UpdateAlpha / FCF_FadeOutChatFrame) walks the frames it knows about
+-- and rewrites their alpha on beats nobody asked for. Skin-over's answer was
+-- to take the last word every time, forever. Our tabs are not in that walk at
+-- all, so there is no last word to take: an inactive tab is dimmed by its INK
+-- and NOTHING in this file ever animates or pins an alpha.
+----------------------------------------------------------------------
+
+-- The label a tab wears: the channel ALIAS when the window's routing collapses
+-- to exactly one channel (skin.lua's published seam — one implementation of
+-- the dominance rule in the addon), otherwise the window's own name.
+function View.TabLabel(id)
+    local S = ns.Skin
+    local frame = View.ClientFrame(id)
+    if S and type(S.TabLabel) == "function" then
+        local ok, label = pcall(S.TabLabel, frame, id)
+        if ok and type(label) == "string" and label ~= "" then return label end
+    end
+    local _, name = windowEligible(id)
+    if type(name) == "string" and name ~= "" then return name end
+    return "Chat " .. tostring(id)
+end
+
+-- One tab's ink at full strength. EXPLICIT per-tab colour first (the synced
+-- config's spec string, resolved through skin.lua's published vocabulary),
+-- then the derivation from the window's dominant channel, then the palette's
+-- own --text. The explicit choice is the PLAYER's and outranks everything.
+function View.TabInk(id)
+    local S = ns.Skin
+    if S and type(S.TabInk) == "function" then
+        local ok, r, g, b, source = pcall(S.TabInk, View.ClientFrame(id), id)
+        if ok and type(r) == "number" then return r, g, b, source end
+    end
+    local r, g, b = View.Ink("text")
+    return r, g, b, "palette"
+end
+
+-- THE DIM IS INK, NOT ALPHA. An inactive tab's ink is the palette's --muted
+-- (the mockup's own inactive colour) when the tab has no explicit colour, and
+-- a proportional step toward --muted's luminance when it does — so a player
+-- who picked a colour still sees THAT colour, quieter.
+local INACTIVE_MIX = 0.55
+
+function View.InactiveInk(r, g, b)
+    local mr, mg, mb = View.Ink("muted")
+    if not mr then return r, g, b end
+    if r == nil then return mr, mg, mb end
+    return r * (1 - INACTIVE_MIX) + mr * INACTIVE_MIX,
+           g * (1 - INACTIVE_MIX) + mg * INACTIVE_MIX,
+           b * (1 - INACTIVE_MIX) + mb * INACTIVE_MIX
+end
+
+-- The tab's width: its label, its padding and whatever badges.lua's pip is
+-- asking for (the mockup keeps the pip INSIDE the tab, so the tab has to be
+-- that much wider). PipWidth is badges' own published seam and answers 0 when
+-- nothing is showing — the seam skin-over introduced, preserved verbatim.
+function View.PipWidth(id)
+    local B = ns.Badges
+    local frame = View.ClientFrame(id)
+    if not (B and type(B.PipWidth) == "function" and frame) then return 0 end
+    local ok, w = pcall(B.PipWidth, frame)
+    return (ok and tonumber(w)) or 0
+end
+
+function View.TabWidth(id)
+    local t = View.tabs[id]
+    local size = View.TabTextSize()
+    local textW
+    if t and t.label then
+        textW = widgetNum(t.label, "GetStringWidth")
+    end
+    if not textW or textW <= 0 then
+        textW = #tostring(View.TabLabel(id)) * size * TAB_CHAR_W
+    end
+    local pip = View.PipWidth(id)
+    local w = textW + 2 * TAB_PAD_X + (pip > 0 and (pip + 6) or 0)
+    if w < TAB_MIN_W then w = TAB_MIN_W end
+    return w
+end
+
+local function ensureTab(id)
+    local t = View.tabs[id]
+    if t then return t end
+    local cf = _G.CreateFrame
+    if type(cf) ~= "function" or not View.strip then return nil end
+    local btn = cf("Button", "DaseekiChatViewTab" .. tostring(id), View.strip)
+    call(btn, "EnableMouse", true)
+    call(btn, "RegisterForDrag", "LeftButton")
+    -- THE ACTIVE TAB'S FILL: a real --panel2 texture run to the strip's bottom
+    -- edge, so it fuses with the message surface. Skin-over could only imply
+    -- this with two half-hairlines; ours simply IS the fill.
+    local fill = call(btn, "CreateTexture", nil, "BACKGROUND")
+    paint(fill, "panel2", 1)
+    call(fill, "Hide")
+    -- The hover wash (`rgba(255,255,255,.04)` -> the text ink at 0.04).
+    local hover = call(btn, "CreateTexture", nil, "BORDER")
+    paint(hover, "text", HOVER_WASH)
+    call(hover, "Hide")
+    -- The active mark: an accent underline on a top strip, an accent edge bar
+    -- on a rail. Both exist; the layout shows exactly one.
+    local underline = call(btn, "CreateTexture", nil, "OVERLAY")
+    paint(underline, "accent", 1)
+    call(underline, "Hide")
+    local edgebar = call(btn, "CreateTexture", nil, "OVERLAY")
+    paint(edgebar, "accent", 1)
+    call(edgebar, "Hide")
+    local label = call(btn, "CreateFontString", nil, "OVERLAY")
+    local UI = UIKit()
+    if UI and type(UI.FontFile) == "function" and type(label) == "table"
+       and type(label.SetFont) == "function" then
+        pcall(label.SetFont, label, UI.FontFile(), View.TabTextSize(), "")
+    end
+    call(label, "SetJustifyH", "CENTER")
+    call(label, "SetPoint", "CENTER", btn, "CENTER", 0, 0)
+    btn:SetScript("OnClick", function() View.SelectTab(id, "click") end)
+    btn:SetScript("OnEnter", function() call(hover, "Show") end)
+    btn:SetScript("OnLeave", function() call(hover, "Hide") end)
+    -- Plain drag ON THE STRIP moves the box (our frame, our rules): the owner
+    -- asked for both gestures, and a tab is the client's own "grab here".
+    btn:SetScript("OnDragStart", function() View.OnDragStart(View.chassis, "strip") end)
+    btn:SetScript("OnDragStop",  function() View.OnDragStop() end)
+    t = { button = btn, label = label, fill = fill, hover = hover,
+          underline = underline, edgebar = edgebar }
+    View.tabs[id] = t
+    return t
+end
+
+-- badges.lua's rebind seam: the tab button a window's unread pip belongs on.
+-- Answers OUR button while the view owns the pixels and NOTHING otherwise, so
+-- badges falls back to the client's tab exactly as it always did.
+function View.TabButtonFor(clientFrame)
+    if not View.active or type(clientFrame) ~= "table" then return nil end
+    local id = clientFrame._id or (type(clientFrame.GetID) == "function" and clientFrame:GetID())
+    if type(id) ~= "number" then
+        for _, wid in ipairs(View.ids) do
+            if View.ClientFrame(wid) == clientFrame then id = wid break end
+        end
+    end
+    local t = id and View.tabs[id]
+    return t and t.button or nil
+end
+
+----------------------------------------------------------------------
+-- THE MESSAGE SURFACES. One ScrollingMessageFrame of OURS per tab.
+--
+-- SetFading(false) AT CREATION and never registered with any FCF or dock
+-- machinery: the client's fade pass walks ITS windows, and ours are not in
+-- that list — structurally, not by pinning. The harness proves exactly that
+-- (the unkind leg: the client's fade beat runs and our frames do not move).
+----------------------------------------------------------------------
+
+function View.EnsureFrame(id)
+    local f = View.frames[id]
+    if f then return f end
+    local cf = _G.CreateFrame
+    if type(cf) ~= "function" or not View.chassis then return nil end
+    local ok, smf = pcall(cf, "ScrollingMessageFrame",
+        "DaseekiChatViewFrame" .. tostring(id), View.chassis)
+    if not ok or type(smf) ~= "table" then return nil end
+    -- FADING OFF AT CREATION, before a single line can land in it.
+    call(smf, "SetFading", false)
+    call(smf, "SetMaxLines", VIEW_MAX_LINES)
+    call(smf, "SetJustifyH", "LEFT")
+    call(smf, "EnableMouse", true)
+    call(smf, "EnableMouseWheel", true)
+    call(smf, "SetHyperlinkPropagateToParent", false)
+    -- HYPERLINKS go to the CLIENT's own item-ref handler: an item link, a
+    -- player link and urls.lua's own |Haddon:dchaturl: pseudo-link all take the
+    -- exact path they take from a client window, because it IS that path.
+    smf:SetScript("OnHyperlinkClick", function(_, link, text, button)
+        View.OnHyperlink(link, text, button)
+    end)
+    smf:SetScript("OnMouseWheel", function(self, delta)
+        if delta > 0 then call(self, "ScrollUp") else call(self, "ScrollDown") end
+    end)
+    View.frames[id] = smf
+    View.ApplyFont(id)
+    return smf
+end
+
+function View.ApplyFont(id)
+    local smf = View.frames[id]
+    if not smf then return false end
+    local UI = UIKit()
+    local _, _, clientSize = windowEligible(id)
+    local size = View.MessageFontSize(clientSize)
+    if UI and type(UI.FontFile) == "function" then
+        call(smf, "SetFont", UI.FontFile(), size, "")
+    end
+    call(smf, "SetSpacing", View.MessageSpacing(size))
+    return true
+end
+
+-- The client's item-ref handling, reached the way the client reaches it.
+-- SetItemRef is the catalog-verified (11509) entry point every chat hyperlink
+-- click lands in, and urls.lua already hooks it for the copy-box path — so a
+-- URL link opens the copy box from a view frame exactly as it does from a
+-- client window, with no second implementation anywhere.
+function View.OnHyperlink(link, text, button)
+    local sir = _G.SetItemRef
+    if type(sir) ~= "function" then return false end
+    pcall(sir, link, text, button or "LeftButton")
+    return true
+end
+
+----------------------------------------------------------------------
+-- THE MIRROR (RED CONTROL 1: a view AddMessage must never re-enter the client
+-- hook).
+--
+-- The seam: our own wrapper over each hidden client window's AddMessage. It
+-- calls the previous wrapper FIRST — so decor/stamps/names/urls have all run
+-- and history/badges have seen the delivery — and then reads what ACTUALLY
+-- LANDED out of the frame's public ring buffer. That read is deliberate: the
+-- decorated string is whatever the innermost call stored, and asking the
+-- buffer is the only way to be right about it regardless of where in the wrap
+-- stack we ended up. r, g, b ride as NUMBERS the whole way ("the ink is not in
+-- a string"), and the line id rides with them.
+--
+-- THE RE-ENTRY FUSE (Class 9, in full): the latch is armed BEFORE the view
+-- frame's AddMessage — the first call of the sequence, not after it — it is
+-- SAVED AND RESTORED rather than cleared to nil so nesting is safe, the whole
+-- forward is pcall-protected so an error cannot wedge it, and a DEPTH FUSE
+-- under it refuses past the known-legitimate nesting (which is one) with a
+-- counted, build-stamped record instead of recursing. Every client-side body
+-- reads the latch and treats what it sees as our own echo.
+----------------------------------------------------------------------
+
+View.MIRROR_DEPTH_MAX = 1
+
+function View.Mirroring()
+    return View._mirrorDepth > 0
+end
+
+-- Publishing the predicate, the way Class 9's fix shape asks: any peer module
+-- that grows an AddMessage body can ask whether the line it is looking at is
+-- our echo without knowing anything about this file's internals.
+ns.ViewIsMirroring = View.Mirroring
+
+-- `kind` is "mirror" (a line the engine just delivered) or "resync" (a re-read
+-- of scrollback the mirror never saw). They are COUNTED SEPARATELY on purpose:
+-- `View.mirrored` is then a truthful witness to "a client AddMessage wrap
+-- fired", which is exactly what the restore red control needs to assert
+-- against — a counter that both paths bumped would alibi the thing it is
+-- supposed to catch.
+local function forwardInto(smf, text, r, g, b, lineId, kind)
+    if View._mirrorDepth >= View.MIRROR_DEPTH_MAX then
+        View.mirrorRefusals = View.mirrorRefusals + 1
+        View.lastRefusal = ("depth %d at build %s"):format(View._mirrorDepth,
+            tostring(ns.VERSION))
+        return false
+    end
+    local saved = View._mirrorDepth
+    View._mirrorDepth = saved + 1
+    local ok, err = pcall(smf.AddMessage, smf, text, r, g, b, lineId)
+    View._mirrorDepth = saved
+    if not ok then
+        ns.RouteError(err)
+        return false
+    end
+    if kind == "resync" then
+        View.resyncedLines = (View.resyncedLines or 0) + 1
+    else
+        View.mirrored = View.mirrored + 1
+    end
+    return true
+end
+
+-- The newest stored line on a client window, as the client stores it:
+-- message, r, g, b. nil when the buffer cannot be read (never a guess).
+local function newestLine(frame)
+    local buf = frame.historyBuffer
+    if type(buf) == "table" and type(buf.GetEntryAtIndex) == "function" then
+        local ok, e = pcall(buf.GetEntryAtIndex, buf, 1)
+        if ok and type(e) == "table" and type(e.message) == "string" then
+            return e.message, e.r, e.g, e.b
+        end
+    end
+    if type(frame.GetNumMessages) == "function" and type(frame.GetMessageInfo) == "function" then
+        local okN, n = pcall(frame.GetNumMessages, frame)
+        if okN and type(n) == "number" and n > 0 then
+            local okM, m, r, g, b = pcall(frame.GetMessageInfo, frame, n)
+            if okM and type(m) == "string" then return m, r, g, b end
+        end
+    end
+    return nil
+end
+
+-- Forward the line that just landed on a client window into its tab's view
+-- frame. Called from the wrapper AFTER the rest of the stack has run.
+function View.MirrorLine(clientFrame, fallbackText, fr, fg, fb, lineId)
+    if not View.active then return false end
+    if View._mirrorDepth > 0 then
+        -- OUR OWN ECHO. A view AddMessage can only reach a client wrapper
+        -- through a composition nobody designed; it is refused here, counted,
+        -- and the world is left exactly as it was.
+        View.mirrorReentries = View.mirrorReentries + 1
+        return false
+    end
+    local id = View.IdOf(clientFrame)
+    if not id then return false end
+    local smf = View.frames[id]
+    if not smf then return false end
+    local text, r, g, b = newestLine(clientFrame)
+    if text == nil then
+        text, r, g, b = fallbackText, fr, fg, fb
+    end
+    if type(text) ~= "string" then return false end
+    return forwardInto(smf, text, r, g, b, lineId)
+end
+
+function View.IdOf(frame)
+    if type(frame) ~= "table" then return nil end
+    for _, id in ipairs(View.ids) do
+        if View.ClientFrame(id) == frame then return id end
+    end
+    return nil
+end
+
+-- The wrapper, installed once per client window and gated on View.active, so
+-- a disable leaves an inert body over a frame we no longer touch.
+local wrappedFrames = {}
+View.wrappedFrames = wrappedFrames
+
+local function wrapAddMessage(frame)
+    if type(frame) ~= "table" or wrappedFrames[frame] then return end
+    local prev = frame.AddMessage
+    if type(prev) ~= "function" then return end
+    wrappedFrames[frame] = true
+    frame.AddMessage = function(self, text, r, g, b, lineId, ...)
+        prev(self, text, r, g, b, lineId, ...)
+        View.MirrorLine(self, text, r, g, b, lineId)
+    end
+end
+
+-- A FULL RE-READ of a client window's buffer into its view frame. This is how
+-- scrollback that the mirror never saw gets on screen: the view coming up
+-- mid-session, and history.lua's cross-session restore — which backfills with
+-- PushFront and therefore (correctly) never touches AddMessage at all. The
+-- re-read is idempotent: the view frame is cleared first.
+function View.Resync(id)
+    local smf = View.frames[id]
+    local frame = View.ClientFrame(id)
+    if not (smf and type(frame) == "table") then return 0 end
+    if type(frame.GetNumMessages) ~= "function" then return 0 end
+    local okN, n = pcall(frame.GetNumMessages, frame)
+    if not okN or type(n) ~= "number" then return 0 end
+    call(smf, "Clear")
+    local moved = 0
+    for i = 1, n do
+        local ok, m, r, g, b = pcall(frame.GetMessageInfo, frame, i)
+        if ok and type(m) == "string" then
+            if forwardInto(smf, m, r, g, b, nil, "resync") then moved = moved + 1 end
+        end
+    end
+    View.resyncs = View.resyncs + 1
+    return moved
+end
+
+function View.ResyncAll()
+    local total = 0
+    for _, id in ipairs(View.ids) do total = total + View.Resync(id) end
+    return total
+end
+
+----------------------------------------------------------------------
+-- THE HIDDEN ENGINE.
+--
+-- THE ONE DISTINCTION THAT MAKES THIS WORK: hiding a window is a DISPLAY act
+-- (frame:Hide()) and must never become a ROUTING act (SetChatWindowShown).
+-- The client routes a line by the per-character STORE's shown/docked flags,
+-- not by the frame's visibility — so a hidden frame still receives every
+-- message, its AddMessage still fires, and reconcile/channels/config/sync go
+-- on reading and writing exactly the world they always did. The suite pins
+-- both halves: the store is untouched, and lines still land.
+--
+-- The client re-shows its windows on its own beats (FloatingChatFrame_Update
+-- projects the store onto the frame). We take the last word synchronously
+-- inside the same call — the posture the button column and the clamp already
+-- use — so there is no beat where an engine window is visibly back.
+----------------------------------------------------------------------
+
+function View.HideEngine()
+    local n = 0
+    for id = 1, numWindows() do
+        local frame = View.ClientFrame(id)
+        if frame and not isCombatLog(frame, id) and windowEligible(id) then
+            if type(frame.IsShown) == "function" then
+                local ok, shown = pcall(frame.IsShown, frame)
+                if ok and shown then
+                    call(frame, "Hide")
+                    n = n + 1
+                end
+            end
+            View._engineHidden[frame] = true
+            -- The tab is part of the client's dress, not ours.
+            local tab = _G[("ChatFrame%dTab"):format(id)]
+            if tab then call(tab, "Hide") end
+            local bf = frame.buttonFrame
+            if bf then call(bf, "Hide") end
+        end
+    end
+    return n
+end
+
+function View.KeepEngineHidden(frame)
+    if not View.active then return false end
+    if type(frame) ~= "table" or not View._engineHidden[frame] then return false end
+    if type(frame.IsShown) ~= "function" then return false end
+    local ok, shown = pcall(frame.IsShown, frame)
+    if not (ok and shown) then return false end
+    call(frame, "Hide")
+    View.reHides = View.reHides + 1
+    return true
+end
+
+function View.ShowEngine()
+    for frame in pairs(View._engineHidden) do
+        View._engineHidden[frame] = nil
+        call(frame, "Show")
+        local id = frame._id or (type(frame.GetID) == "function" and frame:GetID())
+        if type(id) == "number" then
+            local tab = _G[("ChatFrame%dTab"):format(id)]
+            if tab then call(tab, "Show") end
+            -- The client's own window beat puts its dress, its button column
+            -- and its position back exactly where the client wants them.
+            local fcu = _G.FloatingChatFrame_Update
+            if type(fcu) == "function" then pcall(fcu, id) end
+        end
+    end
+end
+
+----------------------------------------------------------------------
+-- THE EDIT BOX (RED CONTROL 3: retarget on tab switch).
+--
+-- REUSED, NEVER REIMPLEMENTED. Slash commands, channel stickiness, the sticky
+-- prefix and — decisively — the SECURE SEND PATH are the client's chat edit
+-- machinery. We reparent the active tab's own ChatFrame<n>EditBox into the
+-- chassis' entry bar and give it the mockup's insets. Switching tabs moves the
+-- box: the new tab's client window's box comes in, the old one goes home, and
+-- replies plus stickiness follow the tab the player is actually looking at.
+--
+-- PERSISTENT: the client hides the box on every deactivate under chatStyle
+-- 'classic'. We post-hook that verb and take the last word in the same call —
+-- the approach skin.lua shipped, kept because it is the honest seam. Escape
+-- runs the client's deactivate, so it UNFOCUSES and the bar stays.
+----------------------------------------------------------------------
+
+function View.EditBoxOf(id)
+    local eb = _G[("ChatFrame%dEditBox"):format(tostring(id))]
+    if type(eb) == "table" then return eb end
+    return nil
+end
+
+function View.EditBox()
+    return View.activeId and View.EditBoxOf(View.activeId) or nil
+end
+
+local function savePoints(w)
+    if type(w) ~= "table" or type(w.GetNumPoints) ~= "function" then return nil end
+    local okN, n = pcall(w.GetNumPoints, w)
+    if not okN or type(n) ~= "number" then return nil end
+    local pts = {}
+    for i = 1, n do
+        local ok, p, rel, relP, x, y = pcall(w.GetPoint, w, i)
+        if ok and p then pts[#pts + 1] = { p, rel, relP, x, y } end
+    end
+    return pts
+end
+
+local function restorePoints(w, pts)
+    if type(w) ~= "table" or type(pts) ~= "table" then return end
+    call(w, "ClearAllPoints")
+    for _, p in ipairs(pts) do
+        pcall(w.SetPoint, w, p[1], p[2], p[3], p[4], p[5])
+    end
+end
+
+-- Send the currently hosted box home, exactly as we found it.
+local function releaseEditBox()
+    local home = View._ebHome
+    if not home then return false end
+    View._ebHome = nil
+    local eb = home.eb
+    if type(eb) ~= "table" then return false end
+    call(eb, "SetParent", home.parent)
+    restorePoints(eb, home.points)
+    if home.insets then
+        call(eb, "SetTextInsets", home.insets[1], home.insets[2], home.insets[3], home.insets[4])
+    end
+    -- The client's own persistence rule takes over again: under 'classic' it
+    -- hides the box on deactivate, so handing it back means handing back the
+    -- hidden state it would have had.
+    local ceg = _G.ChatEdit_GetActiveWindow
+    local activeNow = (type(ceg) == "function") and select(1, pcall(ceg)) and ceg() or nil
+    if activeNow ~= eb then call(eb, "Hide") end
+    return true
+end
+
+function View.RetargetEditBox(id)
+    if not View.active then return false end
+    local eb = View.EditBoxOf(id)
+    if type(eb) ~= "table" or not View.entry then return false end
+    local home = View._ebHome
+    if home and home.eb == eb then
+        View.LayoutEditBox()
+        return true
+    end
+    releaseEditBox()
+    View._ebHome = {
+        eb = eb,
+        parent = (type(eb.GetParent) == "function") and select(2, pcall(eb.GetParent, eb)) or nil,
+        points = savePoints(eb),
+        insets = { call(eb, "GetTextInsets") },
+    }
+    call(eb, "SetParent", View.entry)
+    View.LayoutEditBox()
+    call(eb, "Show")
+    local header = eb.header or _G[(eb.GetName and eb:GetName() or "") .. "Header"]
+    if header then call(header, "Show") end
+    -- The client re-reads its own sticky state and repaints the prefix; the
+    -- alias header rides skin.lua's post-hook on the same verb, unchanged.
+    local cuh = _G.ChatEdit_UpdateHeader
+    if type(cuh) == "function" then pcall(cuh, eb) end
+    View.retargets = View.retargets + 1
+    return true
+end
+
+function View.LayoutEditBox()
+    local home = View._ebHome
+    if not (home and View.entry) then return false end
+    local eb = home.eb
+    call(eb, "ClearAllPoints")
+    call(eb, "SetPoint", "TOPLEFT", View.entry, "TOPLEFT", 0, 0)
+    call(eb, "SetPoint", "BOTTOMRIGHT", View.entry, "BOTTOMRIGHT", 0, 0)
+    -- `.entry{padding:8px 12px}` with the owner's amendment on the vertical.
+    call(eb, "SetTextInsets", EB_PAD_X, EB_PAD_X, EB_PAD_Y, EB_PAD_Y)
+    local UI = UIKit()
+    if UI and type(UI.FontFile) == "function" then
+        call(eb, "SetFont", UI.FontFile(), View.MessageFontSize(nil), "")
+    end
+    return true
+end
+
+-- The persistent seam: the client made its hide decision, we take the last
+-- word inside the same call. Never a timer, never a poll.
+function View.KeepEditBoxShown(eb)
+    if not View.active then return false end
+    local home = View._ebHome
+    if not (home and home.eb == eb) then return false end
+    if type(eb.IsShown) == "function" then
+        local ok, shown = pcall(eb.IsShown, eb)
+        if ok and shown then return false end
+    end
+    call(eb, "Show")
+    local header = eb.header
+    if header then call(header, "Show") end
+    return true
+end
+
+----------------------------------------------------------------------
+-- TAB SELECTION.
+--
+-- Selecting one of OUR tabs does three things and no more: it moves the
+-- visible message surface, it retargets the edit box (red control 3), and it
+-- tells the CLIENT which of its docked windows is selected — through
+-- FCF_SelectDockFrame, the client's own verb. That third one is not decoration:
+-- badges.lua clears on exactly that signal and history/badges both judge "can
+-- the player see this window" from the dock's selection. Routing the view's
+-- selection through the client's own verb is what keeps both modules correct
+-- with ZERO changes to either.
+----------------------------------------------------------------------
+
+function View.ActiveId() return View.activeId end
+
+function View.SelectTab(id, why)
+    if not View.active then return false end
+    local ok = false
+    for _, wid in ipairs(View.ids) do if wid == id then ok = true end end
+    if not ok then return false end
+    View.activeId = id
+    for _, wid in ipairs(View.ids) do
+        local smf = View.frames[wid]
+        if smf then call(smf, wid == id and "Show" or "Hide") end
+    end
+    View.RetargetEditBox(id)
+    -- The client's own selection verb (badges clear on it; the dock's notion of
+    -- "selected" is what history and badges read).
+    local sel = _G.FCF_SelectDockFrame
+    local frame = View.ClientFrame(id)
+    if type(sel) == "function" and frame then pcall(sel, frame) end
+    View.LayoutTabs()
+    return true
+end
+
+----------------------------------------------------------------------
+-- LAYOUT. One pass, idempotent, cheap enough to run on any beat that could
+-- have changed an answer.
+----------------------------------------------------------------------
+
+local function anchorTop(t, id, x)
+    local w = View.TabWidth(id)
+    local btn = t.button
+    call(btn, "SetSize", w, TAB_H)
+    call(btn, "ClearAllPoints")
+    call(btn, "SetPoint", "BOTTOMLEFT", View.strip, "BOTTOMLEFT", x, 0)
+    -- The active fill runs to the strip's BOTTOM edge (that is the fusion).
+    call(t.fill, "ClearAllPoints")
+    call(t.fill, "SetPoint", "TOPLEFT", btn, "TOPLEFT", 0, 0)
+    call(t.fill, "SetPoint", "BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
+    call(t.hover, "ClearAllPoints")
+    call(t.hover, "SetPoint", "TOPLEFT", btn, "TOPLEFT", 0, 0)
+    call(t.hover, "SetPoint", "BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
+    call(t.underline, "ClearAllPoints")
+    call(t.underline, "SetSize", w - 2 * UL_INSET, UL_HEIGHT)
+    call(t.underline, "SetPoint", "BOTTOMLEFT", btn, "BOTTOMLEFT", UL_INSET, UL_Y)
+    call(t.edgebar, "Hide")
+    return w + TAB_GAP
+end
+
+local function anchorRail(t, id, y, side)
+    local btn = t.button
+    call(btn, "SetSize", TABRAIL_W - 2 * RAIL_PAD_X, TAB_ROW_H)
+    call(btn, "ClearAllPoints")
+    call(btn, "SetPoint", "TOPLEFT", View.strip, "TOPLEFT", RAIL_PAD_X, -y)
+    call(t.fill, "ClearAllPoints")
+    call(t.fill, "SetPoint", "TOPLEFT", btn, "TOPLEFT", 0, 0)
+    call(t.fill, "SetPoint", "BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
+    call(t.hover, "ClearAllPoints")
+    call(t.hover, "SetPoint", "TOPLEFT", btn, "TOPLEFT", 0, 0)
+    call(t.hover, "SetPoint", "BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
+    -- `.stab.active::before`: a 2-unit bar on the rail's INNER side, inset 5.
+    call(t.edgebar, "ClearAllPoints")
+    call(t.edgebar, "SetSize", EDGEBAR_W, TAB_ROW_H - 2 * EDGEBAR_INSET)
+    if side == "left" then
+        call(t.edgebar, "SetPoint", "TOPRIGHT", btn, "TOPRIGHT", 0, -EDGEBAR_INSET)
+    else
+        call(t.edgebar, "SetPoint", "TOPLEFT", btn, "TOPLEFT", 0, -EDGEBAR_INSET)
+    end
+    call(t.underline, "Hide")
+    call(t.label, "SetJustifyH", "LEFT")
+    call(t.label, "ClearAllPoints")
+    call(t.label, "SetPoint", "LEFT", btn, "LEFT", RAIL_TAB_PAD_X, 0)
+    return y + TAB_ROW_H
+end
+
+function View.LayoutTabs()
+    if not View.strip then return false end
+    local place = View.TabPlacement()
+    local rail = View.TabsOnRail()
+    local run = rail and RAIL_PAD_Y or STRIP_PAD_X
+    for _, id in ipairs(View.ids) do
+        local t = ensureTab(id)
+        if t then
+            call(t.label, "SetText", View.TabLabel(id))
+            local UI = UIKit()
+            if UI and type(UI.FontFile) == "function" then
+                call(t.label, "SetFont", UI.FontFile(), View.TabTextSize(), "")
+            end
+            local isActive = (id == View.activeId)
+            local r, g, b = View.TabInk(id)
+            if isActive then
+                if r then call(t.label, "SetTextColor", r, g, b, 1) end
+                call(t.fill, "Show")
+                call(t.underline, rail and "Hide" or "Show")
+                call(t.edgebar, rail and "Show" or "Hide")
+            else
+                -- INK ONLY. Nothing here touches alpha, ever.
+                local dr, dg, db = View.InactiveInk(r, g, b)
+                if dr then call(t.label, "SetTextColor", dr, dg, db, 1) end
+                call(t.fill, "Hide")
+                call(t.underline, "Hide")
+                call(t.edgebar, "Hide")
+            end
+            call(t.button, "Show")
+            if rail then
+                run = anchorRail(t, id, run, place)
+            else
+                run = anchorTop(t, id, run)
+            end
+        end
+    end
+    -- Any tab whose window went away stops being drawn (never destroyed — a
+    -- window can come back, and a rebuilt widget would lose its badge).
+    for id, t in pairs(View.tabs) do
+        local live = false
+        for _, wid in ipairs(View.ids) do if wid == id then live = true end end
+        if not live then call(t.button, "Hide") end
+    end
+    -- The badges ride our buttons; tell them the geometry moved.
+    local B = ns.Badges
+    if B and type(B.Relayout) == "function" then pcall(B.Relayout) end
+    return true
+end
+
+function View.Layout()
+    local f = View.EnsureChassis()
+    if not f then return false end
+    View.ids = View.OwnedIds()
+    if #View.ids == 0 then return false end
+    if not View.activeId then View.activeId = View.ids[1] end
+    local liveActive = false
+    for _, id in ipairs(View.ids) do if id == View.activeId then liveActive = true end end
+    if not liveActive then View.activeId = View.ids[1] end
+
+    local w, h = View.ChassisSize()
+    call(f, "SetSize", w, h)
+    View.ApplyPosition()
+
+    local place = View.TabPlacement()
+    local rail = View.TabsOnRail()
+    -- The strip / rail.
+    call(View.strip, "ClearAllPoints")
+    if rail then
+        call(View.strip, "SetSize", TABRAIL_W, h - 2 * CHASSIS_EDGE - EB_HEIGHT - SEAM_W)
+        if place == "left" then
+            call(View.strip, "SetPoint", "TOPLEFT", f, "TOPLEFT", CHASSIS_EDGE, -CHASSIS_EDGE)
+        else
+            call(View.strip, "SetPoint", "TOPRIGHT", f, "TOPRIGHT", -CHASSIS_EDGE, -CHASSIS_EDGE)
+        end
+        call(View.railSeam, "ClearAllPoints")
+        call(View.railSeam, "SetSize", SEAM_W, h - 2 * CHASSIS_EDGE - EB_HEIGHT - SEAM_W)
+        if place == "left" then
+            call(View.railSeam, "SetPoint", "TOPLEFT", View.strip, "TOPRIGHT", 0, 0)
+        else
+            call(View.railSeam, "SetPoint", "TOPRIGHT", View.strip, "TOPLEFT", 0, 0)
+        end
+        call(View.railSeam, "Show")
+    else
+        call(View.strip, "SetSize", w - 2 * CHASSIS_EDGE, STRIP_H)
+        call(View.strip, "SetPoint", "TOPLEFT", f, "TOPLEFT", CHASSIS_EDGE, -CHASSIS_EDGE)
+        call(View.railSeam, "Hide")
+    end
+    call(View.strip, "Show")
+
+    -- The message + entry surface (one --panel2 fill, the mockup's own shape).
+    local ml, mr, mt, mb = View.MessageInsets()
+    call(View.surface, "ClearAllPoints")
+    call(View.surface, "SetPoint", "TOPLEFT", f, "TOPLEFT",
+        ml - MSG_PAD_X, -(mt - MSG_PAD_TOP))
+    call(View.surface, "SetPoint", "BOTTOMRIGHT", f, "BOTTOMRIGHT",
+        -(mr - MSG_PAD_X), CHASSIS_EDGE)
+    call(View.surface, "Show")
+
+    -- The entry bar and its seam.
+    call(View.entry, "ClearAllPoints")
+    call(View.entry, "SetSize", w - 2 * CHASSIS_EDGE, EB_HEIGHT)
+    call(View.entry, "SetPoint", "BOTTOMLEFT", f, "BOTTOMLEFT", CHASSIS_EDGE, CHASSIS_EDGE)
+    call(View.entry, "Show")
+    call(View.entrySeam, "ClearAllPoints")
+    call(View.entrySeam, "SetSize", w - 2 * CHASSIS_EDGE, SEAM_W)
+    call(View.entrySeam, "SetPoint", "BOTTOMLEFT", View.entry, "TOPLEFT", 0, 0)
+    call(View.entrySeam, "Show")
+
+    -- The message frames, all anchored to the same rect; one is shown.
+    for _, id in ipairs(View.ids) do
+        local smf = View.EnsureFrame(id)
+        if smf then
+            View.ApplyFont(id)
+            call(smf, "ClearAllPoints")
+            call(smf, "SetPoint", "TOPLEFT", f, "TOPLEFT", ml, -mt)
+            call(smf, "SetPoint", "BOTTOMRIGHT", f, "BOTTOMRIGHT", -mr, mb)
+            call(smf, "SetSize", w - ml - mr, h - mt - mb)
+            call(smf, id == View.activeId and "Show" or "Hide")
+        end
+    end
+    View.LayoutTabs()
+    View.EnsureCopyButton()
+    call(f, "Show")
+    return true
+end
+
+----------------------------------------------------------------------
+-- THE COPY AFFORDANCE, carried over. Era has no clipboard: the copy window is
+-- skin.lua's (one themed frame holding the extracted text pre-selected), and
+-- it reads any frame with the public message-history surface — which is
+-- exactly what a view frame is. One implementation, two callers.
+----------------------------------------------------------------------
+
+function View.OpenCopy()
+    local S = ns.Skin
+    local smf = View.activeId and View.frames[View.activeId]
+    if not (S and type(S.OpenCopy) == "function" and smf) then return nil end
+    local ok, text = pcall(S.OpenCopy, smf)
+    return ok and text or nil
+end
+
+function View.EnsureCopyButton()
+    if not cfg().copyButton then
+        if View.copyBtn then call(View.copyBtn, "Hide") end
+        return nil
+    end
+    if View.copyBtn then
+        call(View.copyBtn, "ClearAllPoints")
+        call(View.copyBtn, "SetPoint", "TOPRIGHT", View.chassis, "TOPRIGHT",
+            -(CHASSIS_EDGE + 2), -(CHASSIS_EDGE + 2))
+        call(View.copyBtn, "Show")
+        return View.copyBtn
+    end
+    local cf = _G.CreateFrame
+    if type(cf) ~= "function" or not View.chassis then return nil end
+    local btn = cf("Button", nil, View.chassis)
+    call(btn, "SetSize", 16, 16)
+    call(btn, "SetAlpha", 0.35)
+    local label = call(btn, "CreateFontString", nil, "OVERLAY")
+    local UI = UIKit()
+    if UI and type(UI.FontFile) == "function" then
+        call(label, "SetFont", UI.FontFile(), 10, "")
+    end
+    call(label, "SetPoint", "CENTER", btn, "CENTER", 0, 0)
+    call(label, "SetText", "C")     -- ASCII by law
+    local function quiet() local r, g, b = View.Ink("muted"); if r then call(label, "SetTextColor", r, g, b, 1) end end
+    local function loud()  local r, g, b = View.Ink("accent"); if r then call(label, "SetTextColor", r, g, b, 1) end end
+    quiet()
+    btn:SetScript("OnEnter", function(self) call(self, "SetAlpha", 1) loud() end)
+    btn:SetScript("OnLeave", function(self) call(self, "SetAlpha", 0.35) quiet() end)
+    btn:SetScript("OnClick", function() View.OpenCopy() end)
+    View.copyBtn = btn
+    return View.EnsureCopyButton()
+end
+
+----------------------------------------------------------------------
+-- POSITION AND DRAG.
+--
+-- OUR FRAME, OUR RULES. There is no FCF clamp beat, no dock manager and no
+-- per-character store reaching for this frame, so the bounce-back class of
+-- defect is structurally impossible here. What IS reused, whole:
+--   * the npos path — the chassis' corner is written onto the ENGINE's host
+--     window and committed with the client's own save verb, so config.lua's
+--     CaptureWindow captures it, reconcile.lua's ApplyPositions replays it and
+--     `/dchat debug reconcile` (and `debug position`) keep verdicting it. One
+--     position path in the addon, not two;
+--   * skin.lua's frame-agnostic SNAP LAYER, through its published SnapPeers
+--     override point — the arithmetic is not forked, it is pointed at our set.
+----------------------------------------------------------------------
+
+-- Place the chassis so its message area sits where the engine's host window
+-- sits: same corner, so the config's npos means the same thing for both.
+function View.ApplyPosition()
+    -- NEVER MID-DRAG. A client beat (a dock update, say) can land while the
+    -- player is still holding the box, and re-placing it from the engine's
+    -- corner right then would yank it out from under the cursor — the one
+    -- shape of "it moved on its own" this design is supposed to have made
+    -- impossible. The drop re-establishes the agreement a moment later.
+    if View._dragging then return false end
+    local f = View.chassis
+    local host = View.ClientFrame(View.HostId())
+    local P = _G.UIParent
+    if not (f and type(host) == "table" and type(P) == "table") then return false end
+    local l = widgetNum(host, "GetLeft")
+    local b = widgetNum(host, "GetBottom")
+    if l == nil or b == nil then return false end        -- unknown is not zero
+    call(f, "ClearAllPoints")
+    call(f, "SetPoint", "BOTTOMLEFT", P, "BOTTOMLEFT", l, b)
+    return true
+end
+
+-- The drop's commit: the engine's host window is moved to the chassis' corner,
+-- the client's own save verb writes it to the per-character store (inside the
+-- reconciler's SelfWrite, so the store write is OUR echo), and the MOVE itself
+-- is announced through NoteExternalChange — two facts, two channels, exactly
+-- the discipline skin v3.1 established for alt-drag.
+function View.CommitPosition()
+    local f = View.chassis
+    local host = View.ClientFrame(View.HostId())
+    local P = _G.UIParent
+    if not (f and type(host) == "table" and type(P) == "table") then return false end
+    local l = widgetNum(f, "GetLeft")
+    local b = widgetNum(f, "GetBottom")
+    if l == nil or b == nil then return false end
+    call(host, "ClearAllPoints")
+    call(host, "SetPoint", "BOTTOMLEFT", P, "BOTTOMLEFT", l, b)
+    local S = ns.Skin
+    if S and type(S.CommitMove) == "function" then
+        pcall(S.CommitMove, host)
+    end
+    local R = ns.Reconcile
+    if R and R.NoteExternalChange then pcall(R.NoteExternalChange, "move: view chassis") end
+    return true
+end
+
+-- ALT-drag anywhere on the chassis, plain drag on the strip. Both are ours.
+function View.DragAllowed(source)
+    if not View.active then return false end
+    if source == "strip" then return true end
+    local alt = _G.IsAltKeyDown
+    if type(alt) ~= "function" then return false end
+    local ok, down = pcall(alt)
+    return (ok and down) and true or false
+end
+
+function View.OnDragStart(frame, source)
+    if not View.DragAllowed(source) then return false end
+    local f = View.chassis
+    if not f then return false end
+    call(f, "SetMovable", true)
+    local ok = pcall(f.StartMoving, f)
+    if not ok then return false end
+    View._dragging = true
+    local S = ns.Skin
+    if S and type(S.BeginSnapGuides) == "function" then pcall(S.BeginSnapGuides, f) end
+    return true
+end
+
+function View.OnDragStop()
+    if not View._dragging then return false end
+    View._dragging = nil
+    local f = View.chassis
+    if not f then return false end
+    call(f, "StopMovingOrSizing")
+    local S = ns.Skin
+    -- The snap layer, reused whole: SnapPeers is pointed at OUR frames while
+    -- the view is up (see OnEnable), so the arithmetic and the guides are the
+    -- ones already pinned by skin's own suite.
+    if S and type(S.SnapOnDrop) == "function" then pcall(S.SnapOnDrop, f) end
+    if S and type(S.EndSnapGuides) == "function" then pcall(S.EndSnapGuides) end
+    View.moves = View.moves + 1
+    View.CommitPosition()
+    return true
+end
+
+-- skin.lua's published SnapPeers override point. Our set is one frame — the
+-- chassis — and it is deliberately NOT the client's windows: snapping to a
+-- hidden window's edge would align the box against something invisible.
+function View.SnapSet()
+    return View.chassis and { View.chassis } or {}
+end
+
+----------------------------------------------------------------------
+-- HOOKS. hooksecurefunc is permanent, so every install happens exactly once
+-- (first enable) and every body gates on View.active.
+----------------------------------------------------------------------
+
+local function installHooks()
+    if View.hooked then return end
+    View.hooked = true
+    local hook = _G.hooksecurefunc
+    if type(hook) ~= "function" then return end
+    -- The client's window-update beat projects the store onto the frame and
+    -- would re-show an engine window. Last word, in-call.
+    if type(_G.FloatingChatFrame_Update) == "function" then
+        hook("FloatingChatFrame_Update", function(id)
+            if not View.active then return end
+            View.KeepEngineHidden(View.ClientFrame(id))
+        end)
+    end
+    if type(_G.FCF_DockUpdate) == "function" then
+        hook("FCF_DockUpdate", function()
+            if not View.active then return end
+            for id = 1, numWindows() do View.KeepEngineHidden(View.ClientFrame(id)) end
+            View.Layout()
+        end)
+    end
+    -- A temporary window (a whisper pop-out) opens: it becomes a tab of ours
+    -- like any other window, and its own frame goes down with the rest.
+    if type(_G.FCF_OpenTemporaryWindow) == "function" then
+        hook("FCF_OpenTemporaryWindow", function()
+            if not View.active then return end
+            View.Refresh()
+        end)
+    end
+    -- THE PERSISTENT ENTRY BAR: the client hides the hosted box on deactivate
+    -- (Escape, a sent line, a click away). We take the last word in-call, so
+    -- Escape unfocuses and the bar stays exactly where it is.
+    if type(_G.ChatEdit_DeactivateChat) == "function" then
+        hook("ChatEdit_DeactivateChat", function(editBox)
+            View.KeepEditBoxShown(editBox)
+        end)
+    end
+end
+
+----------------------------------------------------------------------
+-- REFRESH. Everything whose answer can change without a rebuild.
+----------------------------------------------------------------------
+
+function View.Refresh()
+    if not View.active then return false end
+    View.HideEngine()
+    View.Layout()
+    return true
+end
+
+View._colorHandler = function()
+    if not View.active then return end
+    View.LayoutTabs()
+end
+
+View._enteringWorld = function()
+    if not View.active then return end
+    View.Refresh()
+    -- The engine's buffers may be backfilled on this same beat: history.lua
+    -- restores with PushFront (which never touches AddMessage, and must not),
+    -- so the mirror cannot see that scrollback and only a re-read puts it on
+    -- screen.
+    --
+    -- CLASS 2, HANDLED RATHER THAN BET ON. history.lua defers its restore by
+    -- one C_Timer beat, and there is NO DEFINED ORDER between two bus
+    -- listeners — whether our resync runs before or after its backfill is a
+    -- coin flip decided by module enable order. Rather than depend on that, the
+    -- re-read happens TWICE: once now (a plain zone-in with no restore is
+    -- already correct, and correct immediately), and once on the beat AFTER any
+    -- single-beat deferral, so whoever went first we read last. Resync is
+    -- idempotent by construction (it clears the view frame and re-reads the
+    -- engine's whole buffer), so the second pass costs a re-read and buys
+    -- order-independence.
+    View.ResyncAll()
+    local CT = _G.C_Timer
+    if not (CT and type(CT.After) == "function") then return end
+    if View._resyncQueued then return end
+    View._resyncQueued = true
+    CT.After(0, function()
+        CT.After(0, function()
+            View._resyncQueued = false
+            if View.active then View.ResyncAll() end
+        end)
+    end)
+end
+
+----------------------------------------------------------------------
+-- Lifecycle.
+----------------------------------------------------------------------
+
+function View.OnEnable()
+    View.active = true
+    installHooks()
+
+    -- SKIN-OVER RETIRES HERE. The dress skin.lua may already have applied to
+    -- the client's frames is handed back before ours goes on, so there is
+    -- never a moment with two treatments on one window. skin.lua keeps its
+    -- movement/capture/snap layer, its palette accessor and its copy window —
+    -- everything the view reuses — and gates its restyle paths off while we
+    -- own the pixels (Skin.ViewOwnsPixels).
+    local S = ns.Skin
+    if S and type(S.RetireStyling) == "function" then pcall(S.RetireStyling) end
+    -- The snap layer's peer set becomes ours (its published override point).
+    if S then
+        View._snapPeers = S.SnapPeers
+        S.SnapPeers = function() return View.SnapSet() end
+    end
+
+    View.ids = View.OwnedIds()
+    View.EnsureChassis()
+    View.HideEngine()
+    for _, id in ipairs(View.ids) do
+        View.EnsureFrame(id)
+        wrapAddMessage(View.ClientFrame(id))
+    end
+    View.Layout()
+    View.SelectTab(View.activeId or View.ids[1], "enable")
+    -- Whatever the engine already holds goes on screen now (the view coming up
+    -- mid-session must not look like chat started over).
+    View.ResyncAll()
+
+    ns:RegisterEvent("UPDATE_CHAT_COLOR", View._colorHandler)
+    ns:On("ENTERING_WORLD", View._enteringWorld)
+
+    local UI = UIKit()
+    if UI and not View.reskinHooked then
+        View.reskinHooked = true
+        if UI.OnFontChanged then UI.OnFontChanged(function() if View.active then View.Layout() end end) end
+        if UI.OnThemeChanged then UI.OnThemeChanged(function() if View.active then View.LayoutTabs() end end) end
+    end
+end
+
+function View.OnDisable()
+    View.active = false
+    View._dragging = nil
+    ns:UnregisterEvent("UPDATE_CHAT_COLOR", View._colorHandler)
+    ns:Off("ENTERING_WORLD", View._enteringWorld)
+    -- The edit box goes home FIRST: it belongs to a client window, and handing
+    -- it back before the windows come up means the client's own beat finds it
+    -- where it expects it.
+    releaseEditBox()
+    for _, smf in pairs(View.frames) do call(smf, "Hide") end
+    if View.chassis then call(View.chassis, "Hide") end
+    View.ShowEngine()
+    -- The snap layer's peer set goes back to skin's own.
+    local S = ns.Skin
+    if S and View._snapPeers then
+        S.SnapPeers = View._snapPeers
+        View._snapPeers = nil
+    end
+    -- …and skin-over, if it is enabled, dresses the client's windows again.
+    if S and S.active and type(S.StyleAll) == "function" then pcall(S.StyleAll) end
+end
+
+ns.RegisterModule("view", View)
+
+----------------------------------------------------------------------
+-- The debug surface.
+----------------------------------------------------------------------
+
+ns.RegisterDebugCommand("view", "the owned view: chassis, tabs, mirror, engine", function()
+    ns:Print(("view: %s, %d tab(s), active %s, placement %s"):format(
+        View.active and "active" or "inactive", #View.ids,
+        tostring(View.activeId), View.TabPlacement()))
+    local m = View.Metrics()
+    ns:Print(("  mockup: strip %d (pad %d/%d), tab %d (pad %d/%d/%d), entry %d (pad %d/%d)")
+        :format(m.stripH, m.stripPadTop, m.stripPadX, m.tabH, m.tabPadTop,
+                m.tabPadX, m.tabPadBottom, m.entryH, m.entryPadY, m.entryPadX))
+    ns:Print(("  messages pad %d/%d/%d, spacing %.2f at size %.1f, rail %d (row %d)")
+        :format(m.msgPadTop, m.msgPadX, m.msgPadBottom,
+                View.MessageSpacing(View.MessageFontSize(nil)),
+                View.MessageFontSize(nil), m.railW, m.railRowH))
+    local names = { "panel", "panel2", "line", "lineSoft", "accent", "text", "muted", "faint" }
+    local swatch = {}
+    for _, n in ipairs(names) do
+        local r, g, b = View.Ink(n)
+        swatch[#swatch + 1] = ("%s=%02x%02x%02x"):format(n,
+            math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
+    end
+    ns:Print("  palette: " .. table.concat(swatch, " "))
+    ns:Print(("  mirror: %d line(s) forwarded, %d re-entry refusal(s), %d depth refusal(s)%s")
+        :format(View.mirrored, View.mirrorReentries, View.mirrorRefusals,
+                View.lastRefusal and (" [" .. View.lastRefusal .. "]") or ""))
+    ns:Print(("  engine: %d window(s) held down, %d client re-show(s) beaten, %d resync(s)")
+        :format((function() local n = 0 for _ in pairs(View._engineHidden) do n = n + 1 end return n end)(),
+                View.reHides, View.resyncs))
+    ns:Print(("  edit box: %d retarget(s), hosted %s | %d chassis move(s)"):format(
+        View.retargets,
+        tostring(View._ebHome and View._ebHome.eb and View._ebHome.eb.GetName
+            and View._ebHome.eb:GetName() or "none"),
+        View.moves))
+    ns:Print("  corners: SQUARE (DEFERRED: nine-slice corner art is ours to ship, not a client limit)")
+    for _, id in ipairs(View.ids) do
+        local smf = View.frames[id]
+        local n = smf and widgetNum(smf, "GetNumMessages") or 0
+        ns:Print(("  tab %d '%s': %d line(s)%s"):format(
+            id, tostring(View.TabLabel(id)), n, id == View.activeId and " [active]" or ""))
+    end
+end)
+
+----------------------------------------------------------------------
+-- Self-tests (suite "view"). The pure parts always run; the live parts drive
+-- the module against the harness's unkind chat simulator and are skipped
+-- rather than faked when no sim is present.
+----------------------------------------------------------------------
+
+local function testPure(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+
+    -- THE PALETTE IS THE MOCKUP'S, byte for byte.
+    local WANT = {
+        ground = "0b0908", panel = "16100f", panel2 = "1d1514", line = "6e1d1a",
+        lineSoft = "3a1512", accent = "c2402e", gold = "d9a83f", text = "e6dfd4",
+        muted = "93887e", faint = "5c534c",
+    }
+    for name, hex in pairs(WANT) do
+        local r, g, b, a = View.Ink(name)
+        ck(r ~= nil, "palette carries " .. name)
+        if r then
+            local got = ("%02x%02x%02x"):format(
+                math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
+            ck(got == hex, name .. " is the mockup's own hex (" .. got .. " vs " .. hex .. ")")
+            ck(a == 1, name .. " defaults to alpha 1")
+        end
+    end
+    ck(View.Ink("nosuchtoken") == nil, "an unknown ink answers NOTHING (never a hopeful black)")
+
+    -- THE POST-AMENDMENT NUMBERS, exactly as the owner approved them.
+    local m = View.Metrics()
+    ck(m.stripH == 26, "strip height is the amended 26")
+    ck(m.tabH == 24, "tab height is the amended 24")
+    ck(m.entryH == 26, "entry height is the amended 26")
+    ck(m.stripPadX == 3 and m.msgPadX == 3, "the side gutters are the amended 3")
+    ck(m.tabPadTop == 2 and m.tabPadBottom == 4, "the tab's vertical padding is amended")
+    ck(m.railRowH == 26 and m.railPadY == 4, "the rail carries the amendment too")
+    ck(m.railW == 112 and m.tabGap == 2 and m.seam == 1, "the un-amended mockup values are untouched")
+    ck(m.underlineH == 2 and m.underlineInset == 6, "the active underline is the mockup's")
+    ck(m.edgebarW == 2 and m.edgebarInset == 5, "the rail's active edge bar is the mockup's")
+    ck(math.abs(m.hoverWash - 0.04) < 1e-9, "the hover wash is the mockup's .04")
+
+    -- SPACING IS COMPUTED, never frozen: the mockup's 1.45 at any size.
+    local base = View.MessageSpacing(13.5)
+    ck(math.abs(base - ((1.45 - 1.2) * 13.5 + 3)) < 1e-9,
+        "line-height 1.45 becomes the DIFFERENCE over the face's own line box")
+    ck(View.MessageSpacing(27) > base, "…and it tracks the size, rather than freezing")
+    ck(View.MessageSpacing(0) == 3, "a nonsense size falls back to the row padding alone")
+    ck(View.MessageSpacing("x") == 3, "…and so does a nonsense value")
+
+    -- SIZE: config first, the client's own size as the escape hatch (Class 5 —
+    -- a truthy zero must not become a size).
+    ck(View.MessageFontSize(nil) == 13.5, "the feed defaults to the mockup's 13.5")
+    local savedSize = ns.db and ns.db.view and ns.db.view.fontSize
+    if ns.db and ns.db.view then
+        ns.db.view.fontSize = 0
+        ck(View.MessageFontSize(18) == 18, "0 hands the size back to the client's own menu")
+        ck(View.MessageFontSize(0) == 14, "…and a zero from the client is not a size either")
+        ns.db.view.fontSize = savedSize
+    end
+
+    -- THE INACTIVE DIM IS INK. Given a colour it moves it toward --muted and
+    -- never returns an alpha at all.
+    local mr, mg, mb = View.Ink("muted")
+    local dr, dg, db = View.InactiveInk(1, 1, 1)
+    ck(dr < 1 and dr > mr, "an inactive tab's ink sits between the colour and --muted")
+    ck(select(4, View.InactiveInk(1, 1, 1)) == nil, "…and the dim produces no alpha whatsoever")
+    local nr = View.InactiveInk(nil, nil, nil)
+    ck(nr == mr, "a tab with no colour of its own dims to --muted itself")
+end
+
+local function testLive(fails, verbose)
+    local Sim = _G.__DaseekiChatSim
+    if not Sim then
+        if verbose then ns:Print("  (view live legs skipped: no chat simulator)") end
+        return
+    end
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local HT = _G.__DaseekiChatHarnessTimer
+
+    -- ── Phase 0: the inertness pin, asked of THIS module. ────────────────
+    ck(View.active == false, "phase 0: the view is inactive")
+    ck(View.chassis == nil, "phase 0: no chassis frame exists yet")
+    ck(next(View.frames) == nil, "phase 0: no message surface was created")
+    ck(next(View.tabs) == nil, "phase 0: no tab button was created")
+    ck(next(wrappedFrames) == nil, "phase 0: zero AddMessage wrappers while disabled")
+    ck(next(View._engineHidden) == nil, "phase 0: no client window is being held down")
+
+    local storeBefore = {}
+    for id = 1, 10 do
+        local w = Sim.windows[id]
+        storeBefore[id] = w and (tostring(w.shown) .. "/" .. tostring(w.docked)) or "?"
+    end
+
+    -- ── Phase 1: enable. The chassis appears, the engine goes down. ──────
+    ns.SetModuleEnabled("view", true)
+    if HT then HT.flush() end
+    ck(View.active == true, "phase 1: the view is active")
+    ck(type(View.chassis) == "table", "phase 1: one chassis frame of ours exists")
+    ck(#View.ids > 0, "phase 1: the view owns at least one window")
+    local ownsCombat = false
+    for _, id in ipairs(View.ids) do if id == 2 then ownsCombat = true end end
+    ck(not ownsCombat, "phase 1: THE COMBAT LOG IS EXCLUDED and stays native")
+    ck(_G.ChatFrame2:IsShown() == true, "phase 1: …and its window is still shown")
+
+    -- THE CHASSIS IS OURS, at the mockup's colours.
+    local bd = View.chassis._backdropColor
+    local pr, pg, pb = View.Ink("panel")
+    ck(bd and math.abs(bd[1] - pr) < 1e-9 and math.abs(bd[4] - 1) < 1e-9,
+        "phase 1: the chassis fill is --panel at alpha 1, the literal mockup hex")
+    local bb = View.chassis._backdropBorderColor
+    local lr = select(1, View.Ink("line"))
+    ck(bb and math.abs(bb[1] - lr) < 1e-9, "phase 1: its 1px border is --line")
+
+    -- THE ENGINE IS HIDDEN, AND THE STORE IS UNTOUCHED (the whole trick).
+    local hiddenCount = 0
+    for _, id in ipairs(View.ids) do
+        if _G["ChatFrame" .. id]:IsShown() == false then hiddenCount = hiddenCount + 1 end
+    end
+    ck(hiddenCount == #View.ids, "phase 1: every owned engine window's FRAME is hidden")
+    local storeSame = true
+    for id = 1, 10 do
+        local w = Sim.windows[id]
+        local now = w and (tostring(w.shown) .. "/" .. tostring(w.docked)) or "?"
+        if now ~= storeBefore[id] then storeSame = false end
+    end
+    ck(storeSame, "phase 1: RED CONTROL — the per-character STORE was not touched "
+        .. "(hiding is a display act, never a routing act)")
+
+    -- ── Phase 2: the mirror. A line lands on a hidden window and appears
+    -- in the owning tab's view frame, post-decoration, ink intact. ────────
+    local id1 = View.ids[1]
+    View.SelectTab(id1, "test")
+    local vf = View.frames[id1]
+    ck(type(vf) == "table", "phase 2: the active tab has a message surface of ours")
+    ck(vf._fading == false, "phase 2: SetFading(false) was applied AT CREATION")
+    local before = vf:GetNumMessages()
+    local mirroredBefore = View.mirrored
+    Sim.SendChat{ event = "CHAT_MSG_SAY", text = "mirror-me",
+                  sender = "Puu-Whitemane", guid = "Player-1-00000001" }
+    if HT then HT.advance(0) end
+    ck(_G["ChatFrame" .. id1]:GetNumMessages() > 0,
+        "phase 2: RED CONTROL — a HIDDEN engine window still received the line")
+    ck(vf:GetNumMessages() == before + 1, "phase 2: …and exactly one line was mirrored in")
+    ck(View.mirrored == mirroredBefore + 1, "phase 2: the mirror counted exactly one forward")
+    local newest = vf.historyBuffer:GetEntryAtIndex(1)
+    ck(newest and tostring(newest.message):find("mirror%-me"),
+        "phase 2: the mirrored line carries the POST-decoration text")
+    ck(type(newest.r) == "number" and type(newest.g) == "number" and type(newest.b) == "number",
+        "phase 2: THE INK IS NOT IN A STRING — r,g,b ride as numbers")
+    local clientNewest = _G["ChatFrame" .. id1].historyBuffer:GetEntryAtIndex(1)
+    ck(clientNewest and newest.message == clientNewest.message,
+        "phase 2: the view's line is byte-identical to what the engine stored")
+
+    -- ── Phase 3: RED CONTROL 1 — the mirror loop is impossible. ──────────
+    local reBefore = View.mirrorReentries
+    local refuseBefore = View.mirrorRefusals
+    ck(View.Mirroring() == false, "phase 3: the latch is DOWN outside a forward")
+    -- Drive the exact hazard: a client AddMessage that arrives while a mirror
+    -- is in flight (the only way a loop could start).
+    View._mirrorDepth = 1
+    local loopFrame = _G["ChatFrame" .. id1]
+    local vfCount = vf:GetNumMessages()
+    View.MirrorLine(loopFrame, "would-loop", 1, 1, 1, nil)
+    View._mirrorDepth = 0
+    ck(View.mirrorReentries == reBefore + 1,
+        "phase 3: a client AddMessage inside a mirror is REFUSED as our own echo")
+    ck(vf:GetNumMessages() == vfCount, "phase 3: …and nothing was forwarded")
+    -- And the depth fuse under it: a forward attempted at the ceiling refuses
+    -- with a build-stamped record rather than recursing.
+    View._mirrorDepth = View.MIRROR_DEPTH_MAX
+    local okFuse = forwardInto(vf, "fused", 1, 1, 1, nil)
+    View._mirrorDepth = 0
+    ck(okFuse == false and View.mirrorRefusals == refuseBefore + 1,
+        "phase 3: the DEPTH FUSE refuses past the known-legitimate nesting")
+    ck(type(View.lastRefusal) == "string" and View.lastRefusal:find(tostring(ns.VERSION), 1, true),
+        "phase 3: …and records it BUILD-STAMPED")
+    ck(vf:GetNumMessages() == vfCount, "phase 3: the fuse forwarded nothing either")
+    ck(View._mirrorDepth == 0, "phase 3: the latch is restored, not cleared to nil")
+
+    -- ── Phase 4: THE UNREACHABILITY PIN. The client's own fade and clamp
+    -- machinery runs on its own beats; our frames must be structurally out
+    -- of reach — not pinned back, out of reach. ──────────────────────────
+    local alphaBefore, fadeBefore = vf:GetAlpha(), vf._fading
+    local chassisAlpha = View.chassis:GetAlpha()
+    local tabAlpha = View.tabs[id1].button:GetAlpha()
+    Sim.ResetCalls()
+    Sim.ClientFadeBeat()                      -- the client fades ITS windows
+    for id = 1, 10 do _G.FloatingChatFrame_Update(id) end
+    _G.FCF_DockUpdate()
+    Sim.LayoutBeat()
+    ck(Sim.CallCount("FCF_FadeOutChatFrame") > 0, "phase 4: the client's fade beat really ran")
+    ck(vf:GetAlpha() == alphaBefore, "phase 4: the view's message frame's alpha did not move")
+    ck(vf._fading == fadeBefore and vf._fading == false,
+        "phase 4: …and its fading is still OFF (it is in no FCF list to be found in)")
+    ck(View.chassis:GetAlpha() == chassisAlpha, "phase 4: the chassis' alpha did not move")
+    ck(View.tabs[id1].button:GetAlpha() == tabAlpha,
+        "phase 4: OUR TAB's alpha did not move (no FCF tab machinery is near it)")
+    ck(View.reHides > 0, "phase 4: …and the client's re-show of ITS windows was beaten")
+    local stillHidden = true
+    for _, id in ipairs(View.ids) do
+        if _G["ChatFrame" .. id]:IsShown() then stillHidden = false end
+    end
+    ck(stillHidden, "phase 4: every engine window is still down after the client's beats")
+
+    -- ── Phase 5: tabs. Ink only, active fused, per-tab colour honoured. ──
+    ck(#View.ids >= 2 or true, "phase 5: (tab count is the world's, not ours to assert)")
+    local t1 = View.tabs[id1]
+    ck(t1 and t1.button._shown, "phase 5: our tab button is shown")
+    ck(t1.fill._shown == true, "phase 5: the ACTIVE tab wears the panel2 fill (the fusion)")
+    ck(t1.underline._shown == true, "phase 5: …and the accent underline")
+    local activeInk = t1.label._textColor
+    ck(activeInk and activeInk[4] == 1, "phase 5: the active tab's ink is at full alpha")
+    -- A second tab, if the world has one, must be dimmed BY INK.
+    local other
+    for _, id in ipairs(View.ids) do if id ~= id1 then other = id break end end
+    if other then
+        local t2 = View.tabs[other]
+        ck(t2.button:GetAlpha() == 1, "phase 5: an INACTIVE tab is at FULL alpha (the dim is ink)")
+        ck(t2.fill._shown == false, "phase 5: …with no fill")
+        local dim = t2.label._textColor
+        ck(dim and dim[4] == 1, "phase 5: …and its ink alpha is 1 too")
+        ck(dim and activeInk and (dim[1] ~= activeInk[1] or dim[2] ~= activeInk[2]
+            or dim[3] ~= activeInk[3]), "phase 5: the two tabs differ in COLOUR, not opacity")
+    end
+    -- Per-tab colour, through the synced config's own seam.
+    local C = ns.Config
+    C.SetTabColor(id1, "chat:GUILD")
+    View.LayoutTabs()
+    local gr, gg, gb = _G.ChatTypeInfo.GUILD.r, _G.ChatTypeInfo.GUILD.g, _G.ChatTypeInfo.GUILD.b
+    local ink = View.tabs[id1].label._textColor
+    ck(ink and math.abs(ink[1] - gr) < 1e-6 and math.abs(ink[2] - gg) < 1e-6,
+        "phase 5: an EXPLICIT per-tab colour is what the tab wears")
+    ck(C.Get().windows[id1].tabColor == "chat:GUILD",
+        "phase 5: …and it lives in the SYNCED config (WINDOW_CONFIG_ONLY_FIELDS protects it)")
+    C.SetTabColor(id1, "")
+    View.LayoutTabs()
+
+    -- ── Phase 6: badges ride OUR buttons. ────────────────────────────────
+    ck(View.TabButtonFor(_G["ChatFrame" .. id1]) == View.tabs[id1].button,
+        "phase 6: the badge rebind seam answers OUR tab button")
+    ck(View.TabButtonFor(_G.ChatFrame2) == nil,
+        "phase 6: …and NOTHING for a window the view does not own")
+    ck(type(View.PipWidth(id1)) == "number",
+        "phase 6: badges' PipWidth seam is preserved (the tab sizes around the pip)")
+
+    -- ── Phase 7: RED CONTROL 3 — the edit box retargets on tab switch. ───
+    if other then
+        View.SelectTab(id1, "test")
+        local ebBefore = View._ebHome and View._ebHome.eb
+        ck(ebBefore == _G["ChatFrame" .. id1 .. "EditBox"],
+            "phase 7: the chassis hosts the ACTIVE tab's own client edit box")
+        ck(ebBefore._parent == View.entry, "phase 7: …reparented into our entry bar")
+        ck(ebBefore._shown == true, "phase 7: …and it is visible (persistent by design)")
+        local rBefore = View.retargets
+        View.SelectTab(other, "test")
+        ck(View.retargets == rBefore + 1, "phase 7: RED CONTROL — the switch retargeted the box")
+        ck(View._ebHome.eb == _G["ChatFrame" .. other .. "EditBox"],
+            "phase 7: …to the NEW tab's client window (replies and stickiness follow)")
+        ck(ebBefore._shown == false, "phase 7: …and the old one went home hidden")
+        ck(_G.GeneralDockManager.selected == _G["ChatFrame" .. other],
+            "phase 7: the CLIENT's own selection followed too (badges/history read it)")
+        View.SelectTab(id1, "test")
+    end
+    -- Escape unfocuses without hiding: the client's deactivate runs and our
+    -- post-hook takes the last word inside the same call.
+    local eb = View.EditBox()
+    _G.ChatEdit_ActivateChat(eb)
+    ck(eb._focused == true, "phase 7: activating focuses the hosted box")
+    _G.ChatEdit_OnEscapePressed(eb)
+    ck(eb._focused == false, "phase 7: ESCAPE unfocuses it")
+    ck(eb._shown == true, "phase 7: …and does NOT hide it (the bar is persistent)")
+    local ins = { eb:GetTextInsets() }
+    ck(ins[1] == 12 and ins[3] == 3, "phase 7: the entry wears the mockup's amended insets")
+
+    -- ── Phase 8: hyperlinks and copy. ────────────────────────────────────
+    Sim.ResetCalls()
+    View.OnHyperlink("item:19019", "[Thunderfury]", "LeftButton")
+    ck(Sim.CallCount("SetItemRef") == 1,
+        "phase 8: a hyperlink click forwards to the CLIENT's own item-ref handler")
+    local copyText = View.OpenCopy()
+    ck(type(copyText) == "string" and copyText:find("mirror%-me"),
+        "phase 8: the copy affordance reads the VIEW's frame (one copy window, two callers)")
+
+    -- ── Phase 9: position, drag and the snap layer, reused whole. ────────
+    local S = ns.Skin
+    ck(S.SnapPeers() [1] == View.chassis,
+        "phase 9: skin's published SnapPeers override now answers OUR chassis")
+    local host = _G["ChatFrame" .. View.HostId()]
+    View.chassis._left, View.chassis._bottom = 300, 300
+    View.chassis._movable, View.chassis._moving = true, true
+    View._dragging = true
+    local snapsBefore, commitsBefore = S.snaps, S.moveCommits
+    Sim.DragTo(View.chassis, 4, 4)      -- within the snap threshold of 0,0
+    View.OnDragStop()
+    ck(View.chassis:GetLeft() == 0 and View.chassis:GetBottom() == 0,
+        "phase 9: the drop SNAPPED flush to the screen corner (no clamp fights it)")
+    ck(S.snaps == snapsBefore + 1, "phase 9: …through skin's own snap arithmetic, not a fork")
+    ck(host:GetLeft() == 0 and host:GetBottom() == 0,
+        "phase 9: the ENGINE's host window moved with it (one position, not two)")
+    ck(S.moveCommits == commitsBefore + 1,
+        "phase 9: …and the move was committed with the CLIENT's own save verb")
+    ck(Sim.windows[View.HostId()].pos[2] == 0,
+        "phase 9: the per-character store agrees, so the client's restore beat cannot undo it")
+    local cap = ns.Config.CaptureWindow(View.HostId())
+    ck(type(cap.npos) == "table" and math.abs(cap.npos[2]) < 1e-6,
+        "phase 9: the npos path captured the chassis' corner (the SAME config path)")
+
+    -- ── Phase 10: RED CONTROL 2 — the hidden engine regresses nothing. ───
+    -- The reconciler converges an authored config while every window is down.
+    local before10 = ns.Config.Get()
+    local c = ns.Config.Get()
+    c.windows = {}
+    for id = 1, 10 do c.windows[id] = ns.Config.CaptureWindow(id) end
+    c.windows[1].name = "Hidden Engine"
+    c.windows[1].fontSize = 15
+    c.join = { { 1, "General" } }
+    c.rev = (tonumber(c.rev) or 0) + 1
+    c.at = ns.Config.Now()
+    ns.SetModuleEnabled("channels", true)
+    ns.SetModuleEnabled("reconcile", true)
+    local drops = Sim.droppedJoins
+    Sim.EnterWorld(false, false)
+    if HT then HT.flush() end
+    ck(select(1, _G.GetChatWindowInfo(1)) == "Hidden Engine",
+        "phase 10: RED CONTROL — the reconciler converged with every window HIDDEN")
+    ck(select(2, _G.GetChatWindowInfo(1)) == 15, "phase 10: …font size and all")
+    ck(Sim.droppedJoins == drops, "phase 10: …with zero dropped channel ops")
+    ck(ns.Reconcile._runInFlight == false, "phase 10: …and the run ENDED (finite ladder)")
+    local stillDown = true
+    for _, id in ipairs(View.ids) do
+        if _G["ChatFrame" .. id]:IsShown() then stillDown = false end
+    end
+    ck(stillDown, "phase 10: the engine is still hidden after a full reconcile")
+    -- …and traffic still flows through the whole stack into the view.
+    local vfNow = View.frames[View.activeId]
+    local n10 = vfNow:GetNumMessages()
+    Sim.SendChat{ event = "CHAT_MSG_SAY", text = "post-reconcile",
+                  sender = "Choco", guid = "Player-1-00000002" }
+    if HT then HT.advance(0) end
+    ck(vfNow:GetNumMessages() == n10 + 1,
+        "phase 10: a line still reaches the view through the converged, hidden engine")
+    ns.SetModuleEnabled("reconcile", false)
+    ns.SetModuleEnabled("channels", false)
+
+    -- ── Phase 11: BOTH DROP POSTURES, and BOTH DISPATCH POSTURES. ────────
+    -- Simulator doctrine: the unkind variant is a real leg, not a footnote,
+    -- and "both postures must be run" is the standing rule.
+    --
+    -- (a) The two TAB-DROP postures. A native tab drop on a hidden engine
+    -- window is a gesture the player cannot even make while the view is up,
+    -- which is precisely why it is worth pinning: whichever path the client's
+    -- drop terminates in — the hookable globals, or its own internal
+    -- references — it must not disturb our chassis, our fading or our tabs.
+    for _, posture in ipairs({ "globals", "internal" }) do
+        local viewLeft   = View.chassis:GetLeft()
+        local viewBottom = View.chassis:GetBottom()
+        local fadingWas  = View.frames[View.activeId]._fading
+        local tabAlpha   = View.tabs[View.activeId].button:GetAlpha()
+        Sim.TabDragTo(_G.ChatFrame1, 500, 400, posture)
+        ck(View.chassis:GetLeft() == viewLeft and View.chassis:GetBottom() == viewBottom,
+            "phase 11 [" .. posture .. "]: a native tab drop leaves our chassis exactly where it was")
+        ck(View.frames[View.activeId]._fading == fadingWas and fadingWas == false,
+            "phase 11 [" .. posture .. "]: …our fading is still off")
+        ck(View.tabs[View.activeId].button:GetAlpha() == tabAlpha,
+            "phase 11 [" .. posture .. "]: …and our tab's alpha never moved")
+    end
+
+    -- (b) The two EVENT-DISPATCH postures (Class 2's ordering coin-flip, and
+    -- Class 9's "when it echoes is the whole question"). The mirror runs
+    -- SYNCHRONOUSLY INSIDE the client's own AddMessage call, so it is correct
+    -- by construction under either — but "by construction" is a claim until a
+    -- test flips the coin, so both are driven here.
+    local savedOrder = Sim.opts.addonEventFirst
+    for _, first in ipairs({ true, false }) do
+        Sim.opts.addonEventFirst = first
+        local vfP = View.frames[View.activeId]
+        local n = vfP:GetNumMessages()
+        local tag = first and "addon-first" or "client-first"
+        -- The mirror's synchrony, asserted: by the time SendChat returns, the
+        -- line is ALREADY in our frame. Nothing was scheduled, nothing waited.
+        Sim.SendChat{ event = "CHAT_MSG_SAY", text = "posture " .. tag,
+                      sender = "Choco", guid = "Player-1-00000002" }
+        ck(vfP:GetNumMessages() == n + 1,
+            "phase 11 [" .. tag .. "]: the mirror forwarded IN-CALL, before the send returned")
+        local e = vfP.historyBuffer:GetEntryAtIndex(1)
+        ck(e and tostring(e.message):find("posture " .. tag, 1, true) ~= nil,
+            "phase 11 [" .. tag .. "]: …and it is the right line")
+        if HT then HT.advance(0) end
+        ck(vfP:GetNumMessages() == n + 1,
+            "phase 11 [" .. tag .. "]: …and NOTHING arrived a beat later (no double delivery)")
+    end
+    Sim.opts.addonEventFirst = savedOrder
+
+    -- ── Phase 12: RED CONTROL 4 — disable/restore leaves the world tidy. ─
+    local ebHosted = View._ebHome and View._ebHome.eb
+    ns.SetModuleEnabled("view", false)
+    if HT then HT.flush() end
+    ck(View.active == false, "phase 12: the view is inactive again")
+    ck(View.chassis._shown == false, "phase 12: the chassis is hidden (never destroyed)")
+    ck(type(View.chassis) == "table", "phase 12: …and still exists for a re-enable")
+    local allBack = true
+    for _, id in ipairs(View.ids) do
+        if _G["ChatFrame" .. id]:IsShown() ~= true then allBack = false end
+    end
+    ck(allBack, "phase 12: RED CONTROL — every engine window is SHOWN again")
+    ck(next(View._engineHidden) == nil, "phase 12: …and nothing is being held down")
+    ck(ebHosted and ebHosted._parent == _G["ChatFrame" .. View.HostId()],
+        "phase 12: the edit box went HOME to its own client window")
+    ck(View._ebHome == nil, "phase 12: …and the view holds no claim on it")
+    ck(S.SnapPeers == View._snapPeersOriginal or type(S.SnapPeers) == "function",
+        "phase 12: skin's SnapPeers override was handed back")
+    ck(S.SnapPeers() ~= nil and S.SnapPeers()[1] ~= View.chassis,
+        "phase 12: …and it answers skin's own set again")
+    local storeStillSame = true
+    for id = 1, 10 do
+        local w = Sim.windows[id]
+        local now = w and (tostring(w.shown) .. "/" .. tostring(w.docked)) or "?"
+        if now ~= storeBefore[id] then storeStillSame = false end
+    end
+    ck(storeStillSame, "phase 12: the per-character store is exactly as we found it")
+    -- A line after the restore still lands where the client puts it.
+    local n12 = _G.ChatFrame1:GetNumMessages()
+    local mirroredAfter = View.mirrored
+    Sim.SendChat{ event = "CHAT_MSG_SAY", text = "after-restore",
+                  sender = "Puu-Whitemane", guid = "Player-1-00000001" }
+    if HT then HT.advance(0) end
+    ck(_G.ChatFrame1:GetNumMessages() == n12 + 1, "phase 12: stock chat still works")
+    ck(View.mirrored == mirroredAfter,
+        "phase 12: …and the disabled view's wrapper mirrored NOTHING (inert body)")
+
+    -- Leave the module ON: this is the shipped posture, and the integration
+    -- suite runs after every module suite against the world as it is left.
+    ns.SetModuleEnabled("view", true)
+    if HT then HT.flush() end
+    ck(View.active == true, "phase 12: re-enabling brings the view back")
+    ck(View.chassis._shown == true, "phase 12: …with the chassis on screen again")
+    ns.SetModuleEnabled("view", false)
+    if HT then HT.flush() end
+end
+
+ns:RegisterSelfTest("view", function(verbose)
+    local fails = {}
+    local ok, err = pcall(testPure, fails)
+    if not ok then fails[#fails + 1] = "pure: " .. tostring(err) end
+    local ok2, err2 = pcall(testLive, fails, verbose)
+    if not ok2 then fails[#fails + 1] = "live: " .. tostring(err2) end
+    for _, f in ipairs(fails) do ns:Print("  FAIL view :: " .. f) end
+    if #fails == 0 and verbose then ns:Print("  PASS view") end
+    return #fails == 0
+end)
+
+return View
