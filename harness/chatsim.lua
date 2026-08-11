@@ -41,6 +41,14 @@
 --     deactivate (chatStyle 'classic', the default; 'im' is the client's own
 --     persistent-box mode). A persistent-edit-box feature must earn the shown
 --     state against the hiding posture, every time.
+--   * THE CHAT BUTTON COLUMN IS SHOWN, FLIPS SIDES, AND KEEPS COMING BACK:
+--     every window carries a button frame (the chat-menu + scroll-button
+--     column); the client picks its SIDE from the window's screen position
+--     (a window against the left edge gets its column flipped to the right —
+--     the owner's two-account difference), re-shows it on every button-side
+--     update, and that column's width is part of the window's DRAG FOOTPRINT,
+--     so a shown column holds the drag off the screen edge exactly like a
+--     clamp margin does. An addon that hides it must earn that, every beat.
 --   * UIParent's UNIT size moves with uiScale while the PIXEL screen does not
 --     (Sim.SetUIScale) — the cross-account scale difference, made drivable.
 --
@@ -155,6 +163,14 @@ function WIDGET_API.Hide(self)
 end
 function WIDGET_API.SetShown(self, on)
     if on then self:Show() else self:Hide() end
+end
+-- w2/button-column sim extension: a Button's programmatic Click runs its own
+-- OnClick handler (the client's behavior, and the only way an addon can reach
+-- a client verb that lives behind a client button).
+function WIDGET_API.Click(self, button)
+    record("widget:Click")
+    local fn = self._scripts and self._scripts.OnClick
+    if fn then fn(self, button or "LeftButton") end
 end
 function WIDGET_API.IsShown(self) return self._shown end
 function WIDGET_API.IsVisible(self) return self._shown end
@@ -314,8 +330,31 @@ function WIDGET_API.SetScrollChild(self, child) self._scrollChild = child end
 -- unkind default so code that never loosens the clamp fails the flush pin.
 Sim.DEFAULT_CLAMP_INSETS = { 8, 8, 8, 8 }   -- left, right, top, bottom
 
+-- ── THE BUTTON COLUMN'S FOOTPRINT (w2/button-column sim extension) ───────────
+-- The chat button frame hangs OFF the window's edge, and its width is part of
+-- what the drag has to fit on screen — so a window whose column is shown stops
+-- short of the edge by the column's width on top of the clamp margin, and one
+-- whose column is hidden does not. Same provenance posture as the clamp insets
+-- above: the CALLS are catalog-verified on 11509 (FCF_UpdateButtonSide,
+-- FCF_GetButtonSide, FCF_SetButtonSide), the WIDTH and the flush behavior are
+-- modeled from the owner's two-account observation (a small square column on
+-- the left on one account, on the right on the other, and the window refusing
+-- the last stretch to the edge either way).
+Sim.BUTTON_FRAME_WIDTH = 30
+
 local function insetsOf(self)
     return self._clampInsets or Sim.DEFAULT_CLAMP_INSETS
+end
+
+-- Extra units the shown column eats on the left / on the right (0, 0 when the
+-- window has no column or its column is down).
+function Sim.ColumnFootprint(frame)
+    if type(frame) ~= "table" then return 0, 0 end
+    local bf = frame.buttonFrame
+    if type(bf) ~= "table" or not bf._shown then return 0, 0 end
+    local w = bf._w or 0
+    if frame._buttonSide == "right" then return 0, w end
+    return w, 0
 end
 
 function WIDGET_API.SetScale(self, s) self._scale = tonumber(s) or 1 end
@@ -354,6 +393,12 @@ end
 function WIDGET_API.StopMovingOrSizing(self)
     record("StopMovingOrSizing")
     self._moving = false
+    -- w2/button-column sim extension: the window landed somewhere new, so the
+    -- client re-decides which side its button column belongs on — and re-shows
+    -- it in the process. This is the beat that makes two accounts differ.
+    if type(self.buttonFrame) == "table" and type(_G.FCF_UpdateButtonSide) == "function" then
+        _G.FCF_UpdateButtonSide(self)
+    end
 end
 function WIDGET_API.IsDragging(self) return self._moving and true or false end
 function WIDGET_API.SetClampedToScreen(self, on)
@@ -389,7 +434,11 @@ function Sim.DragTo(frame, left, bottom)
         local ratio = P:GetEffectiveScale() / frame:GetEffectiveScale()
         local pw, ph = P:GetWidth() * ratio, P:GetHeight() * ratio
         local ins = insetsOf(frame)
-        local minL, maxL = ins[1], pw - (frame._w or 0) - ins[2]
+        -- The button column rides along with the window, so whatever it covers
+        -- has to fit on screen too: a shown column is a margin the drag cannot
+        -- spend, on top of the clamp's own.
+        local colL, colR = Sim.ColumnFootprint(frame)
+        local minL, maxL = ins[1] + colL, pw - (frame._w or 0) - ins[2] - colR
         local minB, maxB = ins[4], ph - (frame._h or 0) - ins[3]
         if maxL < minL then maxL = minL end
         if maxB < minB then maxB = minB end
@@ -573,6 +622,21 @@ local function makeChatFrame(id)
     -- Tab + its text.
     local tab = newWidget("Button", name .. "Tab", f)
     tab.Text = newWidget("FontString", name .. "TabText", tab)
+    -- w2/button-column sim extension: the CHAT BUTTON FRAME — the little
+    -- chat-menu + scroll-button column hanging off the window's edge. Modeled
+    -- in BOTH client shapes (the frame's own `buttonFrame` field, which is the
+    -- Room-1 register's name for it, and the $parentButtonFrame global) and
+    -- SHOWN by default, with real geometry of its own so the drag footprint and
+    -- any bounding-box mistake are both visible to a test.
+    local bf = newWidget("Frame", name .. "ButtonFrame", f)
+    bf._w, bf._h = Sim.BUTTON_FRAME_WIDTH, f._h
+    bf._left, bf._bottom = f._left - bf._w, f._bottom
+    bf._shown = true
+    f.buttonFrame = bf
+    f._buttonSide = "left"
+    for _, suffix in ipairs({ "UpButton", "DownButton", "BottomButton" }) do
+        newWidget("Button", name .. "ButtonFrame" .. suffix, bf)
+    end
     -- Edit box + its stock art regions, parked below the frame like the client.
     local eb = newWidget("EditBox", name .. "EditBox", f)
     eb:SetPoint("TOPLEFT", f, "BOTTOMLEFT", 0, -6)
@@ -590,6 +654,13 @@ local function makeChatFrame(id)
     -- shown state against this default, never inherit it.
     eb._shown, eb.header._shown = false, false
     eb._mouse = true
+    -- w2/button-column sim extension: the bar and its sticky prefix carry REAL
+    -- geometry, so a pointer test against the PREFIX REGION (the right-click
+    -- seam for the chat menu) is answered honestly instead of by guesswork.
+    eb._w, eb._h = f._w, 24
+    eb._left, eb._bottom = f._left, f._bottom - 30
+    eb.header._left, eb.header._bottom = eb._left + 8, eb._bottom + 5
+    eb.header._w, eb.header._h = 40, 14
     for _, suffix in ipairs({ "Left", "Mid", "Right", "FocusLeft", "FocusMid", "FocusRight" }) do
         newWidget("Texture", name .. "EditBox" .. suffix, eb)
     end
@@ -642,6 +713,24 @@ Sim.SetUIScale(Sim.uiScale)
 _G.GetScreenWidth  = function() return _G.UIParent:GetWidth() end
 _G.GetScreenHeight = function() return _G.UIParent:GetHeight() end
 
+-- ── THE POINTER (w2/button-column sim extension) ─────────────────────────────
+-- GetCursorPosition answers in PIXELS (the client's own convention): code that
+-- compares it with a widget edge must divide by that widget's effective scale
+-- first, and the sim's non-1 uiScale makes forgetting that a test failure.
+Sim.cursor = { 0, 0 }
+function Sim.SetCursorAt(widget, dx, dy)
+    local scale = (type(widget) == "table" and type(widget.GetEffectiveScale) == "function")
+        and widget:GetEffectiveScale() or 1
+    local x = ((widget and widget._left or 0) + (tonumber(dx) or 0)) * scale
+    local y = ((widget and widget._bottom or 0) + (tonumber(dy) or 0)) * scale
+    Sim.cursor = { x, y }
+    return x, y
+end
+_G.GetCursorPosition = function()
+    record("GetCursorPosition")
+    return Sim.cursor[1], Sim.cursor[2]
+end
+
 -- Modifier state (the ALT-drag gesture's gate).
 Sim.altDown = false
 _G.IsAltKeyDown     = function() record("IsAltKeyDown") return Sim.altDown and true or false end
@@ -660,6 +749,27 @@ _G.GeneralDockManager = {
     selected = _G.ChatFrame1,
     DOCKED_CHAT_FRAMES = { _G.ChatFrame1, _G.ChatFrame2 },
 }
+
+-- ── THE CLIENT'S CHAT MENU (w2/button-column sim extension) ──────────────────
+-- The one verb the button column offers that nothing else replicates:
+-- languages, emotes, whisper targets. The client's menu is a FRAME toggled by
+-- the column's menu button; ToggleFrame is the catalog-verified (11509) call
+-- that does it, and the button is modeled with the OnClick that performs it, so
+-- an addon can reach the verb through EITHER shape and a test can pin which.
+-- (ChatFrame_ToggleMenu does NOT exist on 11509 — the catalog says so — which
+-- is exactly why the seam has to be resolved at runtime, never assumed.)
+_G.ChatMenu = newWidget("Frame", "ChatMenu", _G.UIParent)
+_G.ChatMenu._shown = false
+_G.ToggleFrame = function(frame)
+    record("ToggleFrame")
+    if type(frame) ~= "table" then return end
+    if frame._shown then frame:Hide() else frame:Show() end
+end
+_G.ChatFrameMenuButton = newWidget("Button", "ChatFrameMenuButton",
+    _G.ChatFrame1.buttonFrame)
+_G.ChatFrameMenuButton:SetScript("OnClick", function()
+    _G.ToggleFrame(_G.ChatMenu)
+end)
 
 ----------------------------------------------------------------------
 -- The per-character store API (GetChatWindowInfo family + FCF conveniences).
@@ -732,14 +842,57 @@ _G.SetChatWindowSavedPosition = function(id, point, x, y)
     local w = W(id); if w then w.pos = { point, x, y } end
 end
 
+-- ── THE BUTTON COLUMN'S SIDE (w2/button-column sim extension) ────────────────
+-- The three catalog-verified calls (11509) plus the client's own rule as the
+-- owner's two accounts demonstrate it: a window sitting against the LEFT edge
+-- has no room for its column there, so the column flips to the RIGHT; anywhere
+-- else it sits on the left. EVERY side update RE-SHOWS the column — that is the
+-- posture an addon that hides it has to keep beating.
+_G.FCF_GetButtonSide = function(frame)
+    record("FCF_GetButtonSide")
+    if type(frame) ~= "table" then return nil end
+    return frame._buttonSide
+end
+_G.FCF_SetButtonSide = function(frame, side, forceUpdate)
+    record("FCF_SetButtonSide")
+    if type(frame) ~= "table" then return nil end
+    local bf = frame.buttonFrame
+    frame._buttonSide = (side == "right") and "right" or "left"
+    if type(bf) == "table" then
+        bf._bottom = frame._bottom
+        bf._left = (frame._buttonSide == "right")
+            and ((frame._left or 0) + (frame._w or 0))
+            or  ((frame._left or 0) - (bf._w or 0))
+        bf:Show()                       -- THE RE-SHOW
+    end
+    return frame._buttonSide
+end
+_G.FCF_UpdateButtonSide = function(frame)
+    record("FCF_UpdateButtonSide")
+    if type(frame) ~= "table" then return nil end
+    local width = (type(frame.buttonFrame) == "table" and frame.buttonFrame._w)
+        or Sim.BUTTON_FRAME_WIDTH
+    local side = ((frame._left or 0) < width) and "right" or "left"
+    return _G.FCF_SetButtonSide(frame, side)
+end
+
 _G.FloatingChatFrame_Update = function(id)
     record("FloatingChatFrame_Update")
     local w, f = W(id), Sim.Frame(id)
     if not (w and f) then return end
     f._projectedName = w.name
     f._shown = w.shown and true or false
+    -- The client re-evaluates the button side (and re-shows the column) on its
+    -- own window-update beat.
+    _G.FCF_UpdateButtonSide(f)
 end
-_G.FCF_DockUpdate = function() record("FCF_DockUpdate") end
+_G.FCF_DockUpdate = function()
+    record("FCF_DockUpdate")
+    for id = 1, _G.NUM_CHAT_WINDOWS do
+        local f = Sim.Frame(id)
+        if f then _G.FCF_UpdateButtonSide(f) end
+    end
+end
 
 _G.FCF_SetWindowName = function(frame, name)
     record("FCF_SetWindowName")

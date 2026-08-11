@@ -655,8 +655,16 @@ do
     geo:SetClampRectInsets(0, 0, 0, 0)
     geo:StartMoving()
     local dl2 = Sim.DragTo(geo, -200, -200)
-    ck(dl2 == 0, "…and a loosened clamp lets the very same drag reach the edge")
+    ck(dl2 == Sim.BUTTON_FRAME_WIDTH,
+        "…a loosened clamp still leaves the BUTTON COLUMN in the way of the edge")
+    geo.buttonFrame:Hide()
+    local dl3 = Sim.DragTo(geo, -200, -200)
+    ck(dl3 == 0, "…and with the column down the very same drag reaches the edge")
+    ck(select(1, Sim.ColumnFootprint(geo)) == 0, "a column that is down costs nothing")
     geo:StopMovingOrSizing()
+    ck(geo._buttonSide == "right",
+        "THE ACCOUNT DIFFERENCE: a window flush left gets its column flipped RIGHT")
+    ck(geo.buttonFrame._shown == true, "…and the client RE-SHOWS it while doing so")
 
     local pxW = _G.UIParent:GetWidth() * _G.UIParent:GetEffectiveScale()
     Sim.SetUIScale(1.0)
@@ -665,6 +673,7 @@ do
     ck(_G.UIParent:GetWidth() ~= 1920 / gScale, "…while UIParent's UNIT width really moved")
     Sim.SetUIScale(gScale)
     geo._left, geo._bottom, geo._clampInsets = gL, gB, nil
+    _G.FCF_UpdateButtonSide(geo)                 -- the column back where the client wants it
 
     local geb = _G.ChatFrame6EditBox
     ck(geb and geb._shown == false, "the attached edit box starts HIDDEN (chatStyle 'classic')")
