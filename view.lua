@@ -2023,13 +2023,34 @@ end
 -- between it and the --panel2 field — the same seam the entry bar already uses
 -- against the feed, so the entry row speaks one language top and left.
 --
--- THE LABEL IS THE CLIENT'S. `ChatFrame<n>EditBoxHeader` is the FontString the
--- client writes "Say:" / "2. Trade:" into, and skin.lua already inks it in the
--- channel's colour and rewrites it to the channel's ALIAS on the client's own
--- ChatEdit_UpdateHeader beat. We move it into the chip and measure it. We do
--- not write it: a second author for that string would be a second answer to
--- "what is this channel called", which is the exact fork the alias seam exists
--- to prevent. Its original anchor is saved, and restored with the box.
+-- THE LABEL IS RESOLVED, NOT MIRRORED (owner defect, 2026-08-12). The first
+-- build made the chip's label the CLIENT's own header FontString
+-- (`ChatFrame<n>EditBoxHeader`) — whatever string the client had just written
+-- into it. That is wrong twice over, and the owner hit both at once:
+--
+--   * the client's word for a channel is its LONG form. `GetChannelName`
+--     answers "General - Stormwind City", so the prefix the client writes is
+--     "5. General - Stormwind City:" — the chip read that verbatim and the
+--     owner's nickname ("ZONE") never appeared, because skin.lua's alias
+--     rewrite only fires when an alias EXISTS and nothing shortened the rest;
+--   * the chip is SIZED from its label, so that same long string pushed the
+--     typing field's left edge — and therefore the caret — most of the way to
+--     the middle of the bar. "text appears to start in the middle" was the
+--     chip being that wide, with its label sitting at its left padding.
+--
+-- So the chip resolves the channel's IDENTITY (number + name, through skin's
+-- own reader) and renders OUR word for it via `Config.ChannelLabel` — alias
+-- first, the client's SHORT name otherwise. One spelling authority, the same
+-- one the chat line and the tab label ask; nothing here knows how an alias is
+-- stored or whether the number is kept. For every other chat type the client's
+-- own prefix ("Say:", "To Puu:") is already short and localised, so that is
+-- what the chip shows.
+--
+-- The client's header FontString still travels into the chip, so the client's
+-- prefix can never reappear inside the typing field — but it rides at ALPHA 0
+-- (the same channel the stock-dress strip uses, because the client re-SHOWS its
+-- own regions and never writes their alpha). Its original anchor and alpha are
+-- saved, and restored with the box.
 ----------------------------------------------------------------------
 
 local function editBoxHeaderOf(eb)
@@ -2060,7 +2081,11 @@ function View.EnsureEntryChip()
     -- The seam against the typing field.
     local seam = call(btn, "CreateTexture", nil, "OVERLAY")
     paint(seam, "lineSoft", 1)
-    btn._fill, btn._hover, btn._seam = fill, hover, seam
+    -- OUR OWN LABEL (2026-08-12). The chip draws the word this file resolves,
+    -- not the string the client happened to leave in its header — see the
+    -- section note above for what mirroring it cost.
+    local label = call(btn, "CreateFontString", nil, "OVERLAY")
+    btn._fill, btn._hover, btn._seam, btn._label = fill, hover, seam, label
     call(btn, "RegisterForClicks", "LeftButtonUp", "RightButtonUp")
     btn:SetScript("OnEnter", function() call(hover, "Show") end)
     btn:SetScript("OnLeave", function() call(hover, "Hide") end)
@@ -2069,9 +2094,10 @@ function View.EnsureEntryChip()
     return btn
 end
 
--- What the chip is currently labelled — the client's own header text, which is
--- what makes "the header follows /2" true for free.
-function View.ChipLabel()
+-- The client's own prefix, whatever it currently says. The fallback for every
+-- chat type that is not a channel — the client's word there is already short
+-- and already localised, so re-spelling it would only invent a second answer.
+local function clientPrefix()
     local home = View._ebHome
     local hdr = home and editBoxHeaderOf(home.eb)
     if not hdr or type(hdr.GetText) ~= "function" then return nil end
@@ -2079,15 +2105,65 @@ function View.ChipLabel()
     return (ok and type(t) == "string" and t ~= "") and t or nil
 end
 
--- The chip's width: the label, measured, plus its padding — with the SAME
--- faceless-string fallback the tab run carries, because a FontString the
--- client never gave a face measures a flat 0 (the sim's unkind width model,
--- and the reason a layout must never size from a lone GetStringWidth).
+-- What the chip says. For a CHANNEL this RESOLVES the target and asks the one
+-- spelling authority (Config.ChannelLabel: alias first, the client's short name
+-- otherwise) — so the owner's nickname shows in every chip state, and the
+-- client's zone-suffixed long form shows in none of them. Everything else is
+-- the client's own prefix, which keeps "the header follows /2" true for free.
+--
+-- HOOK-ORDER INDEPENDENT ON PURPOSE. Reading the header's TEXT would make this
+-- answer depend on whether skin.lua's alias rewrite (a post-hook on the same
+-- client verb) had already run this beat — and that order is decided by which
+-- module was enabled first, which is not a contract (Class 2). Resolving from
+-- the attributes cannot be raced.
+function View.ChipLabel()
+    local eb = View._ebHome and View._ebHome.eb
+    local chatType = View.CurrentChatTarget()
+    if chatType == "CHANNEL" and type(eb) == "table" then
+        local C, S = ns.Config, ns.Skin
+        if C and type(C.ChannelLabel) == "function"
+            and S and type(S.EditBoxChannelTarget) == "function" then
+            local ok, num, name = pcall(S.EditBoxChannelTarget, eb)
+            if ok and type(name) == "string" and name ~= "" then
+                local label = C.ChannelLabel(num, name)
+                if type(label) == "string" and label ~= "" then return label .. ":" end
+            end
+        end
+    end
+    return clientPrefix()
+end
+
+-- The ink the chip's label wears: the channel's own colour for a channel, the
+-- chat type's for everything else, and our --text when the client would not
+-- say. Same readers skin.lua's header ink uses — no second colour table.
+function View.ChipInk()
+    local eb = View._ebHome and View._ebHome.eb
+    local S = ns.Skin
+    local chatType, target = View.CurrentChatTarget()
+    if S and type(chatType) == "string" then
+        local r, g, b
+        if chatType == "CHANNEL" and type(S.ChannelColorOf) == "function" then
+            local ok, cr, cg, cb = pcall(S.ChannelColorOf, target)
+            if ok then r, g, b = cr, cg, cb end
+        elseif type(S.TypeColor) == "function" then
+            local ok, cr, cg, cb = pcall(S.TypeColor, chatType)
+            if ok then r, g, b = cr, cg, cb end
+        end
+        if type(r) == "number" then return r, g, b end
+    end
+    return View.Ink("text")
+end
+
+-- The chip's width: the label, measured on OUR FontString, plus its padding —
+-- with the SAME faceless-string fallback the tab run carries, because a
+-- FontString the client never gave a face measures a flat 0 (the sim's unkind
+-- width model, and the reason a layout must never size from a lone
+-- GetStringWidth).
 function View.ChipWidth()
-    local home = View._ebHome
-    local hdr = home and editBoxHeaderOf(home.eb)
+    local chip = View.entryChip
+    local fs = chip and chip._label
     local text = View.ChipLabel() or ""
-    local w = hdr and widgetNum(hdr, "GetStringWidth") or nil
+    local w = fs and widgetNum(fs, "GetStringWidth") or nil
     if not w or w <= 0 then
         w = #text * View.MessageFontSize(nil) * CHIP_CHAR_W
     end
@@ -2104,6 +2180,18 @@ function View.LayoutEntryChip()
     if not (home and View.entry) then return nil end
     local chip = View.EnsureEntryChip()
     if not chip then return nil end
+    -- THE LABEL FIRST, because the chip is sized from what it says. Face, text
+    -- and ink all land before a single width is read.
+    local fs = chip._label
+    if fs then
+        local UI = UIKit()
+        if UI and type(UI.FontFile) == "function" then
+            call(fs, "SetFont", UI.FontFile(), View.MessageFontSize(nil), "")
+        end
+        call(fs, "SetText", View.ChipLabel() or "")
+        local r, g, b = View.ChipInk()
+        if r then call(fs, "SetTextColor", r, g, b, 1) end
+    end
     local w = View.ChipWidth()
     call(chip, "ClearAllPoints")
     call(chip, "SetSize", w, EB_HEIGHT)
@@ -2115,13 +2203,28 @@ function View.LayoutEntryChip()
     call(chip._seam, "ClearAllPoints")
     call(chip._seam, "SetSize", SEAM_W, EB_HEIGHT)
     call(chip._seam, "SetPoint", "TOPRIGHT", chip, "TOPRIGHT", 0, 0)
-    -- THE HEADER, MOVED. Its home anchor is saved on the first move only, so a
-    -- re-layout can never record our own anchor as the client's.
+    if fs then
+        call(fs, "ClearAllPoints")
+        call(fs, "SetPoint", "LEFT", chip, "LEFT", CHIP_PAD_X, 0)
+        call(fs, "Show")
+    end
+    -- THE CLIENT'S HEADER, MOVED AND MUTED. It travels into the chip so the
+    -- client's own prefix can never draw itself inside the typing field, and it
+    -- rides at ALPHA 0 because our label is the one the player reads. Alpha, not
+    -- Hide: the client re-SHOWS its own regions on every activate and never
+    -- writes their alpha (the stock-dress lesson, one seam over). Its home
+    -- anchor and alpha are saved on the FIRST move only, so a re-layout can
+    -- never record our own values as the client's.
     local hdr = editBoxHeaderOf(home.eb)
     if hdr then
         if home.headerPoints == nil then home.headerPoints = savePoints(hdr) or false end
+        if home.headerAlpha == nil then
+            local a = widgetNum(hdr, "GetAlpha")
+            home.headerAlpha = (type(a) == "number") and a or 1
+        end
         call(hdr, "ClearAllPoints")
         call(hdr, "SetPoint", "LEFT", chip, "LEFT", CHIP_PAD_X, 0)
+        call(hdr, "SetAlpha", 0)
         call(hdr, "Show")
     end
     call(chip, "Show")
@@ -2179,6 +2282,8 @@ local function releaseEditBox()
     View.RestoreEditBoxDress(eb)
     local hdr = editBoxHeaderOf(eb)
     if hdr and home.headerPoints then restorePoints(hdr, home.headerPoints) end
+    -- …and the ink we took off it. Exactly what we recorded, and only that.
+    if hdr and home.headerAlpha ~= nil then call(hdr, "SetAlpha", home.headerAlpha) end
     if View.entryChip then call(View.entryChip, "Hide") end
     call(eb, "SetParent", home.parent)
     restorePoints(eb, home.points)
@@ -2299,9 +2404,10 @@ end
 -- THE HEADER IS UNCONDITIONAL (2026-08-12). The box's own shown state has an
 -- early out — under chatStyle 'im' the client never hid it and there is nothing
 -- to take back — but the client hides the HEADER on deactivate under BOTH
--- styles. With the header merely a prefix that was a cosmetic blink; now it is
--- the chip's label, and an empty chip after every Escape is a defect. So the
--- header is re-shown on every deactivate regardless of what the box did.
+-- styles, so the re-show happens regardless of what the box did. The chip's
+-- own label no longer depends on it (the chip draws OUR FontString now), which
+-- is why an Escape can no longer blank the indicator at all; this keeps the
+-- client's own region in the state the client's next beat expects to find it.
 function View.KeepEditBoxShown(eb)
     if not View.active then return false end
     local home = View._ebHome
@@ -5217,11 +5323,12 @@ local function testLive(fails, verbose)
         local nowT, nowN = View.CurrentChatTarget()
         ck(nowT == "CHANNEL" and tonumber(nowN) == firstNum,
             "phase 20: …read back through the client's own accessors")
-        -- SAME BEAT: the header text (and therefore the chip's label) already
-        -- names the new channel — nothing here schedules a repaint.
-        ck(tostring(View.ChipLabel()):find(tostring(firstNum) .. ".", 1, true) == 1,
-            "phase 20: RED CONTROL — the chip's label followed IN THE SAME BEAT ("
-            .. tostring(View.ChipLabel()) .. ")")
+        -- SAME BEAT: the chip already names the new channel — nothing here
+        -- schedules a repaint. And it names it in OUR word (the channel's short
+        -- name, since this one has no alias), not the client's numbered prefix.
+        ck(View.ChipLabel() == Cx.ChannelShortName(joined[firstNum]) .. ":",
+            "phase 20: RED CONTROL — the chip's label followed IN THE SAME BEAT, resolved "
+            .. "rather than mirrored (" .. tostring(View.ChipLabel()) .. ")")
         Sim.SetGroupState{ inParty = false, inRaid = false }
         ck(View.RunChannelMenuItem("party") == false,
             "phase 20: an unavailable row refuses rather than pretending")
@@ -5241,6 +5348,142 @@ local function testLive(fails, verbose)
         ck(cfgBefore == cfgAfter,
             "phase 20: RED CONTROL — retargeting the edit box writes NOTHING to the "
             .. "config (a chat target is client state, not a synced setting)")
+
+        -- ── 20f-bis: THE INDICATOR SAYS WHAT THE OWNER CALLED IT, AND THE
+        -- CARET STARTS WHERE THE MOCKUP PUTS IT (owner defects, 2026-08-12).
+        --
+        -- Two complaints, ONE mechanism. The chip used to MIRROR the client's
+        -- header string — and the client's word for a channel is its LONG form,
+        -- "5. General - Stormwind City:". So the indicator ignored the owner's
+        -- nickname, and, because the chip is SIZED from its label, that long
+        -- string pushed the field's left edge (and the caret with it) most of
+        -- the way to the middle of the bar: "text appears to start in the
+        -- middle". Resolving the target and rendering our own word fixes both.
+        --
+        -- THE UNKINDNESS THE RIG WAS MISSING: every channel the sim seeds is
+        -- already short ("General", "World"), so no headless state had ever
+        -- produced the client's long form. It is produced here, on the client's
+        -- own name for a joined channel, which is where it comes from live.
+        do
+            local longNum = firstNum
+            local chObj = Sim.serverChannels[longNum]
+            local realName = chObj and chObj.name
+            ck(type(realName) == "string", "phase 20: the rig can name channel " .. tostring(longNum))
+            local LONG = "General - Stormwind City"
+            chObj.name = LONG
+
+            View.SetChatTarget("CHANNEL", longNum)
+            local hdrFS = View.EditBoxHeaderOf(eb20)
+            local hdrText = (hdrFS and hdrFS:GetText()) or ""
+            ck(hdrText:find(LONG, 1, true) ~= nil,
+                "phase 20: RED CONTROL — the CLIENT's own prefix really is the zone-suffixed "
+                .. "long form (" .. hdrText .. ")")
+            ck(View.ChipLabel() == "General:",
+                "phase 20: …and the chip says the channel's SHORT name, never the zone ("
+                .. tostring(View.ChipLabel()) .. ")")
+            ck(hdrFS:GetAlpha() == 0,
+                "phase 20: …with the client's own prefix muted to alpha 0, so there is exactly "
+                .. "ONE word on the entry row")
+
+            -- SIZED FROM OUR LABEL. Against the mirroring build these two are
+            -- equal — which is the whole defect, in one comparison.
+            local m20i = View.Metrics()
+            local mirroredW = (hdrFS:GetStringWidth() or 0) + 2 * m20i.chipPadX
+            ck(View.ChipWidth() < mirroredW - 1,
+                "phase 20: RED CONTROL — the chip is sized to OUR label, not to the client's "
+                .. "long prefix (" .. View.ChipWidth() .. " vs " .. mirroredW .. ")")
+
+            -- THE CARET, PINNED. It starts at the chip, the seam and the
+            -- mockup's own entry padding — in every state the owner named.
+            local function caretOffset()
+                local el = Sim.ResolveRect(eb20)
+                local entryL = Sim.ResolveRect(View.entry)
+                local il = select(1, eb20:GetTextInsets())
+                if not (el and entryL and il) then return nil end
+                return el + il - entryL
+            end
+            -- TWO CLAIMS PER STATE, and they are different claims. The first is
+            -- the arithmetic: the caret starts one chip, one seam and one
+            -- EB_PAD_X in, so the client's own inset rewrite never gets the last
+            -- word. That one is satisfied by ANY chip width, which is exactly
+            -- why the second exists — the OWNER's claim, in absolute units: the
+            -- caret must sit LEFT of where the client's own long prefix would
+            -- have put it. Against the mirroring build the two are the same
+            -- place, and that is the defect, measured.
+            local function pinCaret(what)
+                local want = View.ChipWidth() + m20i.seam + m20i.entryPadX
+                local got = caretOffset()
+                ck(got ~= nil and math.abs(got - want) < 1e-6,
+                    "phase 20: CARET START — " .. what .. " (want " .. tostring(want)
+                    .. ", got " .. tostring(got) .. ")")
+                ck(got ~= nil and got < mirroredW,
+                    "phase 20: CARET START, THE OWNER'S CLAIM — " .. what .. ": the typed line "
+                    .. "begins LEFT of the client's own long prefix, not adrift toward the "
+                    .. "middle of the bar (" .. tostring(got) .. " < " .. tostring(mirroredW) .. ")")
+            end
+            pinCaret("first activation of the channel")
+            -- BELT AND BRACES. The post-hook wins the header beat, but a client
+            -- that rewrote the insets from some beat we never hooked would leave
+            -- the caret adrift until something else happened. Every layout beat
+            -- re-asserts them, so an inset write from ANYWHERE is temporary.
+            eb20:SetTextInsets(200, 13, 0, 0)
+            View.ApplyEditBox()
+            pinCaret("after an unhooked inset write, re-asserted by the layout beat")
+            _G.ChatEdit_OnEscapePressed(eb20)
+            pinCaret("after Escape")
+            ck(View.ChipLabel() == "General:",
+                "phase 20: …and Escape leaves the chip LABELLED (our FontString, not the "
+                .. "client's hidden header)")
+            _G.ChatEdit_ActivateChat(eb20)
+            pinCaret("after re-activation")
+
+            -- THE OWNER'S NICKNAME. One write to the one seam and the chip says
+            -- it — in every state, and in the channel's own ink.
+            Cx.SetAlias(LONG, "ZONE")
+            View.SyncEntryChip()
+            ck(View.ChipLabel() == "ZONE:",
+                "phase 20: RED CONTROL — the chip wears the owner's NICKNAME (got "
+                .. tostring(View.ChipLabel()) .. ")")
+            pinCaret("aliased")
+            local lr, lg, lb = View.ChipInk()
+            local kr, kg, kb = ns.Skin.ChannelColorOf(longNum)
+            ck(lr and kr and math.abs(lr - kr) < 1e-9 and math.abs(lb - kb) < 1e-9,
+                "phase 20: …inked in THAT channel's own colour, from skin's reader")
+            local fsLabel = chip._label
+            ck(fsLabel and fsLabel:GetText() == "ZONE:",
+                "phase 20: …and it is actually WRITTEN onto the chip's own FontString")
+
+            -- The alias may equally have been written against the SHORT name
+            -- (which is what the chat line's own display text carries), and the
+            -- chip must find it either way — one channel, one nickname.
+            Cx.SetAlias(LONG, "")
+            Cx.SetAlias("General", "ZONE2")
+            View.SyncEntryChip()
+            ck(View.ChipLabel() == "ZONE2:",
+                "phase 20: RED CONTROL — an alias stored against the SHORT name lights the "
+                .. "chip up too (got " .. tostring(View.ChipLabel()) .. ")")
+            Cx.SetAlias("General", "")
+
+            -- …and through a typed switch, a picker pick and BOTH chat styles.
+            eb20:SetAttribute("chatType", "SAY")
+            _G.ChatEdit_UpdateHeader(eb20)
+            pinCaret("after a typed /say switch")
+            View.SetChatTarget("CHANNEL", longNum)
+            pinCaret("after a picker pick")
+            local styleWas = Sim.cvars.chatStyle
+            for _, style in ipairs({ "classic", "im" }) do
+                Sim.cvars.chatStyle = style
+                _G.ChatEdit_DeactivateChat(eb20)
+                pinCaret("chatStyle " .. style .. ", after deactivate")
+                _G.ChatEdit_ActivateChat(eb20)
+                pinCaret("chatStyle " .. style .. ", after activate")
+                ck(View.ChipLabel() == "General:",
+                    "phase 20: …chatStyle " .. style .. " leaves the chip labelled")
+            end
+            Sim.cvars.chatStyle = styleWas
+            chObj.name = realName
+            View.SetChatTarget("SAY")
+        end
 
         -- ── 20g: ONE MENU, TWO CONSUMERS. ───────────────────────────────
         local tabId20 = View.ids[1]

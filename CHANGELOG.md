@@ -45,6 +45,21 @@ for after the first proper look at it.
   boxes — Player Messages, Combat, PvP, Creature Messages, Other — each with two
   columns of checkboxes inside, in our colours.
 
+### The channel button says what you called it, and typing starts where it should
+
+- **The channel button now shows your nickname, and what you type starts right
+  beside it.** It was showing the game's full name for a channel — "5. General -
+  Stormwind City" — which ignored your rename and, because the button is sized to
+  its own text, pushed the typing cursor most of the way to the middle of the bar.
+  Both were the same thing, and both are fixed: the button works out which channel
+  you are pointed at and writes *your* name for it, in that channel's colour,
+  falling back to the channel's short name when you have not renamed it.
+- **A rename that is just the name in capitals saves now** — "TRADE" for Trade
+  was being read as putting the greyed placeholder back and thrown away, which is
+  why LFG, OYFE and ZONE all stuck and TRADE alone did not. Only the placeholder
+  exactly as shown still clears a rename. The gap between the timestamp and the
+  message is also tighter — one space instead of four.
+
 ### The typing bar is ours now, and the channel name is a button
 
 The one strip of the chat window still wearing Blizzard's art was the strip you

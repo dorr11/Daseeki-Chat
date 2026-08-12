@@ -1600,11 +1600,14 @@ function Skin.UpdateDivider(frame)
     local unified = Skin.Unified()
     local x
     if unified then
-        -- THE MOCKUP: `.msgs .row{gap:8px}` puts 8px each side of the 1px
-        -- `.stampline`. A chat line is one string in one FontString, so the
-        -- room right of the hairline is whatever stamps' separator spells —
-        -- the hairline is CENTRED in it, which splits the gap evenly and lands
-        -- on 8/8 as closely as the face's space advance allows.
+        -- THE MOCKUP ROW, AMENDED (owner, 2026-08-12). `.msgs .row{gap:8px}`
+        -- asked for 8px each side of the 1px `.stampline`, and stamps spelled
+        -- that as a four-space run — which is the gap the owner asked to close
+        -- ("reduce the space between the time and actual message"). The
+        -- separator is ONE space now, so the mockup's 8/8 air is deliberately
+        -- NOT met; the hairline still centres in whatever the separator spells,
+        -- which is the mechanism, and the mechanism is unchanged. A chat line is
+        -- one string in one FontString, so the separator IS the gap.
         local body = Skin.MeasureText(frame, rec, Skin.StampBody())
         local sep  = Skin.MeasureText(frame, rec, stampSeparator())
         x = body + math.max(1, (sep - DIV_WIDTH) / 2)
@@ -6018,14 +6021,20 @@ local function testOneBox(fails, verbose)
         "V8b: …which matters, because that window's chassis IS hidden (one box per dock)")
     ck(recD1.stampProbe and recD1.stampProbe._parent == cf1,
         "V8b: …and so does the measuring probe")
-    -- THE MOCKUP'S `.stampline`: --line-soft, and centred in the separator so
-    -- the 8px-each-side gap is split evenly.
+    -- THE MOCKUP'S `.stampline`: --line-soft, and centred in whatever the
+    -- separator spells — measured THROUGH stamps' published constant, so the
+    -- owner's 2026-08-12 tightening (four spaces -> one) moves the hairline with
+    -- it instead of leaving this pin asserting a gap nothing writes any more.
     ck(near3(recD1.divider._color, hex3(0x3a1512)),
         "V8b: the hairline is the mockup's --line-soft #3a1512")
     ck(recD1.divider._color[4] == 1, "V8b: …solid, as the mockup draws it")
+    local stampSep = (ns.Stamps and ns.Stamps.Separator and ns.Stamps.Separator()) or " "
+    ck(stampSep == " ",
+        "V8b: the separator this build measures is the owner's ONE space (got "
+        .. ("%q"):format(stampSep) .. ")")
     local bodyW = Skin.MeasureText(cf1, recD1, Skin.StampBody())
-    local sepW  = Skin.MeasureText(cf1, recD1, "    ")
-    ck(math.abs(recD1.dividerX - (bodyW + (sepW - 1) / 2)) < 1e-6,
+    local sepW  = Skin.MeasureText(cf1, recD1, stampSep)
+    ck(math.abs(recD1.dividerX - (bodyW + math.max(1, (sepW - 1) / 2))) < 1e-6,
         "V8b: …and it sits CENTRED in the stamp separator (equal air either side)")
     ck(Skin.StampBody():find("%[") == nil,
         "V8b: the shipped stamp column is BARE (`.stamp` carries no brackets)")
