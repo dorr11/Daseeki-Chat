@@ -1160,6 +1160,11 @@ local function makeChatFrame(id)
     -- reaches for, and the $parentHeader global the template names) so an addon
     -- that defends either shape is exercised honestly.
     eb.header = newWidget("FontString", name .. "EditBoxHeader", eb)
+    -- The client's OWN long-lived strings are born with a face (the unkind
+    -- width model above only bites strings an ADDON never gave a font to), so
+    -- the header MEASURES — which is what makes the client's inset arithmetic
+    -- below, and anything that sizes a chip from this label, honest.
+    eb.header:SetFont("Fonts\\FRIZQT__.TTF", 12, "")
     eb:SetAttribute("chatType", "SAY")
     eb.chatFrame = f
     -- w2/move sim extension: the client's DEFAULT posture under chatStyle
@@ -1175,9 +1180,22 @@ local function makeChatFrame(id)
     eb._left, eb._bottom = f._left, f._bottom - 30
     eb.header._left, eb.header._bottom = eb._left + 8, eb._bottom + 5
     eb.header._w, eb.header._h = 40, 14
+    -- ── THE STOCK DRESS, IN BOTH CLIENT SHAPES (ui/entry-bar sim extension) ──
+    -- The template names every region `$parent<Suffix>` as a GLOBAL; the modern
+    -- FrameXML the Era client is rebased on ALSO hangs the focus trio off the
+    -- box as parentKey FIELDS, which is the shape the client's own focus
+    -- handler reaches through. Both are modeled, and deliberately NOT
+    -- symmetrically — an addon that defends only one shape must be caught.
     for _, suffix in ipairs({ "Left", "Mid", "Right", "FocusLeft", "FocusMid", "FocusRight" }) do
-        newWidget("Texture", name .. "EditBox" .. suffix, eb)
+        local t = newWidget("Texture", name .. "EditBox" .. suffix, eb)
+        t._w, t._h = 8, 24
     end
+    eb.focusLeft  = _G[name .. "EditBoxFocusLeft"]
+    eb.focusMid   = _G[name .. "EditBoxFocusMid"]
+    eb.focusRight = _G[name .. "EditBoxFocusRight"]
+    -- …and they start HIDDEN, exactly as the template declares them: the focus
+    -- art only exists while the box has focus.
+    eb.focusLeft:Hide(); eb.focusMid:Hide(); eb.focusRight:Hide()
     return f
 end
 
@@ -2085,12 +2103,26 @@ _G.ChatEdit_UpdateHeader = function(editBox)
     local text, info = chatType .. ":", _G.ChatTypeInfo[chatType]
     if chatType == "CHANNEL" then
         local num = editBox:GetAttribute("channelTarget")
-        local ch = num and Sim.serverChannels[num]
+        local ch = num and Sim.serverChannels[tonumber(num) or -1]
         text = ("%s. %s:"):format(tostring(num or "?"), ch and ch.name or "?")
         info = _G.ChatTypeInfo["CHANNEL" .. tostring(num)] or _G.ChatTypeInfo.CHANNEL
+    elseif chatType == "WHISPER" then
+        -- The client names the recipient in the prefix (CHAT_WHISPER_SEND_GET).
+        text = ("To %s:"):format(tostring(editBox:GetAttribute("tellTarget") or "?"))
     end
     header:SetText(text)
+    header:Show()
     if info then header:SetTextColor(info.r, info.g, info.b) end
+    -- ── UNKIND, and the whole hazard for an addon that MOVES this prefix ─────
+    -- The client's own body does not stop at the text: it re-computes the box's
+    -- TEXT INSETS from the header's measured width, so the typed line clears a
+    -- prefix drawn INSIDE the box. Any addon that re-homes the prefix (into a
+    -- chip of its own, say) and sets its own insets ONCE is overwritten on the
+    -- very next sticky change — and a sim that only wrote the text would have
+    -- proven a padding that the live client erases. The magic 13 is the
+    -- client's own right inset.
+    local headerWidth = header:GetStringWidth() or 0
+    editBox:SetTextInsets(headerWidth + 13, 13, 0, 0)
 end
 
 -- ── THE EDIT BOX's OWN SHOW/HIDE MACHINERY (w2/move sim extension) ───────────
@@ -2108,6 +2140,16 @@ _G.ChatEdit_ActivateChat = function(editBox)
     if editBox.header then editBox.header:Show() end
     _G.ChatEdit_UpdateHeader(editBox)
     editBox:SetFocus()
+    -- ── UNKIND: THE FOCUS ART COMES BACK, EVERY TIME (ui/entry-bar) ─────────
+    -- The client's own focus handler SHOWS the focus texture trio on every
+    -- activate. An addon that stripped the stock dress by HIDING those regions
+    -- is undone by this beat on every single click into chat; one that dropped
+    -- their ALPHA is not, because alpha is a channel the client never writes.
+    -- Show/Hide and alpha are modeled as the independent axes they are, so the
+    -- difference between the two strips is visible headless.
+    if editBox.focusLeft  then editBox.focusLeft:Show()  end
+    if editBox.focusMid   then editBox.focusMid:Show()   end
+    if editBox.focusRight then editBox.focusRight:Show() end
     Sim._activeEditBox = editBox
 end
 
@@ -2122,6 +2164,69 @@ _G.ChatEdit_DeactivateChat = function(editBox)
 end
 
 _G.ChatEdit_GetActiveWindow = function() return Sim._activeEditBox end
+
+-- ── WHO THE PLAYER LAST WHISPERED (ui/entry-bar sim extension) ───────────────
+-- The client's own pair, and they start EMPTY: a fresh session has told nobody,
+-- so anything that offers "reply to your last whisper" must earn the target
+-- rather than assume one exists. (An absent accessor is a kinder client; so is
+-- one that always has an answer.)
+Sim.lastToldTarget = nil
+Sim.lastTellTarget = nil
+_G.ChatEdit_GetLastToldTarget = function()
+    record("ChatEdit_GetLastToldTarget")
+    return Sim.lastToldTarget
+end
+_G.ChatEdit_GetLastTellTarget = function()
+    record("ChatEdit_GetLastTellTarget")
+    return Sim.lastTellTarget
+end
+_G.ChatEdit_SetLastToldTarget = function(name)
+    record("ChatEdit_SetLastToldTarget")
+    Sim.lastToldTarget = name
+end
+
+-- ── GROUP AND GUILD MEMBERSHIP (ui/entry-bar sim extension) ──────────────────
+-- The predicates the CLIENT itself uses to decide which chat targets exist
+-- (the register's group-smart send note: IsInGroup / IsInRaid). Modeled as
+-- REAL state a test drives, and starting at the honest default for a character
+-- who just logged in alone and unguilded — so any menu that offers Party, Raid
+-- or Guild has to prove the membership rather than inherit it.
+Sim.group = { inParty = false, inRaid = false, inGuild = false, canOfficer = true }
+
+function Sim.SetGroupState(spec)
+    for k, v in pairs(spec or {}) do Sim.group[k] = v end
+end
+
+_G.IsInGroup = function() record("IsInGroup") return Sim.group.inParty or Sim.group.inRaid end
+_G.IsInRaid  = function() record("IsInRaid")  return Sim.group.inRaid end
+_G.IsInGuild = function() record("IsInGuild") return Sim.group.inGuild end
+_G.GetNumGroupMembers = function()
+    record("GetNumGroupMembers")
+    if Sim.group.inRaid then return 10 end
+    if Sim.group.inParty then return 3 end
+    return 0
+end
+_G.UnitInParty = function() record("UnitInParty") return Sim.group.inParty end
+_G.UnitInRaid  = function()
+    record("UnitInRaid")
+    -- INDEX, not a boolean — and the player's own slot can be 0, which is the
+    -- trap a truthiness test on this return walks straight into.
+    if not Sim.group.inRaid then return nil end
+    return 0
+end
+_G.C_GuildInfo = _G.C_GuildInfo or {}
+_G.C_GuildInfo.CanViewOfficerNote = function()
+    record("C_GuildInfo.CanViewOfficerNote")
+    return Sim.group.canOfficer and true or false
+end
+
+-- The client's LOCALISED chat-type names. Present here so anything that labels
+-- a chat target reads the client's word for it rather than shipping an English
+-- string of its own — and so a locale where these differ is a change of data,
+-- not of code.
+_G.SAY, _G.YELL, _G.PARTY = "Say", "Yell", "Party"
+_G.RAID, _G.GUILD, _G.OFFICER = "Raid", "Guild", "Officer"
+_G.WHISPER = "Whisper"
 
 -- The ENTER path: the client opens (or re-focuses) the frame's edit box.
 _G.ChatFrame_OpenChat = function(text, frame)
@@ -2422,6 +2527,9 @@ function Sim.NewSession()
     Sim._serverEpochBase = Sim._serverEpochBase + 3600
     Sim._channelsPopulated = false
     Sim.serverChannels = {}
+    -- A fresh session has told nobody: the client's last-whisper memory is
+    -- session state, not saved state.
+    Sim.lastToldTarget, Sim.lastTellTarget = nil, nil
     Sim._lastChannelOpAt = -math.huge
     for id = 1, _G.NUM_CHAT_WINDOWS do
         local f = Sim.Frame(id)

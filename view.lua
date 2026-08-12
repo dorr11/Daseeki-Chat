@@ -244,6 +244,17 @@ local MOCKUP_LINE_HEIGHT = 1.45
 local EB_HEIGHT      = 26    -- .entry: 3 + (13.5 * 1.45) + 3  (owner amendment 36 -> 26)
 local EB_PAD_X       = 12    -- .entry padding-left/right
 local EB_PAD_Y       = 3     -- .entry padding-top/bottom      (owner amendment 8 -> 3)
+-- THE CHANNEL CHIP (owner request, 2026-08-12: "the green box should be the
+-- 'channel' and the blue the entry"). The entry row's LEFT SEGMENT — our own
+-- --panel background under the client's sticky header, separated from the
+-- --panel2 field by the same 1-unit --line-soft hairline the entry seam uses.
+-- The mockup has no chip row of its own, so the numbers are the entry bar's
+-- own language re-used: the chip's horizontal padding is the strip's tab
+-- padding halved to the entry's rhythm, and its height IS the entry's.
+local CHIP_PAD_X     = 8     -- the chip's own left/right padding
+local CHIP_MIN_W     = 34    -- …and its floor. Above the bottom-left grip's
+                             -- 13-unit budget on purpose (see LayoutEntryChip)
+local CHIP_CHAR_W    = 0.52  -- fallback glyph advance, the tab run's own share
 local TABRAIL_W      = 112   -- .tabs-side width
 local RAIL_PAD_Y     = 4     -- .tabs-side padding-top/bottom  (owner amendment 8 -> 4)
 local RAIL_PAD_X     = 6     -- .tabs-side padding-left/right
@@ -467,6 +478,7 @@ function View.Metrics()
         msgPadTop = MSG_PAD_TOP, msgPadX = MSG_PAD_X, msgPadBottom = MSG_PAD_BOT,
         rowSpacing = ROW_SPACING,
         entryH = EB_HEIGHT, entryPadX = EB_PAD_X, entryPadY = EB_PAD_Y,
+        chipPadX = CHIP_PAD_X, chipMinW = CHIP_MIN_W,
         railW = TABRAIL_W, railPadY = RAIL_PAD_Y, railPadX = RAIL_PAD_X,
         railRowH = TAB_ROW_H, railTabPadX = RAIL_TAB_PAD_X,
         seam = SEAM_W, underlineH = UL_HEIGHT, underlineInset = UL_INSET,
@@ -987,6 +999,10 @@ end
 View.MENU_W       = 176
 View.MENU_ROW_H   = 20
 View.MENU_PAD     = 3
+-- The channel selector's list carries "12. LookingForGroup" shaped rows, which
+-- the tab menu's width would clip. Wider by the length of a channel name and
+-- its number, not by a round number picked because it looked roomy.
+View.MENU_CHANNEL_W = 220
 
 local function suiteHub() return _G.DaseekiSuite end
 
@@ -1113,22 +1129,61 @@ function View.TabMenuItems(id)
     return items
 end
 
+----------------------------------------------------------------------
+-- ============ THE MENU, GENERALIZED (owner request, 2026-08-12) ============
+--
+-- The tab menu above was the first consumer; the entry bar's CHANNEL SELECTOR
+-- is the second. There is ONE implementation — one frame, one closer, one
+-- Escape handler, one row pool, one open/close pair — and a KIND registry that
+-- says where a menu's item list comes from. A second menu system would be a
+-- second set of answers to "what closes this", which is exactly the kind of
+-- fork the suite pins against (phase 20: both consumers, one frame object).
+--
+-- A KIND is { items = f(ctx) -> item list, width = f() -> units }. An ITEM is
+-- the same shape the tab menu already used — { key, text, enabled, checked,
+-- danger, separator, action } — plus ONE addition the channel list needs:
+-- `rgb = { r, g, b }`, an explicit ink for a row whose colour is not a palette
+-- token (a channel wears the CLIENT's colour for that channel, and that is a
+-- number the palette has never heard of).
+----------------------------------------------------------------------
+
+View.MENU_KINDS = {
+    tab     = { items = function(ctx) return View.TabMenuItems(ctx) end,
+                width = function() return View.MENU_W end },
+    channel = { items = function() return View.ChannelMenuItems() end,
+                width = function() return View.MENU_CHANNEL_W end },
+}
+
+-- One kind's item list, defended: a builder that raises answers an EMPTY menu
+-- rather than taking the click's whole call stack with it.
+function View.MenuItems(kind, ctx)
+    local spec = View.MENU_KINDS[tostring(kind)]
+    if not spec then return {} end
+    local ok, items = pcall(spec.items, ctx)
+    if not ok or type(items) ~= "table" then return {} end
+    return items
+end
+
 -- Run one menu entry by key. The suite drives THIS, so what a test exercises is
--- exactly what a right-click runs.
+-- exactly what a click runs.
 View.menuActions = 0
 
-function View.RunTabMenuItem(id, key)
-    for _, it in ipairs(View.TabMenuItems(id)) do
+function View.RunMenuItem(kind, ctx, key)
+    for _, it in ipairs(View.MenuItems(kind, ctx)) do
         if it.key == key then
             if not it.enabled then return false end
             View.menuActions = View.menuActions + 1
-            View.CloseTabMenu()
+            View.CloseMenu()
             it.action()
             return true
         end
     end
     return nil
 end
+
+-- The tab menu's own names, kept because options.lua, the harness and the tab
+-- button all speak them — and now THIN: every one lands in the shared body.
+function View.RunTabMenuItem(id, key) return View.RunMenuItem("tab", id, key) end
 
 View.menu = nil
 
@@ -1137,7 +1192,7 @@ local function ensureMenu()
     local cf = _G.CreateFrame
     if type(cf) ~= "function" then return nil end
     local UI = UIKit()
-    local ok, f = pcall(cf, "Frame", "DaseekiChatTabMenu", _G.UIParent, "BackdropTemplate")
+    local ok, f = pcall(cf, "Frame", "DaseekiChatMenu", _G.UIParent, "BackdropTemplate")
     if not ok or type(f) ~= "table" then return nil end
     call(f, "SetFrameStrata", "TOOLTIP")
     call(f, "EnableMouse", true)
@@ -1155,7 +1210,7 @@ local function ensureMenu()
         call(closer, "SetFrameStrata", "FULLSCREEN_DIALOG")
         call(closer, "SetAllPoints", _G.UIParent)
         call(closer, "Hide")
-        closer:SetScript("OnClick", function() View.CloseTabMenu() end)
+        closer:SetScript("OnClick", function() View.CloseMenu() end)
         f:SetScript("OnHide", function() call(closer, "Hide") end)
         f._closer = closer
     end
@@ -1166,7 +1221,7 @@ local function ensureMenu()
         call(f, "EnableKeyboard", true)
         call(f, "SetPropagateKeyboardInput", true)
         f:SetScript("OnKeyDown", function(self, key)
-            if key == "ESCAPE" then View.CloseTabMenu() end
+            if key == "ESCAPE" then View.CloseMenu() end
         end)
     end
     f._rows = {}
@@ -1201,12 +1256,21 @@ local function menuRow(f, i)
     return btn
 end
 
-function View.OpenTabMenu(id, anchor)
+-- THE ONE OPEN. Every consumer arrives here: the kind names where the items
+-- come from and how wide the frame is, the anchor says what it hangs off, and
+-- everything below this line is shared by construction rather than by
+-- discipline.
+--
+-- ANCHORING: a menu hung off the tab strip drops DOWNWARD from the tab; one
+-- hung off the entry bar's chip would drop off the bottom of the screen, so a
+-- consumer that wants it to rise says so with `up`. That is the only thing the
+-- two consumers do differently, and it is one boolean rather than one frame.
+function View.OpenMenu(kind, ctx, anchor, up)
     if not View.active then return false end
     local f = ensureMenu()
     if not f then return false end
-    local items = View.TabMenuItems(id)
-    View._menuId = id
+    local items = View.MenuItems(kind, ctx)
+    View._menuKind, View._menuCtx = tostring(kind), ctx
     local y = View.MENU_PAD
     local shown = 0
     for i, it in ipairs(items) do
@@ -1226,27 +1290,45 @@ function View.OpenTabMenu(id, anchor)
                 call(btn, "SetHeight", View.MENU_ROW_H)
                 call(btn._label, "SetText",
                     (it.checked and "\226\128\162 " or "") .. tostring(it.text or ""))
-                local ink = "text"
-                if not it.enabled then ink = "faint"
-                elseif it.danger then ink = "accent"
-                elseif it.checked then ink = "accent" end
-                local r, g, b = View.Ink(ink)
+                -- INK. A disabled row is always faint (the state outranks the
+                -- colour: an unusable Guild row must not read as usable just
+                -- because guild green is pretty). Otherwise an explicit rgb —
+                -- the channel's own client colour — wins over the token.
+                local r, g, b
+                if it.enabled and type(it.rgb) == "table" then
+                    r, g, b = it.rgb[1], it.rgb[2], it.rgb[3]
+                end
+                if not r then
+                    local ink = "text"
+                    if not it.enabled then ink = "faint"
+                    elseif it.danger then ink = "accent"
+                    elseif it.checked then ink = "accent" end
+                    r, g, b = View.Ink(ink)
+                end
                 if r and type(btn._label) == "table" and type(btn._label.SetTextColor) == "function" then
                     pcall(btn._label.SetTextColor, btn._label, r, g, b, 1)
                 end
                 call(btn, "EnableMouse", it.enabled and true or false)
                 local key = it.key
-                btn:SetScript("OnClick", function() View.RunTabMenuItem(View._menuId, key) end)
+                btn:SetScript("OnClick", function()
+                    View.RunMenuItem(View._menuKind, View._menuCtx, key)
+                end)
                 y = y + View.MENU_ROW_H
             end
             call(btn, "Show")
         end
     end
     for i = shown + 1, #f._rows do call(f._rows[i], "Hide") end
-    call(f, "SetSize", View.MENU_W, y + View.MENU_PAD)
+    local spec = View.MENU_KINDS[View._menuKind]
+    local wOk, wide = pcall(spec and spec.width or function() return View.MENU_W end)
+    call(f, "SetSize", (wOk and tonumber(wide)) or View.MENU_W, y + View.MENU_PAD)
     call(f, "ClearAllPoints")
     if type(anchor) == "table" then
-        call(f, "SetPoint", "TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
+        if up then
+            call(f, "SetPoint", "BOTTOMLEFT", anchor, "TOPLEFT", 0, 2)
+        else
+            call(f, "SetPoint", "TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
+        end
     else
         call(f, "SetPoint", "CENTER", _G.UIParent, "CENTER", 0, 0)
     end
@@ -1256,13 +1338,16 @@ function View.OpenTabMenu(id, anchor)
     return true
 end
 
-function View.CloseTabMenu()
+function View.CloseMenu()
     local f = View.menu
     if not f then return false end
     call(f, "Hide")
     if f._closer then call(f._closer, "Hide") end
     return true
 end
+
+function View.OpenTabMenu(id, anchor) return View.OpenMenu("tab", id, anchor) end
+function View.CloseTabMenu() return View.CloseMenu() end
 
 function View.MenuOpen()
     return (View.menu and View.menu._shown) and true or false
@@ -1830,6 +1915,258 @@ local function restorePoints(w, pts)
     end
 end
 
+----------------------------------------------------------------------
+-- ============ THE STOCK EDIT-BOX DRESS (owner request, 2026-08-12) ==========
+--
+-- "can we update the input box as well to not use the default skin?"
+--
+-- The machinery stays the client's (D2 revision, point 4) — but the ART does
+-- not. A reparented edit box brought its gold ChatInputBorder with it, so the
+-- one strip of the owned view still wearing Blizzard's dress was the strip the
+-- player types into.
+--
+-- THE FAMILY. Both client shapes for every row, exactly as the SATELLITE table
+-- does it and for the same reason: the template gives each region a
+-- `$parent<Suffix>` GLOBAL, and the modern FrameXML the Era client is rebased
+-- on also hangs a `parentKey` FIELD off the box. Either may be the one that
+-- exists on a given build, and a region only reachable through the shape we did
+-- not check is a region we do not strip. The suffixes are skin.lua's own
+-- EB_REGIONS list (its shipped, live-verified heritage): the three border
+-- pieces plus the three the client swaps in while the box has focus.
+--
+-- ALPHA, NEVER HIDE — and this is the whole reason the strip holds. The
+-- client's focus handler SHOWS the focus set every time the box gains focus
+-- (the sim models exactly that beat). Hiding those regions would be re-fought
+-- on every click into chat; alpha is a channel the client never writes, so one
+-- pass sticks for the session. Same posture as the engine satellites: what we
+-- changed is RECORDED, and the restore puts back the recorded value rather
+-- than a hopeful 1.
+--
+-- DELIBERATELY NOT IN THE FAMILY: `$parentLanguage`. It is a functional control
+-- (the language dropdown), not dress, and an alpha-0 control is an invisible
+-- click target — strictly worse than the art it would hide. It is left alone.
+----------------------------------------------------------------------
+
+local EB_DRESS = {
+    { fields = { "Left" },                     global = "%sLeft" },
+    { fields = { "Mid" },                      global = "%sMid" },
+    { fields = { "Right" },                    global = "%sRight" },
+    { fields = { "focusLeft",  "FocusLeft" },  global = "%sFocusLeft" },
+    { fields = { "focusMid",   "FocusMid" },   global = "%sFocusMid" },
+    { fields = { "focusRight", "FocusRight" }, global = "%sFocusRight" },
+}
+View.EB_DRESS = EB_DRESS
+
+-- Every stock dress region of one edit box that EXISTS right now. Re-walked on
+-- every pass rather than cached: the focus set is created lazily on some
+-- builds, and a family enumerated once is a family that misses it.
+function View.EditBoxDressOf(eb)
+    local out = {}
+    if type(eb) ~= "table" then return out end
+    local name = (type(eb.GetName) == "function") and select(2, pcall(eb.GetName, eb)) or nil
+    for _, row in ipairs(EB_DRESS) do
+        local w
+        for _, f in ipairs(row.fields) do
+            if type(eb[f]) == "table" then w = eb[f] break end
+        end
+        if type(w) ~= "table" and row.global and type(name) == "string" and name ~= "" then
+            w = _G[row.global:format(name)]
+        end
+        if type(w) == "table" and type(w.SetAlpha) == "function" then out[#out + 1] = w end
+    end
+    return out
+end
+
+-- What we dimmed, and what it was before we did. Keyed by the widget so a
+-- second pass over the same region cannot overwrite the original with our own
+-- zero (the round-trip pin's whole basis).
+View._ebDress = View._ebDress or {}
+
+function View.StripEditBoxDress(eb)
+    local n = 0
+    for _, w in ipairs(View.EditBoxDressOf(eb)) do
+        if View._ebDress[w] == nil then
+            local ok, a = pcall(w.GetAlpha, w)
+            View._ebDress[w] = (ok and type(a) == "number") and a or 1
+        end
+        local ok, a = pcall(w.GetAlpha, w)
+        if not ok or a ~= 0 then
+            call(w, "SetAlpha", 0)
+            n = n + 1
+        end
+    end
+    return n
+end
+
+-- EXACTLY WHAT WE TOOK DOWN, and only that. A region we never recorded is a
+-- region we never touched, so it is not "restored" into a state it was never in.
+function View.RestoreEditBoxDress(eb)
+    local n = 0
+    for _, w in ipairs(View.EditBoxDressOf(eb)) do
+        local was = View._ebDress[w]
+        if was ~= nil then
+            call(w, "SetAlpha", was)
+            View._ebDress[w] = nil
+            n = n + 1
+        end
+    end
+    return n
+end
+
+----------------------------------------------------------------------
+-- ============ THE CHANNEL CHIP (owner request, 2026-08-12) ============
+--
+-- "the green box should be the 'channel' and the blue the entry"
+--
+-- The entry row becomes two segments. The LEFT one is ours: a --panel chip
+-- sized to the client's own sticky header, with a 1-unit --line-soft hairline
+-- between it and the --panel2 field — the same seam the entry bar already uses
+-- against the feed, so the entry row speaks one language top and left.
+--
+-- THE LABEL IS THE CLIENT'S. `ChatFrame<n>EditBoxHeader` is the FontString the
+-- client writes "Say:" / "2. Trade:" into, and skin.lua already inks it in the
+-- channel's colour and rewrites it to the channel's ALIAS on the client's own
+-- ChatEdit_UpdateHeader beat. We move it into the chip and measure it. We do
+-- not write it: a second author for that string would be a second answer to
+-- "what is this channel called", which is the exact fork the alias seam exists
+-- to prevent. Its original anchor is saved, and restored with the box.
+----------------------------------------------------------------------
+
+local function editBoxHeaderOf(eb)
+    if type(eb) ~= "table" then return nil end
+    if type(eb.header) == "table" then return eb.header end
+    local name = (type(eb.GetName) == "function") and select(2, pcall(eb.GetName, eb)) or nil
+    if type(name) == "string" and name ~= "" then return _G[name .. "Header"] end
+    return nil
+end
+View.EditBoxHeaderOf = editBoxHeaderOf
+
+function View.EnsureEntryChip()
+    if View.entryChip then return View.entryChip end
+    local cf = _G.CreateFrame
+    if type(cf) ~= "function" or not View.entry then return nil end
+    local ok, btn = pcall(cf, "Button", nil, View.entry)
+    if not ok or type(btn) ~= "table" then return nil end
+    local fill = call(btn, "CreateTexture", nil, "BACKGROUND")
+    paint(fill, "panel", 1)
+    call(fill, "SetAllPoints", btn)
+    -- The hover wash: the mockup's own `.tab:hover rgba(255,255,255,.04)`, so
+    -- the chip announces itself as clickable in the language the tabs already
+    -- speak rather than inventing a second hover idea.
+    local hover = call(btn, "CreateTexture", nil, "ARTWORK")
+    paint(hover, "text", HOVER_WASH)
+    call(hover, "SetAllPoints", btn)
+    call(hover, "Hide")
+    -- The seam against the typing field.
+    local seam = call(btn, "CreateTexture", nil, "OVERLAY")
+    paint(seam, "lineSoft", 1)
+    btn._fill, btn._hover, btn._seam = fill, hover, seam
+    call(btn, "RegisterForClicks", "LeftButtonUp", "RightButtonUp")
+    btn:SetScript("OnEnter", function() call(hover, "Show") end)
+    btn:SetScript("OnLeave", function() call(hover, "Hide") end)
+    btn:SetScript("OnClick", function(self) View.OpenChannelMenu(self) end)
+    View.entryChip = btn
+    return btn
+end
+
+-- What the chip is currently labelled — the client's own header text, which is
+-- what makes "the header follows /2" true for free.
+function View.ChipLabel()
+    local home = View._ebHome
+    local hdr = home and editBoxHeaderOf(home.eb)
+    if not hdr or type(hdr.GetText) ~= "function" then return nil end
+    local ok, t = pcall(hdr.GetText, hdr)
+    return (ok and type(t) == "string" and t ~= "") and t or nil
+end
+
+-- The chip's width: the label, measured, plus its padding — with the SAME
+-- faceless-string fallback the tab run carries, because a FontString the
+-- client never gave a face measures a flat 0 (the sim's unkind width model,
+-- and the reason a layout must never size from a lone GetStringWidth).
+function View.ChipWidth()
+    local home = View._ebHome
+    local hdr = home and editBoxHeaderOf(home.eb)
+    local text = View.ChipLabel() or ""
+    local w = hdr and widgetNum(hdr, "GetStringWidth") or nil
+    if not w or w <= 0 then
+        w = #text * View.MessageFontSize(nil) * CHIP_CHAR_W
+    end
+    w = w + 2 * CHIP_PAD_X
+    if w < CHIP_MIN_W then w = CHIP_MIN_W end
+    return w
+end
+
+-- Place the chip, move the client's header into it, and hand the rest of the
+-- entry row to the typing field. Idempotent, and cheap enough to run on any
+-- beat that could have changed the label.
+function View.LayoutEntryChip()
+    local home = View._ebHome
+    if not (home and View.entry) then return nil end
+    local chip = View.EnsureEntryChip()
+    if not chip then return nil end
+    local w = View.ChipWidth()
+    call(chip, "ClearAllPoints")
+    call(chip, "SetSize", w, EB_HEIGHT)
+    call(chip, "SetPoint", "TOPLEFT", View.entry, "TOPLEFT", 0, 0)
+    -- ABOVE the field: the edit box is a frame of the client's parented into
+    -- our entry bar, and creation order is not a contract (the strip learned
+    -- that already).
+    call(chip, "SetFrameLevel", (widgetNum(View.entry, "GetFrameLevel") or 1) + 2)
+    call(chip._seam, "ClearAllPoints")
+    call(chip._seam, "SetSize", SEAM_W, EB_HEIGHT)
+    call(chip._seam, "SetPoint", "TOPRIGHT", chip, "TOPRIGHT", 0, 0)
+    -- THE HEADER, MOVED. Its home anchor is saved on the first move only, so a
+    -- re-layout can never record our own anchor as the client's.
+    local hdr = editBoxHeaderOf(home.eb)
+    if hdr then
+        if home.headerPoints == nil then home.headerPoints = savePoints(hdr) or false end
+        call(hdr, "ClearAllPoints")
+        call(hdr, "SetPoint", "LEFT", chip, "LEFT", CHIP_PAD_X, 0)
+        call(hdr, "Show")
+    end
+    call(chip, "Show")
+    return w
+end
+
+-- The one beat everything else calls: re-measure, re-place, re-anchor the
+-- field's left edge to whatever the chip now costs, and take the last word on
+-- the field's insets and ink.
+--
+-- THE INSETS ARE A FIGHT, AND THIS IS WHERE IT IS WON. `ChatEdit_UpdateHeader`
+-- is not only the beat that writes the prefix — the client's own body then
+-- RE-COMPUTES the box's text insets from the header's width, so that the typed
+-- text clears a prefix drawn INSIDE the box. Our prefix is not inside the box
+-- any more (it is in the chip), so the client's arithmetic would shove the
+-- caret a chip's width to the right of where the field starts. This runs from
+-- the post-hook on that same verb: the client makes its decision, we take the
+-- last word inside the same call — the posture the engine hides and the
+-- persistent bar already use, never a timer. (The sim models the client's inset
+-- rewrite; without it the headless suite would have proven nothing here.)
+function View.SyncEntryChip()
+    if not View.active then return false end
+    local w = View.LayoutEntryChip()
+    if not w then return false end
+    local eb = View._ebHome and View._ebHome.eb
+    if type(eb) ~= "table" then return false end
+    call(eb, "ClearAllPoints")
+    call(eb, "SetPoint", "TOPLEFT", View.entry, "TOPLEFT", w + SEAM_W, 0)
+    call(eb, "SetPoint", "BOTTOMRIGHT", View.entry, "BOTTOMRIGHT", 0, 0)
+    -- `.entry{padding:8px 12px}` with the owner's amendment on the vertical —
+    -- the FIELD's padding, measured from the seam, so the typing area reads
+    -- exactly as it did before the chip existed.
+    call(eb, "SetTextInsets", EB_PAD_X, EB_PAD_X, EB_PAD_Y, EB_PAD_Y)
+    -- THE TEXT ON --panel2. The caret is drawn in the text colour on this
+    -- client (there is no separate cursor-colour verb), so one call answers
+    -- both; the selection gets the accent at a wash that leaves the glyphs
+    -- readable. A client without SetHighlightColor simply keeps its own.
+    local tr, tg, tb = View.Ink("text")
+    if tr then call(eb, "SetTextColor", tr, tg, tb, 1) end
+    local ar, ag, ab = View.Ink("accent")
+    if ar then call(eb, "SetHighlightColor", ar, ag, ab, 0.35) end
+    View.chipSyncs = (View.chipSyncs or 0) + 1
+    return true
+end
+
 -- Send the currently hosted box home, exactly as we found it.
 local function releaseEditBox()
     local home = View._ebHome
@@ -1837,6 +2174,12 @@ local function releaseEditBox()
     View._ebHome = nil
     local eb = home.eb
     if type(eb) ~= "table" then return false end
+    -- The dress and the header go back BEFORE the box does: the client's own
+    -- window beat is entitled to find both exactly where it left them.
+    View.RestoreEditBoxDress(eb)
+    local hdr = editBoxHeaderOf(eb)
+    if hdr and home.headerPoints then restorePoints(hdr, home.headerPoints) end
+    if View.entryChip then call(View.entryChip, "Hide") end
     call(eb, "SetParent", home.parent)
     restorePoints(eb, home.points)
     if home.insets then
@@ -1922,7 +2265,7 @@ function View.RetargetEditBox(id)
     call(eb, "SetParent", View.entry)
     View.LayoutEditBox()
     call(eb, "Show")
-    local header = eb.header or _G[(eb.GetName and eb:GetName() or "") .. "Header"]
+    local header = editBoxHeaderOf(eb)
     if header then call(header, "Show") end
     -- The client re-reads its own sticky state and repaints the prefix; the
     -- alias header rides skin.lua's post-hook on the same verb, unchanged.
@@ -1936,32 +2279,265 @@ function View.LayoutEditBox()
     local home = View._ebHome
     if not (home and View.entry) then return false end
     local eb = home.eb
-    call(eb, "ClearAllPoints")
-    call(eb, "SetPoint", "TOPLEFT", View.entry, "TOPLEFT", 0, 0)
-    call(eb, "SetPoint", "BOTTOMRIGHT", View.entry, "BOTTOMRIGHT", 0, 0)
-    -- `.entry{padding:8px 12px}` with the owner's amendment on the vertical.
-    call(eb, "SetTextInsets", EB_PAD_X, EB_PAD_X, EB_PAD_Y, EB_PAD_Y)
+    -- THE STOCK DRESS COMES OFF FIRST, on every layout beat: the strip is
+    -- idempotent (a region already at 0 is left alone and never re-recorded),
+    -- and running it here means a build that creates its focus set lazily is
+    -- caught the first time the box is laid out after the client made it.
+    View.StripEditBoxDress(eb)
     local UI = UIKit()
     if UI and type(UI.FontFile) == "function" then
         call(eb, "SetFont", UI.FontFile(), View.MessageFontSize(nil), "")
     end
+    -- …and the chip, which owns the field's left edge, its insets and its ink.
+    View.SyncEntryChip()
     return true
 end
 
 -- The persistent seam: the client made its hide decision, we take the last
 -- word inside the same call. Never a timer, never a poll.
+--
+-- THE HEADER IS UNCONDITIONAL (2026-08-12). The box's own shown state has an
+-- early out — under chatStyle 'im' the client never hid it and there is nothing
+-- to take back — but the client hides the HEADER on deactivate under BOTH
+-- styles. With the header merely a prefix that was a cosmetic blink; now it is
+-- the chip's label, and an empty chip after every Escape is a defect. So the
+-- header is re-shown on every deactivate regardless of what the box did.
 function View.KeepEditBoxShown(eb)
     if not View.active then return false end
     local home = View._ebHome
     if not (home and home.eb == eb) then return false end
+    local header = editBoxHeaderOf(eb)
+    if header then call(header, "Show") end
     if type(eb.IsShown) == "function" then
         local ok, shown = pcall(eb.IsShown, eb)
         if ok and shown then return false end
     end
     call(eb, "Show")
-    local header = eb.header
-    if header then call(header, "Show") end
     return true
+end
+
+----------------------------------------------------------------------
+-- ============ THE CHANNEL SELECTOR (owner request, 2026-08-12) ============
+--
+-- "is it possible to add a channel selector to the green box where if we click
+--  it we see a dropdown of all of the available channels and then we can click
+--  on the one we want to type in?"
+--
+-- WHAT THE MENU OFFERS is decided by the CLIENT's own availability facts, one
+-- predicate per row, and each one is the predicate the client itself uses for
+-- the same question (the register's §7.4 note on group-smart sends names
+-- IsInGroup / IsInRaid outright). Class 5's discipline runs through all of
+-- them: a reader answers nil for "the client would not say", never a hopeful
+-- false, and the caller decides what an unanswerable read means.
+--
+-- WHAT A ROW DOES is the client's attribute machinery and nothing else. The
+-- three lines below — set `chatType`, set the target attribute, call
+-- `ChatEdit_UpdateHeader` — are literally what the client's own
+-- ChatEdit_HandleChatType executes when the player types `/2`, which is why
+-- the header, the alias rewrite, the channel ink and the sticky state all
+-- follow in the same beat with nothing here tracking any of them. We do not
+-- reimplement the switch; we perform it.
+----------------------------------------------------------------------
+
+-- One boolean client read. nil means THE CLIENT WOULD NOT ANSWER (the verb is
+-- absent or raised) — which is a different fact from "no", and the callers
+-- below treat it as one.
+local function boolCall(name, ...)
+    local f = _G[name]
+    if type(f) ~= "function" then return nil end
+    local ok, v = pcall(f, ...)
+    if not ok then return nil end
+    return v and true or false
+end
+
+function View.InParty()
+    local v = boolCall("IsInGroup")
+    if v ~= nil then return v end
+    local n = _G.GetNumGroupMembers
+    if type(n) == "function" then
+        local ok, c = pcall(n)
+        if ok and type(c) == "number" then return c > 0 end
+    end
+    local v2 = boolCall("UnitInParty", "player")
+    if v2 ~= nil then return v2 end
+    return false
+end
+
+function View.InRaid()
+    local v = boolCall("IsInRaid")
+    if v ~= nil then return v end
+    -- UnitInRaid answers an INDEX, not a boolean — and index 0 is a real raid
+    -- slot, so this may not be reduced with a truthiness test on a number.
+    local f = _G.UnitInRaid
+    if type(f) == "function" then
+        local ok, idx = pcall(f, "player")
+        if ok then return idx ~= nil end
+    end
+    return false
+end
+
+function View.InGuild()
+    local v = boolCall("IsInGuild")
+    if v ~= nil then return v end
+    return false
+end
+
+-- Officer chat is RANK-gated, not merely guild-gated. C_GuildInfo carries the
+-- permission accessor on 11509 (catalog-verified) and is asked when it exists;
+-- when it does not, being in a guild is all we can prove, and an unprovable
+-- restriction is not imposed (Class 4: absence of proof is not proof).
+function View.CanOfficer()
+    if not View.InGuild() then return false end
+    local G = _G.C_GuildInfo
+    if type(G) == "table" and type(G.CanViewOfficerNote) == "function" then
+        local ok, v = pcall(G.CanViewOfficerNote)
+        if ok and type(v) == "boolean" then return v end
+    end
+    return true
+end
+
+-- The player the client would re-open a whisper to. Its own accessors, in the
+-- client's own order: who you last TOLD, then who last told you.
+function View.LastWhisperTarget()
+    for _, fn in ipairs({ "ChatEdit_GetLastToldTarget", "ChatEdit_GetLastTellTarget" }) do
+        local f = _G[fn]
+        if type(f) == "function" then
+            local ok, t = pcall(f)
+            if ok and type(t) == "string" and t ~= "" then return t end
+        end
+    end
+    return nil
+end
+
+-- What the hosted box is pointed at right now: the client's accessors first,
+-- the attribute bag second — the same two-shape read skin.lua's header ink uses.
+function View.CurrentChatTarget()
+    local eb = View._ebHome and View._ebHome.eb
+    if type(eb) ~= "table" then return nil, nil end
+    local function attr(accessor, key)
+        local f = _G[accessor]
+        if type(f) == "function" then
+            local ok, v = pcall(f, eb)
+            if ok and v ~= nil and v ~= "" then return v end
+        end
+        local ok, v = pcall(eb.GetAttribute, eb, key)
+        if ok and v ~= nil and v ~= "" then return v end
+        return nil
+    end
+    local t = attr("ChatEdit_GetActiveChatType", "chatType")
+    t = (type(t) == "string" and t ~= "") and t:upper() or nil
+    if t == "CHANNEL" then
+        return t, attr("ChatEdit_GetChannelTarget", "channelTarget")
+    end
+    return t, nil
+end
+
+-- THE RETARGET. Three client calls, in the client's own order.
+View.chatTargets = 0
+
+function View.SetChatTarget(chatType, target)
+    local eb = View._ebHome and View._ebHome.eb
+    if type(eb) ~= "table" or type(chatType) ~= "string" or chatType == "" then
+        return false
+    end
+    chatType = chatType:upper()
+    call(eb, "SetAttribute", "chatType", chatType)
+    if chatType == "CHANNEL" then
+        call(eb, "SetAttribute", "channelTarget", tonumber(target) or target)
+    elseif chatType == "WHISPER" then
+        if target == nil or target == "" then return false end
+        call(eb, "SetAttribute", "tellTarget", tostring(target))
+    end
+    -- The client's own "the player wants this box now" verb: it shows it,
+    -- focuses it and re-derives the header. Then the header beat once more,
+    -- explicitly, so a client whose activate path does not repaint the prefix
+    -- still lands the label in this same call rather than on the next one.
+    local act = _G.ChatEdit_ActivateChat
+    if type(act) == "function" then pcall(act, eb) end
+    local upd = _G.ChatEdit_UpdateHeader
+    if type(upd) == "function" then pcall(upd, eb) end
+    View.chatTargets = View.chatTargets + 1
+    return true
+end
+
+-- THE LIST, AS DATA (the menu framework's contract). Every row carries the
+-- client fact that made it available, so what the suite drives is exactly what
+-- a click runs.
+function View.ChannelMenuItems()
+    local items = {}
+    local S, C = ns.Skin, ns.Config
+    local nowType, nowTarget = View.CurrentChatTarget()
+    local function typeInk(t)
+        if S and type(S.TypeColor) == "function" then
+            local r, g, b = S.TypeColor(t)
+            if r then return { r, g, b } end
+        end
+        return nil
+    end
+    local function row(key, text, enabled, rgb, checked, chatType, target)
+        items[#items + 1] = {
+            key = key, text = text, enabled = enabled and true or false,
+            rgb = rgb, checked = checked and true or false,
+            action = function() View.SetChatTarget(chatType, target) end,
+        }
+    end
+
+    row("say",   _G.SAY   or "Say",   true, typeInk("SAY"),   nowType == "SAY",   "SAY")
+    row("yell",  _G.YELL  or "Yell",  true, typeInk("YELL"),  nowType == "YELL",  "YELL")
+    row("party", _G.PARTY or "Party", View.InParty(), typeInk("PARTY"),
+        nowType == "PARTY", "PARTY")
+    row("raid",  _G.RAID  or "Raid",  View.InRaid(),  typeInk("RAID"),
+        nowType == "RAID",  "RAID")
+    row("guild", _G.GUILD or "Guild", View.InGuild(), typeInk("GUILD"),
+        nowType == "GUILD", "GUILD")
+    row("officer", _G.OFFICER or "Officer", View.CanOfficer(), typeInk("OFFICER"),
+        nowType == "OFFICER", "OFFICER")
+    -- WHISPER names the player it would re-open, because "Whisper" alone does
+    -- not tell you who is about to hear you.
+    local whom = View.LastWhisperTarget()
+    local whisperWord = _G.WHISPER or "Whisper"
+    row("whisper", whom and (whisperWord .. ": " .. whom) or whisperWord, whom ~= nil,
+        typeInk("WHISPER"), nowType == "WHISPER", "WHISPER", whom)
+
+    -- THE JOINED CHANNELS. Read through channels.lua's ONE list reader (the
+    -- defensive GetChannelList parse lives there and is not re-typed here),
+    -- ordered by number — never pairs() (Class 8: the same list twice).
+    local Ch = ns.Channels
+    local byNum = (Ch and type(Ch.ListRead) == "function") and Ch.ListRead() or nil
+    if type(byNum) == "table" then
+        local nums = {}
+        for n in pairs(byNum) do nums[#nums + 1] = n end
+        table.sort(nums)
+        if #nums > 0 then items[#items + 1] = { key = "sep-channels", separator = true } end
+        for _, n in ipairs(nums) do
+            local name = byNum[n]
+            -- ALIAS-AWARE, through the one seam every other surface uses. The
+            -- label may already carry the number (the keep-number option); when
+            -- it does not, the number is prefixed here, because a selector that
+            -- hides the number cannot answer "what does /2 mean on this
+            -- character".
+            local label = (C and type(C.AliasLabel) == "function" and C.AliasLabel(n, name))
+                          or name
+            if not tostring(label):match("^%d") then label = n .. ". " .. label end
+            local rgb
+            if S and type(S.ChannelColorOf) == "function" then
+                local r, g, b = S.ChannelColorOf(n)
+                if r then rgb = { r, g, b } end
+            end
+            row("channel:" .. n, label, true, rgb,
+                nowType == "CHANNEL" and tonumber(nowTarget) == n, "CHANNEL", n)
+        end
+    end
+    return items
+end
+
+function View.RunChannelMenuItem(key) return View.RunMenuItem("channel", nil, key) end
+
+-- The chip's click. It RISES off the entry bar: the bar is at the bottom of the
+-- chassis and the chassis is usually at the bottom of the screen, so a menu
+-- that dropped downward would open off-screen.
+function View.OpenChannelMenu(anchor)
+    return View.OpenMenu("channel", nil, anchor or View.entryChip, true)
 end
 
 ----------------------------------------------------------------------
@@ -2297,6 +2873,10 @@ function View.Reflow()
     -- feed and the floor speaking about different placements.
     View._laidPlacement = View.TabPlacement()
     View.LayoutTabs()
+    -- The entry row's own two segments. The chip is measured from a label the
+    -- client may have rewritten since the last pass, so it re-measures here
+    -- rather than assuming a width it took once.
+    View.SyncEntryChip()
     View.EnsureCopyButton()
     View.LayoutGrips()
     call(f, "Show")
@@ -2641,7 +3221,7 @@ end
 function View.ChassisRegions()
     local out = {}
     local function add(w) if type(w) == "table" then out[#out + 1] = w end end
-    add(View.strip); add(View.entry); add(View.copyBtn)
+    add(View.strip); add(View.entry); add(View.entryChip); add(View.copyBtn)
     for _, id in ipairs(View.ids or {}) do add(View.frames[id]) end
     return out
 end
@@ -2932,6 +3512,22 @@ local function installHooks()
             View.KeepEditBoxShown(editBox)
         end)
     end
+    -- THE HEADER BEAT — the one seam the channel chip rides. Every sticky
+    -- change lands here: our own menu's retarget, the player typing `/2`, a
+    -- tab-cycle, the client's reset-to-sticky after a sent line. The chip
+    -- re-measures itself from whatever the client (and skin.lua's alias
+    -- rewrite, which post-hooks this same verb from the module that loads
+    -- BEFORE this one, so it has already run) left in the header — and takes
+    -- the last word on the box's text insets, which the client's own body
+    -- rewrites from the header's width.
+    if type(_G.ChatEdit_UpdateHeader) == "function" then
+        hook("ChatEdit_UpdateHeader", function(editBox)
+            if not View.active then return end
+            local home = View._ebHome
+            if not (home and home.eb == editBox) then return end
+            View.SyncEntryChip()
+        end)
+    end
 end
 
 ----------------------------------------------------------------------
@@ -3147,6 +3743,9 @@ function View.OnDisable()
     View._dragging = nil
     ns:UnregisterEvent("UPDATE_CHAT_COLOR", View._colorHandler)
     ns:Off("ENTERING_WORLD", View._enteringWorld)
+    -- A menu left open would be a menu of ours over stock chat, whose rows all
+    -- act on a view that no longer owns anything.
+    View.CloseMenu()
     -- The edit box goes home FIRST: it belongs to a client window, and handing
     -- it back before the windows come up means the client's own beat finds it
     -- where it expects it.
@@ -3204,6 +3803,18 @@ ns.RegisterDebugCommand("view", "the owned view: chassis, tabs, mirror, engine",
         tostring(View._ebHome and View._ebHome.eb and View._ebHome.eb.GetName
             and View._ebHome.eb:GetName() or "none"),
         View.moves, View.resizes))
+    do
+        local dressed = 0
+        for _ in pairs(View._ebDress) do dressed = dressed + 1 end
+        local nowType, nowTarget = View.CurrentChatTarget()
+        ns:Print(("  entry: chip \"%s\" %.0f units, %d sync(s); %d stock region(s) at alpha 0")
+            :format(tostring(View.ChipLabel() or "-"), View.ChipWidth(),
+                    View.chipSyncs or 0, dressed))
+        ns:Print(("  target: %s%s | %d retarget(s) from the selector, %d row(s) offered")
+            :format(tostring(nowType or "none"),
+                    nowTarget and (" " .. tostring(nowTarget)) or "",
+                    View.chatTargets, #View.ChannelMenuItems()))
+    end
     do
         local cw = widgetNum(View.chassis, "GetWidth") or 0
         local ch = widgetNum(View.chassis, "GetHeight") or 0
@@ -4111,7 +4722,7 @@ local function testLive(fails, verbose)
         if btn then btn:Click("RightButton") end
         ck(View.MenuOpen() == true,
             "phase 19: RED CONTROL — right-clicking a tab opens the menu")
-        ck(_G.UIDropDownMenu_Initialize == nil or View.menu._name == "DaseekiChatTabMenu",
+        ck(View.menu._name == "DaseekiChatMenu",
             "phase 19: …and it is OUR frame, not the client's dropdown machinery")
         -- A LEFT click is still a tab select, not a menu.
         View.CloseTabMenu()
@@ -4427,8 +5038,313 @@ local function testLive(fails, verbose)
     View.RebuildTabs("phase19-restore")
     if HT then HT.flush() end
 
+    -- ── Phase 20: THE ENTRY BAR — stripped dress + the channel selector. ─
+    -- The owner's screenshot: "the green box should be the 'channel' and the
+    -- blue the entry", and a selector on the green one.
+    do
+        local Cx = ns.Config
+        local eb20 = View._ebHome and View._ebHome.eb
+        ck(type(eb20) == "table", "phase 20: the entry bar hosts a client edit box to dress")
+
+        -- ── 20a: THE STOCK SKIN IS OFF. ──────────────────────────────────
+        local dress = View.EditBoxDressOf(eb20)
+        ck(#dress == 6, "phase 20: the stock dress family is complete — three border "
+            .. "regions and the focus set (" .. #dress .. ")")
+        -- BOTH client shapes are reached: the focus trio is modeled only as a
+        -- parentKey FIELD, the border trio only as a $parent GLOBAL, so a
+        -- family that checked one shape could never answer six.
+        local viaField = 0
+        for _, w in ipairs(dress) do
+            if w == eb20.focusLeft or w == eb20.focusMid or w == eb20.focusRight then
+                viaField = viaField + 1
+            end
+        end
+        ck(viaField == 3, "phase 20: …reached through BOTH client shapes (field and global)")
+        local allZero, anyShown = true, false
+        for _, w in ipairs(dress) do
+            if w:GetAlpha() ~= 0 then allZero = false end
+        end
+        ck(allZero, "phase 20: RED CONTROL — every stock region is at alpha 0")
+        -- THE UNKIND BEAT: the client re-SHOWS the focus art on every activate.
+        -- An addon that had HIDDEN the dress would be undone right here.
+        _G.ChatEdit_ActivateChat(eb20)
+        for _, w in ipairs(dress) do if w._shown then anyShown = true end end
+        ck(anyShown, "phase 20: the client's focus beat really does show its art again")
+        local stillZero = true
+        for _, w in ipairs(dress) do if w:GetAlpha() ~= 0 then stillZero = false end end
+        ck(stillZero, "phase 20: RED CONTROL — …and the strip SURVIVES it (alpha is a "
+            .. "channel the client never writes, which is why it is alpha and not Hide)")
+
+        -- ── 20b: THE FIELD'S OWN PADDING, against the client's arithmetic. ─
+        -- ChatEdit_UpdateHeader re-computes the box's insets from the header
+        -- width. Our prefix is not inside the box any more, so the client's
+        -- answer is wrong for us and we take the last word in the same call.
+        _G.ChatEdit_UpdateHeader(eb20)
+        local i20 = { eb20:GetTextInsets() }
+        ck(i20[1] == 12 and i20[2] == 12 and i20[3] == 3 and i20[4] == 3,
+            "phase 20: RED CONTROL — the field keeps the mockup's insets THROUGH the "
+            .. "client's own inset rewrite (got " .. table.concat(i20, "/") .. ")")
+
+        -- ── 20c: THE CHIP. ───────────────────────────────────────────────
+        local chip = View.entryChip
+        ck(type(chip) == "table", "phase 20: the entry row has a channel chip of ours")
+        ck(chip._parent == View.entry, "phase 20: …living in the entry bar")
+        local cr = chip._fill and chip._fill._color
+        local pr20, pg20, pb20 = View.Ink("panel")
+        ck(cr and math.abs(cr[1] - pr20) < 1e-9 and math.abs(cr[3] - pb20) < 1e-9,
+            "phase 20: …painted --panel, a step off the field's --panel2")
+        local sr = chip._seam and chip._seam._color
+        local lr20, lg20, lb20 = View.Ink("lineSoft")
+        ck(sr and math.abs(sr[1] - lr20) < 1e-9 and math.abs(sr[3] - lb20) < 1e-9,
+            "phase 20: …with the entry seam's own --line-soft hairline against the field")
+        ck(chip._hover ~= nil and chip._hover._shown == false,
+            "phase 20: …and a hover wash that is quiet until the pointer arrives")
+        chip._scripts.OnEnter(chip)
+        ck(chip._hover._shown == true, "phase 20: hovering the chip lifts the ink (it reads clickable)")
+        chip._scripts.OnLeave(chip)
+        -- Sized to its label, and never narrower than the bottom-left grip's
+        -- own 13-unit budget — a chip a grip could swallow whole would have no
+        -- clickable run at all.
+        local m20 = View.Metrics()
+        ck(View.ChipWidth() >= m20.chipMinW,
+            "phase 20: the chip is sized to its text with a floor under it")
+        ck(m20.chipMinW > m20.gripSize + 1,
+            "phase 20: …a floor that clears the corner grip's budget")
+        local hdr20 = View.EditBoxHeaderOf(eb20)
+        ck(hdr20 ~= nil, "phase 20: the client's own header FontString is the chip's label")
+        local hp = hdr20:GetPoint(1)
+        ck(hdr20._points[1] and hdr20._points[1][2] == chip,
+            "phase 20: …anchored INTO the chip (" .. tostring(hp) .. ")")
+        ck(View._ebHome.headerPoints ~= nil,
+            "phase 20: …with its own home anchor saved for the way back")
+        -- The field starts past the chip and its seam, not at the bar's edge.
+        local ebPt = eb20._points[1]
+        ck(ebPt and ebPt[1] == "TOPLEFT" and math.abs(ebPt[4] - (View.ChipWidth() + m20.seam)) < 1e-6,
+            "phase 20: the typing field begins past the chip and the seam")
+
+        -- THE LABEL FOLLOWS THE CLIENT, not us. Escape deactivates, and the
+        -- client hides the header on deactivate under BOTH chat styles — an
+        -- empty chip after every Escape is the defect that fix exists for.
+        _G.ChatEdit_OnEscapePressed(eb20)
+        ck(hdr20._shown == true,
+            "phase 20: RED CONTROL — Escape leaves the chip LABELLED (the header is "
+            .. "re-shown unconditionally, not only when the box was hidden too)")
+
+        -- ── 20d: THE SELECTOR'S AVAILABILITY PREDICATES. ─────────────────
+        local function itemsByKey()
+            local out = {}
+            for _, it in ipairs(View.ChannelMenuItems()) do out[it.key] = it end
+            return out
+        end
+        Sim.SetGroupState{ inParty = false, inRaid = false, inGuild = false }
+        Sim.lastToldTarget = nil
+        local solo = itemsByKey()
+        ck(solo.say and solo.say.enabled, "phase 20: Say is always on offer")
+        ck(solo.yell and solo.yell.enabled, "phase 20: …so is Yell")
+        ck(solo.party and solo.party.enabled == false,
+            "phase 20: RED CONTROL — alone, PARTY is not offered")
+        ck(solo.raid and solo.raid.enabled == false, "phase 20: …nor RAID")
+        ck(solo.guild and solo.guild.enabled == false, "phase 20: …nor GUILD, unguilded")
+        ck(solo.officer and solo.officer.enabled == false, "phase 20: …nor OFFICER")
+        ck(solo.whisper and solo.whisper.enabled == false,
+            "phase 20: …and WHISPER refuses with nobody to whisper")
+        Sim.SetGroupState{ inParty = true }
+        local party = itemsByKey()
+        ck(party.party.enabled == true, "phase 20: in a party, PARTY is offered")
+        ck(party.raid.enabled == false, "phase 20: …and RAID still is not")
+        Sim.SetGroupState{ inRaid = true }
+        local raid = itemsByKey()
+        ck(raid.raid.enabled == true, "phase 20: in a raid, RAID is offered")
+        ck(raid.party.enabled == true, "phase 20: …and PARTY still is (a raid IS a group)")
+        Sim.SetGroupState{ inGuild = true, canOfficer = false }
+        local guilded = itemsByKey()
+        ck(guilded.guild.enabled == true, "phase 20: in a guild, GUILD is offered")
+        ck(guilded.officer.enabled == false,
+            "phase 20: RED CONTROL — …and OFFICER is RANK-gated, not merely guild-gated")
+        Sim.SetGroupState{ canOfficer = true }
+        ck(itemsByKey().officer.enabled == true, "phase 20: …offered once the rank allows it")
+        _G.ChatEdit_SetLastToldTarget("Puu")
+        local told = itemsByKey()
+        ck(told.whisper.enabled == true and tostring(told.whisper.text):find("Puu", 1, true),
+            "phase 20: WHISPER re-opens the last target, and NAMES them ("
+            .. tostring(told.whisper.text) .. ")")
+
+        -- ── 20e: EVERY JOINED CHANNEL, aliased, inked and numbered. ──────
+        local joined = ns.Channels.ListRead() or {}
+        local nums20 = {}
+        for n in pairs(joined) do nums20[#nums20 + 1] = n end
+        table.sort(nums20)
+        ck(#nums20 > 0, "phase 20: the character is in at least one channel to offer")
+        local rows = itemsByKey()
+        local rowCount, order = 0, {}
+        for _, it in ipairs(View.ChannelMenuItems()) do
+            local n = tostring(it.key):match("^channel:(%d+)$")
+            if n then rowCount = rowCount + 1 order[#order + 1] = tonumber(n) end
+        end
+        ck(rowCount == #nums20,
+            "phase 20: RED CONTROL — the channel rows match the JOINED set exactly ("
+            .. rowCount .. " of " .. #nums20 .. ")")
+        local ordered = true
+        for i = 2, #order do if order[i] <= order[i - 1] then ordered = false end end
+        ck(ordered, "phase 20: …in channel-number order, never pairs() order (Class 8)")
+        local firstNum = nums20[1]
+        local firstRow = rows["channel:" .. firstNum]
+        ck(firstRow and tostring(firstRow.text):find(tostring(firstNum) .. ".", 1, true) == 1,
+            "phase 20: …each row shows its channel NUMBER (" .. tostring(firstRow and firstRow.text) .. ")")
+        local cr20, cg20, cb20 = ns.Skin.ChannelColorOf(firstNum)
+        ck(firstRow.rgb and math.abs(firstRow.rgb[1] - cr20) < 1e-9
+            and math.abs(firstRow.rgb[3] - cb20) < 1e-9,
+            "phase 20: …inked in THAT channel's own client colour")
+        -- ALIAS-AWARE, through the one seam. Rename it and the row renames.
+        local firstName = joined[firstNum]
+        Cx.SetAlias(firstName, "Zzz")
+        local aliased = itemsByKey()["channel:" .. firstNum]
+        ck(tostring(aliased.text):find("Zzz", 1, true) ~= nil,
+            "phase 20: RED CONTROL — a row wears the channel's ALIAS, from the same seam "
+            .. "the feed and the tab labels read (" .. tostring(aliased.text) .. ")")
+        Cx.SetAlias(firstName, nil)
+
+        -- ── 20f: THE RETARGET RIDES THE CLIENT'S MACHINERY. ─────────────
+        local cfgBefore = table.concat({ Cx.Snapshot().cfg.rev, Cx.Snapshot().cfg.at }, "/")
+        local targetsBefore = View.chatTargets
+        ck(View.RunChannelMenuItem("channel:" .. firstNum) == true,
+            "phase 20: a channel row runs")
+        ck(View.chatTargets == targetsBefore + 1, "phase 20: …and retargets exactly once")
+        ck(eb20:GetAttribute("chatType") == "CHANNEL",
+            "phase 20: RED CONTROL — the CLIENT's chatType attribute is what changed")
+        ck(tonumber(eb20:GetAttribute("channelTarget")) == firstNum,
+            "phase 20: …and its channelTarget is the channel we picked")
+        local nowT, nowN = View.CurrentChatTarget()
+        ck(nowT == "CHANNEL" and tonumber(nowN) == firstNum,
+            "phase 20: …read back through the client's own accessors")
+        -- SAME BEAT: the header text (and therefore the chip's label) already
+        -- names the new channel — nothing here schedules a repaint.
+        ck(tostring(View.ChipLabel()):find(tostring(firstNum) .. ".", 1, true) == 1,
+            "phase 20: RED CONTROL — the chip's label followed IN THE SAME BEAT ("
+            .. tostring(View.ChipLabel()) .. ")")
+        Sim.SetGroupState{ inParty = false, inRaid = false }
+        ck(View.RunChannelMenuItem("party") == false,
+            "phase 20: an unavailable row refuses rather than pretending")
+        ck(View.RunChannelMenuItem("nosuchrow") == nil,
+            "phase 20: …and a key that is not on the menu answers nil, not a lie")
+        -- …and the header follows a switch WE never made: the player types /2,
+        -- the client updates its own header, our chip rides the same verb.
+        local syncsBefore = View.chipSyncs
+        eb20:SetAttribute("chatType", "SAY")
+        _G.ChatEdit_UpdateHeader(eb20)
+        ck(View.chipSyncs > syncsBefore,
+            "phase 20: RED CONTROL — a client-side sticky change (the /2 path) re-syncs "
+            .. "the chip, because the chip rides the client's OWN header verb")
+        ck(tostring(View.ChipLabel()):find("SAY", 1, true) ~= nil,
+            "phase 20: …and the label is the client's new answer (" .. tostring(View.ChipLabel()) .. ")")
+        local cfgAfter = table.concat({ Cx.Snapshot().cfg.rev, Cx.Snapshot().cfg.at }, "/")
+        ck(cfgBefore == cfgAfter,
+            "phase 20: RED CONTROL — retargeting the edit box writes NOTHING to the "
+            .. "config (a chat target is client state, not a synced setting)")
+
+        -- ── 20g: ONE MENU, TWO CONSUMERS. ───────────────────────────────
+        local tabId20 = View.ids[1]
+        View.OpenTabMenu(tabId20, View.tabs[tabId20].button)
+        local frameFromTab = View.menu
+        ck(View.MenuOpen() == true, "phase 20: the tab menu opens")
+        View.CloseMenu()
+        View.OpenChannelMenu(chip)
+        ck(View.menu == frameFromTab,
+            "phase 20: RED CONTROL — the channel selector uses the SAME menu frame as the "
+            .. "tab menu (one implementation, two consumers — there is no second menu)")
+        ck(View.MenuOpen() == true, "phase 20: …and it is open")
+        ck(View.menu._closer and View.menu._closer._shown == true,
+            "phase 20: …with the same click-away closer armed")
+        -- It RISES off the chip: the entry bar is at the bottom of the chassis.
+        local mp = View.menu._points[1]
+        ck(mp and mp[1] == "BOTTOMLEFT" and mp[3] == "TOPLEFT",
+            "phase 20: …opening UPWARD off the chip, not off the bottom of the screen")
+        ck(View.menu._w == View.MENU_CHANNEL_W,
+            "phase 20: …at the channel list's own width")
+        -- The chip's own click is what opens it.
+        View.CloseMenu()
+        chip:Click("LeftButton")
+        ck(View.MenuOpen() == true, "phase 20: RED CONTROL — CLICKING THE CHIP opens the selector")
+        View.CloseMenu()
+        ck(View.MenuOpen() == false, "phase 20: …and it closes")
+        -- The tab menu still works through the shared body.
+        ck(View.MenuItems("tab", tabId20)[1] ~= nil, "phase 20: the tab menu still builds its items")
+        ck(View.MenuItems("nosuchkind", nil)[1] == nil,
+            "phase 20: an unknown menu kind answers an EMPTY menu, never an error")
+
+        -- ── 20h: THE DRESS ROUND TRIP, in the real path. ────────────────
+        -- A TAB SWITCH releases one client box and hosts another, and it does
+        -- it with the view still painting — so skin-over's restyle paths are
+        -- inert (Skin.ViewOwnsPixels) and nothing but this file can have
+        -- touched those regions. That makes the alphas readable as OURS, which
+        -- is exactly what the disable path cannot promise.
+        local other20, saved20 = nil, nil
+        for _, wid in ipairs(View.ids) do if wid ~= View.activeId then other20 = wid break end end
+        if not other20 then
+            -- A stock character has ONE tab; the release path only runs when
+            -- there is somewhere to switch to, so the world grows a second
+            -- window for this pin and gives it back afterwards (the same
+            -- borrow-and-restore the tab-run phase makes).
+            saved20 = { Sim.windows[3].name, Sim.windows[3].shown, Sim.windows[3].docked }
+            _G.FCF_OpenNewWindow("Chip")
+            View.Refresh()
+            if HT then HT.flush() end
+            for _, wid in ipairs(View.ids) do
+                if wid ~= View.activeId then other20 = wid break end
+            end
+        end
+        if other20 then
+            local leaving = View._ebHome.eb
+            local recorded = {}
+            for _, w in ipairs(View.EditBoxDressOf(leaving)) do
+                recorded[w] = View._ebDress[w]
+            end
+            local nRec = 0
+            for _, a in pairs(recorded) do if a ~= nil then nRec = nRec + 1 end end
+            ck(nRec == 6, "phase 20h: all six of the hosted box's regions are on the "
+                .. "ledger before the switch (" .. nRec .. ")")
+            View.SelectTab(other20, "phase20")
+            local back20, still = true, {}
+            for w, a in pairs(recorded) do
+                if w:GetAlpha() ~= a then back20 = false end
+                if View._ebDress[w] ~= nil then still[#still + 1] = tostring(w._name) end
+            end
+            ck(back20, "phase 20h: RED CONTROL — every stock region of the box we let go is "
+                .. "back at EXACTLY the alpha it had before the view touched it")
+            ck(#still == 0, "phase 20h: …and the view's ledger no longer claims any of them ("
+                .. table.concat(still, ",") .. ")")
+            local arrived = View._ebHome.eb
+            local nowZero = true
+            for _, w in ipairs(View.EditBoxDressOf(arrived)) do
+                if w:GetAlpha() ~= 0 then nowZero = false end
+            end
+            ck(arrived ~= leaving and nowZero,
+                "phase 20h: …while the box that ARRIVED is stripped in the same beat")
+            ck(View.entryChip._shown == true and View.ChipLabel() ~= nil,
+                "phase 20h: …and the chip came with it, still labelled")
+            View.SelectTab(View.ids[1], "phase20-restore")
+        end
+        if saved20 then
+            local w20 = Sim.windows[3]
+            w20.name, w20.shown, w20.docked = saved20[1], saved20[2], saved20[3]
+            _G.FloatingChatFrame_Update(3)
+            View.Refresh()
+            if HT then HT.flush() end
+        end
+        Sim.SetGroupState{ inParty = false, inRaid = false, inGuild = false }
+        Sim.lastToldTarget = nil
+    end
+
     -- ── Phase 12: RED CONTROL 4 — disable/restore leaves the world tidy. ─
     local ebHosted = View._ebHome and View._ebHome.eb
+    -- THE EDIT-BOX DRESS ROUND TRIP. What we recorded on the way in is what
+    -- must be on those regions on the way out — the recorded value, not a
+    -- hopeful 1, and nothing left in the ledger afterwards.
+    local ebDressWas = {}
+    if ebHosted then
+        for w, a in pairs(View._ebDress) do ebDressWas[w] = a end
+    end
+    local ebHeaderPoints = View._ebHome and View._ebHome.headerPoints or nil
     -- What the client had up BEFORE we ever touched it, per window, so the
     -- restore is pinned as a ROUND TRIP rather than as "something is showing".
     local dressBefore = {}
@@ -4474,6 +5390,27 @@ local function testLive(fails, verbose)
     ck(ebHosted and ebHosted._parent == _G["ChatFrame" .. View.HostId()],
         "phase 12: the edit box went HOME to its own client window")
     ck(View._ebHome == nil, "phase 12: …and the view holds no claim on it")
+    do
+        local n = 0
+        for _ in pairs(ebDressWas) do n = n + 1 end
+        ck(n == 6, "phase 12: the view had recorded all six stock dress regions (" .. n .. ")")
+        -- THE LEDGER IS THE PIN HERE, not the pixels: skin-over is still on and
+        -- re-dresses the client's frames the instant the view stops painting
+        -- (Skin.StyleAll, the documented handoff), so an alpha read after this
+        -- point is skin's answer and not ours. The VIEW's own round trip is
+        -- pinned where it is unambiguous — phase 20h, where a tab switch
+        -- releases one box with the view still painting and nothing else can
+        -- have touched it.
+        ck(next(View._ebDress) == nil,
+            "phase 12: RED CONTROL — the view's dress ledger is EMPTY (every region it "
+            .. "recorded was handed back; no claim is left behind)")
+        local hdr12 = ebHosted and View.EditBoxHeaderOf(ebHosted)
+        ck(ebHeaderPoints and hdr12 and #hdr12._points == #ebHeaderPoints,
+            "phase 12: …and the client's header carries its own anchor set again, not the "
+            .. "chip's (" .. tostring(hdr12 and #hdr12._points) .. ")")
+        ck(View.entryChip and View.entryChip._shown == false,
+            "phase 12: the channel chip is put away with the rest of our pixels")
+    end
     ck(S.SnapPeers == View._snapPeersOriginal or type(S.SnapPeers) == "function",
         "phase 12: skin's SnapPeers override was handed back")
     ck(S.SnapPeers() ~= nil and S.SnapPeers()[1] ~= View.chassis,
