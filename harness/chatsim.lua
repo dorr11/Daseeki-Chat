@@ -395,6 +395,45 @@ end
 -- …and the ONE typographic lever a ScrollingMessageFrame has: the row rhythm.
 function WIDGET_API.SetSpacing(self, s) self._spacing = s end
 function WIDGET_API.GetSpacing(self) return self._spacing or 0 end
+-- ── INDENTED WORD WRAP (ui/wrapped-indent sim extension, additive) ───────────
+-- The FontInstance flag that decides whether a line too long for the frame
+-- puts its CONTINUATION flush against the left edge (off) or under a fixed
+-- hanging indent (on).
+--
+-- WHAT IS VERIFIED AND WHAT IS INFERRED, stated so the model is auditable:
+--   * VERIFIED — the setter and its getter both exist on 11509: the vendored
+--     catalog (wow-api-catalog/1.15.9.68808/functions.txt) carries
+--     `SetIndentedWordWrap — (isIndented:bool)` and `GetIndentedWordWrap —
+--     () -> isIndented:bool`. It is NOT absent on era, so a stub here would
+--     not be a kinder client; refusing to model it would be an unkinder one.
+--   * INFERRED — WHICH widget types carry it. That dump is FLAT (name +
+--     signature, no owner type: AddMessage sits in the same list), so it
+--     cannot answer attachment. The three non-SimpleHTML overloads are the
+--     FontInstance family — the same surface a ScrollingMessageFrame already
+--     reaches SetFont / GetFont / SetJustifyH through — so it is modeled on
+--     the widget API beside them. view.lua calls it through its defended
+--     `call()` helper regardless, so a client that does NOT carry it does
+--     nothing rather than erroring.
+--   * OBSERVED — the DEFAULT is OFF. That is the owner's screenshot (a long
+--     LFG line whose continuation sits flush against the left border), not an
+--     assumption, and it is why `false` is the birth state here.
+--
+-- SetFont DOES NOT CLEAR IT, and that is a modeled FACT rather than a
+-- kindness: SetFont's catalog signature is (face, height, flags) -> success,
+-- which speaks about the FACE and nothing else. The alternative — a sim whose
+-- SetFont silently drops the flag — would be an INVENTED cruelty with no
+-- provenance, and simulator doctrine forbids that exactly as firmly as it
+-- forbids an invented kindness. Code that re-asserts the flag after a font
+-- change is therefore belt-and-braces here, not load-bearing, and the suite
+-- pins BOTH halves so the day a client is measured doing otherwise, the pin
+-- that changes says so out loud.
+function WIDGET_API.SetIndentedWordWrap(self, on)
+    record("SetIndentedWordWrap")
+    self._indentedWordWrap = on and true or false
+end
+function WIDGET_API.GetIndentedWordWrap(self)
+    return self._indentedWordWrap and true or false
+end
 -- Draw sublevel, so "the surface is above the backdrop's own fill" is readable.
 function WIDGET_API.SetDrawLayer(self, layer, sub) self._drawLayer = { layer, sub } end
 function WIDGET_API.SetMaxLetters(self, n) self._maxLetters = n end
