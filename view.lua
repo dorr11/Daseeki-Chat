@@ -143,6 +143,18 @@ ns.View = View
 --       as ONE column hairline rather than per row — rows are still not addressable widgets (surviving).
 --   .stamp font-variant-numeric tabular    -> not applied   SURVIVING CLIENT LIMIT: no OpenType feature
 --       control on a FontString.
+--   wrapped-line indent (owner, 2026-08-12: "when a chat message goes to a new line, start the new
+--       line in the same place as the previous message, rather than all the way to the left border")
+--                                          -> SetIndentedWordWrap(true) on every message surface,
+--       config-backed (db.view.indentWrap, default ON)
+--       APPROXIMATE, SURVIVING CLIENT LIMIT, and the gap is named rather than glossed: the flag buys
+--       the CLIENT'S OWN fixed hanging indent, which is a small constant the client decides and no
+--       API reports or sets. What the owner described — the continuation starting where the MESSAGE
+--       TEXT starts, i.e. past the timestamp — is a per-line tab stop, and that is not expressible:
+--       a chat line is ONE string in ONE FontString (the same fact the stamp-gap row above records),
+--       so there is no second column for the wrap to align to. Off the shelf the continuation sits
+--       flush against the left border; with the flag it sits under the client's indent. That is a
+--       real improvement and it is NOT stamp-aligned, and both halves are shipped as stated.
 --   .entry padding 8px 12px                -> EB_PAD_Y 3 / EB_PAD_X 12           (owner amendment 8 -> 3)
 --   .entry font 13.5px, line-height 1.45   -> EB_HEIGHT 26                       (owner amendment 36 -> 26)
 --   .entry border-top 1px --line-soft      -> SEAM_W 1, PALETTE.lineSoft, flush  IDENTICAL
@@ -182,10 +194,11 @@ ns.View = View
 -- None of those are properties of the design — they were properties of
 -- painting on somebody else's frame.
 --
--- THE SCORE: 4 surviving client limits (font weight, letter-spacing, tabular
--- figures, drop shadow) + the one-string-per-line consequence of the stamp
--- gap; 3 DEFERRED rounded-corner rows (ours to ship, not the client's to
--- refuse). Everything else is IDENTICAL.
+-- THE SCORE: 5 surviving client limits (font weight, letter-spacing, tabular
+-- figures, drop shadow, the wrapped line's indent AMOUNT) + the
+-- one-string-per-line consequence of the stamp gap, which is the same fact
+-- behind two of them; 3 DEFERRED rounded-corner rows (ours to ship, not the
+-- client's to refuse). Everything else is IDENTICAL.
 ----------------------------------------------------------------------
 
 -- THE PALETTE. Literal mockup hexes, and the ONE place they live (moved here
@@ -335,6 +348,14 @@ ns.DEFAULTS.view = {
     lineHeight  = MOCKUP_LINE_HEIGHT,     -- .msgs line-height 1.45
     tabTextSize = TAB_TEXT_SIZE,          -- .tab font-size 12.5
     copyButton  = true,                   -- the copy-chat affordance, carried over
+    -- The hanging indent under a wrapped line. ACCOUNT-LOCAL for exactly the
+    -- reason fontSize and lineHeight are: it is per-monitor LOOK — how much of
+    -- a long line fits on one row before it wraps at all is a function of the
+    -- box's width on THIS screen, so whether the indent reads as a help or as
+    -- clutter is a local judgement, not a shared one. Default ON: the owner
+    -- asked for it, and the client's own default (off, flush against the left
+    -- border) is the thing he was asking to be rid of.
+    indentWrap  = true,
 }
 
 local function cfg()
@@ -465,6 +486,17 @@ function View.TabTextSize()
     local v = tonumber(cfg().tabTextSize)
     if v and v > 0 then return v end
     return TAB_TEXT_SIZE
+end
+
+-- Does a wrapped line hang under an indent? A BOOLEAN read, and the nil case
+-- is the one that matters: a store written before this field existed answers
+-- nil, and nil must mean the DEFAULT (on), never false. `v and true or false`
+-- alone would have quietly shipped the old flush-left look to every account
+-- that upgraded — the truthy-zero trap wearing a different hat.
+function View.IndentWrap()
+    local v = cfg().indentWrap
+    if v == nil then return true end
+    return v and true or false
 end
 
 -- The mockup contract, as data: the settings page, the debug command and the
@@ -1392,6 +1424,12 @@ function View.EnsureFrame(id)
     call(smf, "SetFading", false)
     call(smf, "SetMaxLines", VIEW_MAX_LINES)
     call(smf, "SetJustifyH", "LEFT")
+    -- THE WRAPPED LINE'S INDENT, applied AT CREATION for the same reason
+    -- SetFading(false) is: before a single line can land in it, so there is
+    -- never a beat where a message wraps the client's way. ApplyFont re-asserts
+    -- it on every look pass (see there); this call is what makes the first
+    -- frame correct without waiting for one.
+    call(smf, "SetIndentedWordWrap", View.IndentWrap())
     call(smf, "EnableMouse", true)
     call(smf, "EnableMouseWheel", true)
     call(smf, "SetHyperlinkPropagateToParent", false)
@@ -1429,6 +1467,20 @@ function View.ApplyFont(id)
         call(smf, "SetFont", UI.FontFile(), size, "")
     end
     call(smf, "SetSpacing", View.MessageSpacing(size))
+    -- THE INDENT, RE-ASSERTED AFTER THE FONT — and deliberately AFTER, not
+    -- before. Two things are true at once and both are written down:
+    --   * this is the LIVE-APPLY route. The Display toggle writes db.view and
+    --     dispatches `view.look`, which is ApplyLook -> ApplyFont per frame, so
+    --     flipping the box moves pixels on the same beat rather than at the
+    --     next /reload. That is the load-bearing half.
+    --   * it is ALSO the belt-and-braces half against a font change eating the
+    --     flag — and on the honest model of 11509 it does not: SetFont's
+    --     signature is (face, height, flags) -> success and speaks about the
+    --     face alone. The sim models exactly that (see chatsim.lua's note) and
+    --     the suite pins the survival as a FACT rather than assuming it, so if
+    --     a client is ever measured dropping the flag on SetFont, the pin that
+    --     flips is the one that says so — and this line already covers it.
+    call(smf, "SetIndentedWordWrap", View.IndentWrap())
     return true
 end
 
@@ -4068,6 +4120,21 @@ local function testPure(fails)
         ns.db.view.fontSize = savedSize
     end
 
+    -- THE WRAPPED LINE'S INDENT, as a read. Default ON, an explicit false is
+    -- honoured, and — the one that matters — a store that predates the field
+    -- reads as the DEFAULT rather than as off.
+    ck(View.IndentWrap() == true, "wrapped lines hang under an indent by default")
+    if ns.db and ns.db.view then
+        local savedIndent = ns.db.view.indentWrap
+        ns.db.view.indentWrap = false
+        ck(View.IndentWrap() == false, "…and an explicit false is honoured")
+        ns.db.view.indentWrap = nil
+        ck(View.IndentWrap() == true,
+            "…while a store written before the field existed reads as ON, never as off")
+        ns.db.view.indentWrap = savedIndent
+    end
+    ck(ns.DEFAULTS.view.indentWrap == true, "the shipped default says so too")
+
     -- THE INACTIVE DIM IS INK. Given a colour it moves it toward --muted and
     -- never returns an alpha at all.
     local mr, mg, mb = View.Ink("muted")
@@ -4094,6 +4161,13 @@ local function testLive(fails, verbose)
     ck(next(View.tabs) == nil, "phase 0: no tab button was created")
     ck(next(wrappedFrames) == nil, "phase 0: zero AddMessage wrappers while disabled")
     ck(next(View._engineHidden) == nil, "phase 0: no client window is being held down")
+    -- RED CONTROL — the DISABLED preset is inert for the indent too: a look
+    -- pass on a module that is down touches no widget at all, so the toggle
+    -- cannot reach a frame we do not own.
+    Sim.ResetCalls()
+    ck(View.ApplyLook() == false, "phase 0: a look apply on the disabled view refuses")
+    ck(Sim.CallCount("SetIndentedWordWrap") == 0,
+        "phase 0: …and set NO indent flag on anything (inert body)")
 
     local storeBefore = {}
     for id = 1, 10 do
@@ -4151,6 +4225,50 @@ local function testLive(fails, verbose)
     local vf = View.frames[id1]
     ck(type(vf) == "table", "phase 2: the active tab has a message surface of ours")
     ck(vf._fading == false, "phase 2: SetFading(false) was applied AT CREATION")
+
+    -- ── THE WRAPPED LINE'S INDENT (owner, 2026-08-12). Four legs. ────────
+    -- 1) AT CREATION, before a line can land — the same discipline SetFading
+    --    keeps, and pinned through the CLIENT'S OWN getter rather than the
+    --    recorded field, so this asks the widget what it believes.
+    ck(vf:GetIndentedWordWrap() == true,
+        "phase 2: SetIndentedWordWrap(true) was applied AT CREATION")
+    -- 2) A LOOK PASS RE-ASSERTS IT. Two claims, deliberately separate: the
+    --    flag SURVIVES the font change (the honest 11509 model — SetFont
+    --    speaks about the face alone), AND our own re-apply really ran, so the
+    --    contract does not rest on that survival.
+    local drawnSurfaces = 0
+    for _ in pairs(View.frames) do drawnSurfaces = drawnSurfaces + 1 end
+    Sim.ResetCalls()
+    View.ApplyLook()
+    -- AT LEAST once per drawn surface, not exactly once: a look pass is
+    -- ApplyFont-per-frame AND then Layout, which re-runs ApplyFont as it
+    -- re-anchors each surface. That the number is >= rather than == is the
+    -- point — the flag lives in ApplyFont, so EVERY route that restyles a
+    -- surface carries it, and no future caller can restyle around it.
+    ck(drawnSurfaces > 0 and Sim.CallCount("SetIndentedWordWrap") >= drawnSurfaces,
+        "phase 2: RED CONTROL — a look pass RE-APPLIES the indent on every drawn surface")
+    ck(vf:GetIndentedWordWrap() == true, "phase 2: …and the flag is still up afterwards")
+    -- …and the fact underneath, pinned rather than assumed: a bare SetFont on
+    -- 11509 does NOT clear it. The day a client is measured doing otherwise,
+    -- THIS is the pin that goes red — and the re-apply above already covers it.
+    call(vf, "SetFont", "Fonts\\FRIZQT__.TTF", 13.5, "")
+    ck(vf:GetIndentedWordWrap() == true,
+        "phase 2: PINNED FACT — SetFont(face,size,flags) does not eat the indent flag")
+    -- 3) THE TOGGLE, SAME BEAT. Off writes the store and the pixels together
+    --    through the declared seam; nothing waits for a reload.
+    local keptLines = vf:GetNumMessages()
+    local savedIndent = ns.db and ns.db.view and ns.db.view.indentWrap
+    if ns.db and ns.db.view then
+        ns.db.view.indentWrap = false
+        View.ApplyLook()
+        ck(vf:GetIndentedWordWrap() == false,
+            "phase 2: RED CONTROL — the toggle OFF drops the flag on the SAME beat")
+        ck(vf._fading == false and vf:GetNumMessages() == keptLines,
+            "phase 2: …and it restyled in place: fading untouched, buffer kept")
+        ns.db.view.indentWrap = savedIndent
+        View.ApplyLook()
+        ck(vf:GetIndentedWordWrap() == true, "phase 2: …and back ON is the same one beat")
+    end
     local before = vf:GetNumMessages()
     local mirroredBefore = View.mirrored
     Sim.SendChat{ event = "CHAT_MSG_SAY", text = "mirror-me",

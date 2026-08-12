@@ -960,6 +960,10 @@ end
 --   lineHeight   READ view.MessageSpacing  | LIVE view.look   | CONTROL slider
 --   tabTextSize  READ view.TabTextSize     | LIVE view.layout | CONTROL slider
 --   copyButton   READ view.EnsureCopyButton| LIVE view.furniture | CONTROL box
+--   indentWrap   READ view.IndentWrap      | LIVE view.look   | CONTROL box
+--        (Display, "Indent wrapped lines"). ACCOUNT-LOCAL for fontSize's own
+--        reason: how soon a line wraps at all is a function of the box's width
+--        on THIS monitor, so whether the hanging indent helps is local taste.
 --
 -- ── db.skin.* (ACCOUNT-LOCAL: skin-over's own look + the gesture gates) ────
 --   unifiedChassis, channelTabs, stampDivider, editBoxChannelColor, iconRail,

@@ -8,6 +8,18 @@ character — including a brand-new one — reconciles to automatically at login
 
 This entry accumulates until 1.0.0 ships.
 
+### Wrapped lines
+
+- **A long message no longer carries on from the left border.** When a chat
+  line is too long for one row, the rest of it now sits under an indent instead
+  of starting hard against the window's left edge, so a wall of Looking For
+  Group text reads as one message rather than four. Be aware of what the indent
+  is: it is the game's own fixed one, and it will not line up with where the
+  message text starts past the timestamp — a chat line is a single piece of
+  text with no second column for the wrap to find, so there is nothing to align
+  to. Settings > Display > "Indent wrapped lines" turns it off if you prefer
+  the old flush edge; it applies the moment you click it.
+
 ### Channel nicknames, saving edits, and the resize corners
 
 - **City channels answer to their nickname now.** Naming General "ZONE" worked

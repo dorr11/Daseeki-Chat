@@ -441,6 +441,11 @@ Options.BINDINGS = {
     -- account-local LOOK — the layout it draws is bound in Tabs, as `config`.
     { id = "view.module",      kind = "module", module = "view", apply = "lifecycle" },
     { id = "view.copyButton",  kind = "field",  branch = "view", key = "copyButton",  apply = "view.furniture" },
+    -- The hanging indent under a wrapped line. `view.look` is the right seam
+    -- and not merely an available one: that route is ApplyLook -> ApplyFont per
+    -- drawn surface, and ApplyFont is where the flag is (re-)set — so the
+    -- toggle reaches pixels on the same beat, with every buffer kept.
+    { id = "view.indentWrap",  kind = "field",  branch = "view", key = "indentWrap",  apply = "view.look" },
 
     -- Appearance
     { id = "appearance.channelTabs",         kind = "field",  branch = "skin",   key = "channelTabs",         apply = "view.tabs" },
@@ -2109,6 +2114,13 @@ local function buildGeneral(flow)
         { label = "Clickable web addresses",
           tooltip = "Clicking one opens a box with the address pre-selected (era has no clipboard).",
           get = moduleGet("urls.module"), set = moduleSet("urls.module") },
+        { label = "Indent wrapped lines",
+          tooltip = "A message too long for one line carries on under an indent instead of "
+                 .. "starting flush against the left border. The indent is the game's own "
+                 .. "fixed one - it will not line up with the message text past the "
+                 .. "timestamp, because a chat line is a single piece of text with no "
+                 .. "second column for the wrap to find.",
+          get = fieldGet("view.indentWrap"), set = boolSet("view.indentWrap") },
         { label = "Channel-coloured tabs",
           tooltip = "Ink each tab with the colour of the channel that window is for. A window "
                  .. "earns a colour only when its routing collapses to exactly one identity.",
@@ -3001,6 +3013,28 @@ local function testLiveApply(fails)
         ck(sizeCtl.Refresh() == 20, "SIZE: …and the dropdown reads its own answer back")
         sizeCtl._opts.set(wasSize or 13.5)
         ck(select(2, smf:GetFont()) == (wasSize or 13.5), "SIZE: …and back again, live")
+    end
+
+    -- ── CHECKBOX: "Indent wrapped lines" (Display) ──────────────────────
+    -- The owner's ask of 2026-08-12, driven from the PANE. A wrapped line's
+    -- hanging indent is one FontInstance flag on each drawn surface, and the
+    -- toggle's whole worth is that it lands without a reload — so the pin
+    -- reads the flag back off the widget the same beat the box is clicked.
+    local indentCtl = findControl(pane, "checkbox", "Indent wrapped lines")
+    ck(indentCtl ~= nil, "the wrapped-indent toggle is on the Display group")
+    if indentCtl then
+        local wasIndent = ns.db.view.indentWrap
+        local lines = smf:GetNumMessages()
+        indentCtl._opts.set(false)
+        ck(ns.db.view.indentWrap == false, "INDENT: the write lands in the store")
+        ck(smf:GetIndentedWordWrap() == false,
+            "INDENT: RED CONTROL — the drawn feed dropped the hanging indent IN THE SAME BEAT")
+        indentCtl._opts.set(true)
+        ck(smf:GetIndentedWordWrap() == true, "INDENT: …and back again, live")
+        ck(smf:GetNumMessages() == lines,
+            "INDENT: …with the scrollback intact (a restyle, never a rebuild)")
+        ck(indentCtl._opts.get() == true, "INDENT: …and the box reads its own answer back")
+        ns.db.view.indentWrap = wasIndent
     end
 
     -- ── SEGMENTED CHOICE: where the tabs live ───────────────────────────
