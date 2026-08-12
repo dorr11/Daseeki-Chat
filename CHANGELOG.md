@@ -8,6 +8,25 @@ character — including a brand-new one — reconciles to automatically at login
 
 This entry accumulates until 1.0.0 ships.
 
+### Other Daseeki addons can hang things off the chat window
+
+- **The chat box now tells the rest of the suite where it is and how big it
+  is.** Nothing in Daseeki Chat looks any different, and nothing here has an
+  opinion about what gets attached — the window simply publishes its own frame,
+  its live size and position, and a way for another addon to be told the moment
+  any of that changes. The first thing to use it is Daseeki Armory's set
+  swapper, which can now run as a column of gear-set icons down the outside of
+  the chat window's right-hand edge; that column, and every decision in it,
+  lives entirely in Armory. If no other addon is listening, this costs the chat
+  window nothing at all — not a frame, not a timer, not a single extra
+  calculation on a resize.
+- **It cannot get the ordering wrong.** Addons load in an order nobody controls,
+  so an addon that asks early is answered "nothing yet" and then told the
+  moment the window comes up; an addon that asks late is answered on the spot.
+  Turning the chat window's view off tells listeners it has gone, and turning it
+  back on tells them it is back — no reload, and nothing anywhere is polling or
+  waiting on a timer for an answer.
+
 ### The settings menu, made readable
 
 The settings page worked and looked terrible. Everything below is what you asked

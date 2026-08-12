@@ -1588,6 +1588,10 @@ local EXPECTED_SUITES = { "core", "skin", "placeholders",
     "options-tabs",
     -- D2 revision: the owned chat view (chassis, tabs, mirror, hidden engine)
     "view",
+    -- 2026-08-12: the published ATTACH SURFACE (chassis geometry + subscription)
+    -- other suite addons can hang something off. Additive to view.lua and inert
+    -- with no consumer — the suite asserts both halves.
+    "attach",
     -- w2/integration: the merged-world leg (all Wave-2 modules at once)
     "integration",
     -- D2 revision: the merged world WITH THE OWNED VIEW UP (the engine hidden)
