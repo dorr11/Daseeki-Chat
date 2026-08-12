@@ -108,10 +108,18 @@ realprint("")
 -- snap / palette layer and publishes the shapes options binds against. The
 -- design doc's D2 REVISION section names it; the .toc was amended in the SAME
 -- COMMIT as this gate, and the gate still pins the list byte-for-byte.
+-- FILE MAP AMENDMENT (2026-08-11, owner-specified OPTIONS REWORK):
+-- options_tabs.lua joins the map immediately after options.lua. The rework's
+-- Tabs section is a pane of its own (one page per chat tab, + Add Tab, remove,
+-- the combat log toggle, the addon tab) and carrying it inside options.lua
+-- would have taken that file past 3,500 lines. It loads SECOND because it
+-- builds every control through options.lua's binding index and wiring helpers.
+-- DASEEKI_CHAT_DESIGN.md's file map and the .toc were amended in the SAME
+-- COMMIT as this gate, and the gate still pins the list byte-for-byte.
 local EXPECTED_FILE_MAP = {
     "core.lua", "config.lua", "reconcile.lua", "channels.lua", "decor.lua",
     "stamps.lua", "names.lua", "urls.lua", "history.lua", "badges.lua",
-    "skin.lua", "view.lua", "options.lua", "nexus.lua",
+    "skin.lua", "view.lua", "options.lua", "options_tabs.lua", "nexus.lua",
 }
 
 local function tocDirective(src, key)
@@ -1535,6 +1543,8 @@ local EXPECTED_SUITES = { "core", "skin", "placeholders",
     "config", "reconcile", "channels", "nexus",
     -- post-V1: the settings pane + the channel-alias editor
     "options",
+    -- the options rework (2026-08-11): the Tabs section, one page per chat tab
+    "options-tabs",
     -- D2 revision: the owned chat view (chassis, tabs, mirror, hidden engine)
     "view",
     -- w2/integration: the merged-world leg (all Wave-2 modules at once)

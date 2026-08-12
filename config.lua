@@ -78,7 +78,16 @@ local CFG_DEFAULTS = {
     -- (the owner's "i need a way to lock / unlock the positioning"): where the
     -- box IS rides the mesh already, so whether it can be MOVED belongs beside
     -- it — lock on one character and every character's box is a rock.
-    skin    = { tabPlacement = "top", locked = false },
+    --
+    -- THE OPTIONS REWORK (2026-08-11) added two more, for the same reason and
+    -- into the same already-whitelisted section:
+    --   combatLogTab   — does our tab strip carry a Combat Log tab (hosting the
+    --                    client's own log frame inside the chassis)?
+    --   routeAddonLines— do addon-originated lines go to the addon tab?
+    -- Both are LAYOUT decisions about the strip, so a player answers them once
+    -- and every character gets the answer.
+    skin    = { tabPlacement = "top", locked = false,
+                combatLogTab = false, routeAddonLines = true },
 }
 
 function Config.Get()
@@ -488,7 +497,10 @@ end
 -- delete them. This is `npos`'s Class 4 rule generalized — an unknown must
 -- never become a deletion — and it is what keeps a per-tab colour alive
 -- through the very next window drag.
-local WINDOW_CONFIG_ONLY_FIELDS = { "tabColor" }
+-- `addonSink` joined 2026-08-11 (the options rework's addon tab): which window
+-- is the addon tab is a CONFIG fact no client capture can see, so it rides the
+-- same carry-across rule tabColor does or the very next window drag deletes it.
+local WINDOW_CONFIG_ONLY_FIELDS = { "tabColor", "addonSink" }
 Config.WINDOW_CONFIG_ONLY_FIELDS = WINDOW_CONFIG_ONLY_FIELDS
 
 local function mergeWindows(prev, snapWindows)
@@ -907,7 +919,12 @@ end
 -- ── config.skin.* (SYNCED — named in all three whitelist sites) ────────────
 --   tabPlacement  READ view/skin/badges | LIVE view.layout | CONTROL Tabs
 --   locked        READ view.DragAllowed + view resize + Skin.MoveAllowed
---                 | LIVE lock.apply | CONTROL Windows + /dchat lock|unlock
+--                 | LIVE lock.apply | CONTROL General + /dchat lock|unlock
+--   combatLogTab  READ view.CombatLogTab (OwnedIds + the hosting)
+--                 | LIVE view.tabset | CONTROL Tabs (options rework)
+--   routeAddonLines READ view.ClassifierArmed | LIVE view.tabset
+--                 | CONTROL Tabs (options rework). OFF = the classifier decides
+--                 nothing at all and every line takes its old path.
 --
 -- ── config.windows[id].* (SYNCED inside `windows`) ─────────────────────────
 --   name, fontSize, r, g, b, alpha, shown, docked, uninteractable, groups,
@@ -920,7 +937,17 @@ end
 --   pos, dim      the client's raw pair, kept for diffing
 --   npos, ndim    the NORMALIZED pair the reconciler actually replays
 --                 | LIVE written by every move/resize commit
---   tabColor      READ view.TabInk | LIVE skin.tabs | CONTROL Tabs row
+--   tabColor      READ view.TabInk | LIVE view.tabs | CONTROL the tab's page
+--   addonSink     READ view.RefreshRouting (which tab is the addon tab)
+--                 | LIVE view.tabset | CONTROL Tabs (options rework). A
+--                 CONFIG-ONLY field: no client capture speaks about it, so it
+--                 rides WINDOW_CONFIG_ONLY_FIELDS beside tabColor.
+--
+-- ── config.join / config.colors (SYNCED; the options rework's channel rows) ─
+--   join          the ORDER: { number, name } intent, drag-to-reorder in
+--                 General | LIVE channels.order | CONTROL the channel rows
+--   colors        per-channel colour BY NAME | LIVE channels.colors
+--                 | CONTROL the channel rows' swatch
 ----------------------------------------------------------------------
 
 Config.TAB_PLACEMENTS = { "top", "left", "right" }
@@ -1032,6 +1059,452 @@ function Config.SetTabColor(id, spec)
     if type(c.windows) ~= "table" then c.windows = {} end
     if type(c.windows[id]) ~= "table" then c.windows[id] = {} end
     c.windows[id].tabColor = spec
+    Config.Bump()
+    return true
+end
+
+----------------------------------------------------------------------
+-- ====== THE OPTIONS REWORK's SEAMS (2026-08-11, owner-specified) ======
+--
+-- The rework's General/Tabs sections write CONFIG, never the client: the pane
+-- names an intent, the reconciler (windows) or channels.lua (numbering) makes
+-- the client agree, and the mesh carries the answer to every character. Every
+-- setter below therefore follows the ONE shape this file has used since the
+-- alias editor landed:
+--
+--   read EFFECTIVE first (a peer account's newer copy is the truth) -> refuse
+--   an unchanged write (no sync storm) -> AdoptEffective (publish on top of
+--   the winner, never "stale world + my change") -> write -> Bump.
+--
+-- WHITELIST STATUS OF EVERYTHING TOUCHED HERE, said out loud because the
+-- aliases lesson cost a build: channel ORDER rides `join`, channel COLOURS
+-- ride `colors`, per-tab NAME/ROUTING/addonSink ride `windows`, and the combat
+-- log + addon-routing toggles ride `skin`. All four sections are named in
+-- Candidates, Snapshot AND AdoptEffective already — the suite asserts each of
+-- the three sites for each of the four.
+----------------------------------------------------------------------
+
+-- ── CHANNEL ORDER (the drag-and-drop reorder's write path) ────────────────
+--
+-- The config's `join` list IS the order: it is the { number, name } intent
+-- channels.lua's deterministic numbering engineers the client toward. A drag
+-- therefore RENUMBERS; it never joins or leaves. That distinction is the whole
+-- safety property of this control — a reorder that could add a channel would
+-- be a reorder that can spam the server with joins.
+
+-- The effective join list (winner first), normalized to a sorted array.
+function Config.JoinList()
+    local eff = Config.EffectiveCfg()
+    local j = (type(eff) == "table" and type(eff.join) == "table") and eff.join or nil
+    if not j then
+        local c = Config.Get()
+        j = (c and type(c.join) == "table") and c.join or {}
+    end
+    local out = {}
+    for _, e in ipairs(j) do
+        if type(e) == "table" and tonumber(e[1]) and type(e[2]) == "string" and e[2] ~= "" then
+            out[#out + 1] = { tonumber(e[1]), e[2] }
+        end
+    end
+    table.sort(out, function(a, b) return a[1] < b[1] end)
+    return out
+end
+
+-- The channel NAMES in configured order (what a reorder list renders).
+function Config.ChannelOrder()
+    local out = {}
+    for _, e in ipairs(Config.JoinList()) do out[#out + 1] = e[2] end
+    return out
+end
+
+-- PURE. Given the current ordered names and a desired order, answer the join
+-- list the config should hold: MEMBERSHIP IS PRESERVED EXACTLY (a name not
+-- currently in the join list is ignored; a name in it that the desired order
+-- forgot keeps its relative place at the end), numbers become 1..N.
+function Config.ReorderJoin(current, desired)
+    local have, seen = {}, {}
+    for _, name in ipairs(current or {}) do
+        if type(name) == "string" and name ~= "" then have[name:lower()] = name end
+    end
+    local out = {}
+    for _, name in ipairs(desired or {}) do
+        local key = type(name) == "string" and name:lower() or nil
+        if key and have[key] and not seen[key] then
+            seen[key] = true
+            out[#out + 1] = { #out + 1, have[key] }
+        end
+    end
+    for _, name in ipairs(current or {}) do
+        local key = name:lower()
+        if not seen[key] then
+            seen[key] = true
+            out[#out + 1] = { #out + 1, name }
+        end
+    end
+    return out
+end
+
+function Config.SetChannelOrder(names)
+    if type(names) ~= "table" then return false end
+    local want = Config.ReorderJoin(Config.ChannelOrder(), names)
+    if serEq(want, Config.JoinList()) then return false end     -- no sync storm
+    Config.AdoptEffective()
+    local c = Config.Get()
+    if not c then return false end
+    c.join = copyCfg(want)
+    Config.Bump()
+    return true
+end
+
+-- Move one channel to a 1-based slot in the order (what a dropped row asks
+-- for). Refuses a name the join list does not carry.
+function Config.MoveChannel(name, toIndex)
+    if type(name) ~= "string" then return false end
+    local order = Config.ChannelOrder()
+    local from
+    for i, n in ipairs(order) do if n:lower() == name:lower() then from = i end end
+    if not from then return false end
+    toIndex = math.max(1, math.min(#order, math.floor(tonumber(toIndex) or from)))
+    if toIndex == from then return false end
+    local moved = table.remove(order, from)
+    table.insert(order, toIndex, moved)
+    return Config.SetChannelOrder(order)
+end
+
+-- ── CHANNEL COLOURS (the per-row swatch) ──────────────────────────────────
+-- Stored BY NAME (the client keys them by number and numbers move); imposed
+-- onto the client by channels.lua's ImposeColor on every join/renumber.
+
+function Config.ChannelColors()
+    local eff = Config.EffectiveCfg()
+    if type(eff) == "table" and type(eff.colors) == "table" then return eff.colors end
+    local c = Config.Get()
+    return (c and type(c.colors) == "table") and c.colors or {}
+end
+
+function Config.ChannelColor(name)
+    local key = aliasKey(name)
+    if not key then return nil end
+    local v = Config.ChannelColors()[key]
+    if type(v) ~= "table" then return nil end
+    return { r = tonumber(v.r) or 1, g = tonumber(v.g) or 1, b = tonumber(v.b) or 1 }
+end
+
+-- nil r REMOVES the colour (the channel goes back to the client's own).
+function Config.SetChannelColor(name, r, g, b)
+    local key = aliasKey(name)
+    if not key then return false end
+    local want
+    if r ~= nil then
+        local function ch(v) v = tonumber(v) or 0 if v < 0 then v = 0 elseif v > 1 then v = 1 end return v end
+        want = { r = ch(r), g = ch(g), b = ch(b) }
+    end
+    local have = Config.ChannelColor(key)
+    if want == nil and have == nil then return false end
+    if want and have and Config.NearColor(want, have) then return false end
+    Config.AdoptEffective()
+    local c = Config.Get()
+    if not c then return false end
+    if type(c.colors) ~= "table" then c.colors = {} end
+    c.colors[key] = want
+    Config.Bump()
+    return true
+end
+
+-- ── PER-WINDOW (per-TAB) FACTS: name, message groups, channel routing ─────
+
+-- The EFFECTIVE entry for one window. Read-only.
+--
+-- ONE CONFIG ANSWERS, NEVER TWO BLENDED. If a winner exists, its `windows`
+-- table speaks for the WHOLE tab set — a per-id fallback to the local store
+-- would answer with a tab the winner deleted (and, found by the suite, would
+-- report OUR addon sink while a peer's copy is the one in force). The local
+-- store answers only when there is no candidate at all: rev 0, first run.
+function Config.WindowEntry(id)
+    id = tonumber(id)
+    if not id then return nil end
+    local eff = Config.EffectiveCfg()
+    if type(eff) == "table" then
+        local w = (type(eff.windows) == "table") and eff.windows[id] or nil
+        return type(w) == "table" and w or nil
+    end
+    local c = Config.Get()
+    local w = (c and type(c.windows) == "table") and c.windows[id] or nil
+    return type(w) == "table" and w or nil
+end
+
+-- Every window id the CONFIG declares live (shown or docked), ascending. The
+-- tab set the pane offers a page for.
+function Config.WindowIds()
+    local out = {}
+    for id = 1, numWindows() do
+        local w = Config.WindowEntry(id)
+        if type(w) == "table" and (w.shown == true or (w.docked and w.docked ~= false)) then
+            out[#out + 1] = id
+        end
+    end
+    return out
+end
+
+local function editWindow(id, mutate)
+    id = tonumber(id)
+    if not id then return false end
+    Config.AdoptEffective()
+    local c = Config.Get()
+    if not c then return false end
+    if type(c.windows) ~= "table" then c.windows = {} end
+    if type(c.windows[id]) ~= "table" then c.windows[id] = copyCfg(Config.WindowEntry(id) or {}) end
+    mutate(c.windows[id])
+    Config.Bump()
+    return true
+end
+Config.EditWindow = editWindow
+
+function Config.WindowName(id)
+    local w = Config.WindowEntry(id)
+    return (type(w) == "table" and type(w.name) == "string") and w.name or ""
+end
+
+function Config.SetWindowName(id, name)
+    if type(name) ~= "string" then return false end
+    name = name:gsub("^%s+", ""):gsub("%s+$", "")
+    if name == "" then return false end                 -- a nameless tab is not a rename
+    if Config.WindowName(id) == name then return false end
+    return editWindow(id, function(w) w.name = name end)
+end
+
+-- The message groups this window carries, sorted (the capture's own shape).
+function Config.WindowGroups(id)
+    local w = Config.WindowEntry(id)
+    local out = {}
+    if type(w) == "table" and type(w.groups) == "table" then
+        for _, g in ipairs(w.groups) do if type(g) == "string" then out[#out + 1] = g end end
+    end
+    table.sort(out)
+    return out
+end
+
+function Config.WindowHasGroup(id, group)
+    if type(group) ~= "string" then return false end
+    for _, g in ipairs(Config.WindowGroups(id)) do if g == group then return true end end
+    return false
+end
+
+function Config.SetWindowGroup(id, group, on)
+    if type(group) ~= "string" or group == "" then return false end
+    on = on and true or false
+    if Config.WindowHasGroup(id, group) == on then return false end
+    local want = {}
+    for _, g in ipairs(Config.WindowGroups(id)) do
+        if g ~= group then want[#want + 1] = g end
+    end
+    if on then want[#want + 1] = group end
+    table.sort(want)
+    return editWindow(id, function(w) w.groups = want end)
+end
+
+function Config.WindowChannels(id)
+    local w = Config.WindowEntry(id)
+    local out = {}
+    if type(w) == "table" and type(w.channels) == "table" then
+        for _, n in ipairs(w.channels) do if type(n) == "string" then out[#out + 1] = n end end
+    end
+    table.sort(out)
+    return out
+end
+
+function Config.WindowHasChannel(id, name)
+    if type(name) ~= "string" then return false end
+    for _, n in ipairs(Config.WindowChannels(id)) do
+        if n:lower() == name:lower() then return true end
+    end
+    return false
+end
+
+function Config.SetWindowChannel(id, name, on)
+    if type(name) ~= "string" or name == "" then return false end
+    on = on and true or false
+    if Config.WindowHasChannel(id, name) == on then return false end
+    local want = {}
+    for _, n in ipairs(Config.WindowChannels(id)) do
+        if n:lower() ~= name:lower() then want[#want + 1] = n end
+    end
+    if on then want[#want + 1] = name end
+    table.sort(want)
+    return editWindow(id, function(w) w.channels = want end)
+end
+
+-- ── ADD / REMOVE A TAB (config-first, the reconciler converges) ───────────
+--
+-- THE RULE THE OWNER'S "+ Add Tab" IS BUILT ON: nothing here creates a frame.
+-- The config gains a window entry, the reconciler's own convergeWindow writes
+-- it onto the client store (SetChatWindowName/Shown/Docked + routing), and the
+-- view rebuilds its strip from the client's own eligibility read. One path in,
+-- and it is the SAME path a login takes on a brand-new character.
+
+Config.COMBAT_LOG_ID = 2      -- the client's own, and never ours to re-use
+
+-- The lowest window id nothing (config or client) is using. nil when the
+-- client's ten are full — a refusal, never a silent overwrite.
+function Config.NewWindowId()
+    for id = 1, numWindows() do
+        if id ~= Config.COMBAT_LOG_ID then
+            local w = Config.WindowEntry(id)
+            local live = type(w) == "table" and (w.shown == true or (w.docked and w.docked ~= false))
+            if not live then
+                local have = Config.CaptureWindow(id)
+                if not have or (have.shown ~= true and (have.docked == false or have.docked == nil)) then
+                    return id
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- The dock index a new tab takes: one past the highest the config knows.
+local function nextDockIndex()
+    local top = 0
+    for id = 1, numWindows() do
+        local w = Config.WindowEntry(id)
+        local d = type(w) == "table" and tonumber(w.docked) or nil
+        if d and d > top then top = d end
+    end
+    return top + 1
+end
+
+-- opts = { name =, addonSink = , groups = , channels = }
+-- Returns the new id, or nil + a reason.
+function Config.AddWindow(opts)
+    opts = type(opts) == "table" and opts or {}
+    local id = Config.NewWindowId()
+    if not id then return nil, "no free chat window (the client has ten)" end
+    local name = type(opts.name) == "string" and opts.name:gsub("^%s+", ""):gsub("%s+$", "") or ""
+    if name == "" then name = "Chat " .. id end
+    -- The look fields come from the window the player already has, so a new tab
+    -- is not a differently-dressed stranger in the engine.
+    local base = Config.WindowEntry(1) or Config.CaptureWindow(1) or {}
+    local dock = nextDockIndex()
+    local groups, channels = {}, {}
+    for _, g in ipairs(type(opts.groups) == "table" and opts.groups or {}) do
+        if type(g) == "string" then groups[#groups + 1] = g end
+    end
+    for _, n in ipairs(type(opts.channels) == "table" and opts.channels or {}) do
+        if type(n) == "string" then channels[#channels + 1] = n end
+    end
+    table.sort(groups); table.sort(channels)
+    Config.AdoptEffective()
+    local c = Config.Get()
+    if not c then return nil, "no store" end
+    if type(c.windows) ~= "table" then c.windows = {} end
+    c.windows[id] = {
+        name = name, fontSize = tonumber(base.fontSize) or 14,
+        r = tonumber(base.r) or 0, g = tonumber(base.g) or 0, b = tonumber(base.b) or 0,
+        alpha = tonumber(base.alpha) or 0.25,
+        shown = true, locked = false, docked = dock, uninteractable = false,
+        groups = groups, channels = channels,
+    }
+    if opts.addonSink then c.windows[id].addonSink = true end
+    Config.Bump()
+    return id
+end
+
+-- Which tabs the config OWNS the removal of. The primary window is never
+-- removable (it is the dock's own and the view's chassis host), and neither is
+-- the client's combat log (its tab is a toggle, not a tab we made).
+function Config.RemovableWindow(id)
+    id = tonumber(id)
+    if not id or id <= 1 or id == Config.COMBAT_LOG_ID then return false end
+    local ids = Config.WindowIds()
+    for _, live in ipairs(ids) do if live == id then return true end end
+    return false
+end
+
+-- Remove = the config says CLOSED, loudly. The entry stays (emptied) rather
+-- than being deleted, because a deleted entry is a config that says NOTHING
+-- about the window — and a window the config is silent about is a window the
+-- reconciler will never close on the next character.
+function Config.RemoveWindow(id)
+    if not Config.RemovableWindow(id) then return false end
+    return editWindow(id, function(w)
+        w.shown = false
+        w.docked = false
+        w.groups = {}
+        w.channels = {}
+        w.addonSink = nil
+        w.tabColor = nil
+    end)
+end
+
+-- ── THE ADDON TAB ─────────────────────────────────────────────────────────
+
+-- The window flagged as the addon sink, or nil. Lowest id wins if a peer
+-- account somehow flagged two (deterministic, never pairs()-ordered).
+function Config.AddonSinkId()
+    for id = 1, numWindows() do
+        local w = Config.WindowEntry(id)
+        if type(w) == "table" and w.addonSink == true
+           and (w.shown == true or (w.docked and w.docked ~= false)) then
+            return id
+        end
+    end
+    return nil
+end
+
+function Config.SetAddonSink(id, on)
+    on = on and true or false
+    id = tonumber(id)
+    if not id then return false end
+    local cur = Config.AddonSinkId()
+    if on and cur == id then return false end
+    if not on and cur ~= id then return false end
+    return editWindow(id, function(w) w.addonSink = on or nil end)
+end
+
+function Config.RouteAddonLines()
+    local eff = Config.EffectiveCfg()
+    local s = (type(eff) == "table" and type(eff.skin) == "table") and eff.skin or nil
+    if s and type(s.routeAddonLines) == "boolean" then return s.routeAddonLines end
+    local c = Config.Get()
+    s = (c and type(c.skin) == "table") and c.skin or nil
+    if s and type(s.routeAddonLines) == "boolean" then return s.routeAddonLines end
+    return true
+end
+
+function Config.SetRouteAddonLines(on)
+    on = on and true or false
+    if Config.RouteAddonLines() == on then return false end
+    Config.AdoptEffective()
+    local c = Config.Get()
+    if not c then return false end
+    if type(c.skin) ~= "table" then c.skin = {} end
+    c.skin.routeAddonLines = on
+    Config.Bump()
+    return true
+end
+
+-- ── THE COMBAT LOG TAB ────────────────────────────────────────────────────
+-- OFF by default: the design's rule 6 (the combat log stays native) is what
+-- ships, and this is the owner's opt-in to hosting it in the chassis.
+
+function Config.CombatLogTab()
+    local eff = Config.EffectiveCfg()
+    local s = (type(eff) == "table" and type(eff.skin) == "table") and eff.skin or nil
+    if s and type(s.combatLogTab) == "boolean" then return s.combatLogTab end
+    local c = Config.Get()
+    s = (c and type(c.skin) == "table") and c.skin or nil
+    if s and type(s.combatLogTab) == "boolean" then return s.combatLogTab end
+    return false
+end
+
+function Config.SetCombatLogTab(on)
+    on = on and true or false
+    if Config.CombatLogTab() == on then return false end
+    Config.AdoptEffective()
+    local c = Config.Get()
+    if not c then return false end
+    if type(c.skin) ~= "table" then c.skin = {} end
+    c.skin.combatLogTab = on
     Config.Bump()
     return true
 end
@@ -1654,6 +2127,180 @@ local function testSkinLayout(fails)
     c.rev, c.at = savedRev, savedAt
 end
 
+-- THE OPTIONS REWORK's SEAMS: channel order + colours, per-tab routing, the
+-- add/remove verbs, the addon sink and the two strip toggles — plus THE
+-- WHITELIST PIN for every one of them (Candidates + Snapshot + AdoptEffective,
+-- the three sites the aliases lesson named).
+local function testReworkSeams(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local c = Config.Get()
+    if not c then return end
+    local savedWindows, savedJoin, savedColors, savedSkin =
+        c.windows, c.join, c.colors, c.skin
+    local savedRev, savedAt = c.rev, c.at
+    c.windows, c.join, c.colors, c.skin = {}, {}, {}, {}
+    c.rev, c.at = 1, Config.Now()
+
+    -- ── CHANNEL ORDER: a reorder RENUMBERS and never changes membership ──────
+    c.join = { { 1, "General" }, { 2, "Trade" }, { 3, "World" } }
+    ck(table.concat(Config.ChannelOrder(), ",") == "General,Trade,World",
+        "the order reads out of the join list, numbers ascending")
+    ck(Config.MoveChannel("World", 1) == true, "a dropped row moves a channel")
+    ck(table.concat(Config.ChannelOrder(), ",") == "World,General,Trade",
+        "…to the slot it was dropped on, everything else shifting down")
+    ck(#Config.JoinList() == 3 and Config.JoinList()[1][1] == 1
+        and Config.JoinList()[3][1] == 3,
+        "…and the join list is renumbered 1..N (the numbering engine's intent)")
+    ck(Config.SetChannelOrder({ "World", "General", "Trade" }) == false,
+        "an unchanged order is a no-op (no sync storm)")
+    -- THE SAFETY PROPERTY: a name the config is not in cannot be joined by a drag.
+    Config.SetChannelOrder({ "NotJoined", "Trade", "World", "General" })
+    local names = table.concat(Config.ChannelOrder(), ",")
+    ck(names == "Trade,World,General",
+        "a reorder NEVER adds membership (got '" .. names .. "')")
+    ck(Config.MoveChannel("NotJoined", 1) == false,
+        "…and moving a channel the config is not in is refused")
+
+    -- ── CHANNEL COLOURS, by name ─────────────────────────────────────────────
+    ck(Config.ChannelColor("Trade") == nil, "an uncoloured channel answers nothing")
+    ck(Config.SetChannelColor("Trade", 0.2, 0.4, 0.6) == true, "a swatch writes a colour")
+    local col = Config.ChannelColor("TRADE")
+    ck(col and math.abs(col.r - 0.2) < 1e-6 and math.abs(col.b - 0.6) < 1e-6,
+        "…keyed by NAME, case-folded (numbers move; names do not)")
+    ck(Config.SetChannelColor("Trade", 0.2, 0.4, 0.6) == false, "an unchanged colour is a no-op")
+    ck(Config.SetChannelColor("Trade", nil) == true and Config.ChannelColor("Trade") == nil,
+        "clearing a swatch hands the channel back to the client's own colour")
+    Config.SetChannelColor("Trade", 0.2, 0.4, 0.6)
+
+    -- ── PER-TAB NAME + ROUTING ───────────────────────────────────────────────
+    c.windows[1] = { name = "General", shown = true, docked = 1,
+                     groups = { "SAY", "GUILD" }, channels = { "General" } }
+    ck(Config.WindowName(1) == "General", "a tab reads its configured name")
+    ck(Config.SetWindowName(1, "  Main  ") == true and Config.WindowName(1) == "Main",
+        "a rename trims and lands")
+    ck(Config.SetWindowName(1, "Main") == false, "an unchanged rename is a no-op")
+    ck(Config.SetWindowName(1, "   ") == false, "a nameless rename is refused")
+    ck(Config.WindowHasGroup(1, "SAY") and not Config.WindowHasGroup(1, "YELL"),
+        "the group tree reads the configured routing")
+    ck(Config.SetWindowGroup(1, "YELL", true) == true and Config.WindowHasGroup(1, "YELL"),
+        "checking a group writes it")
+    ck(table.concat(Config.WindowGroups(1), ",") == "GUILD,SAY,YELL",
+        "…sorted, which is the shape the capture and the diff both speak")
+    ck(Config.SetWindowGroup(1, "YELL", true) == false, "an unchanged group is a no-op")
+    ck(Config.SetWindowGroup(1, "YELL", false) == true and not Config.WindowHasGroup(1, "YELL"),
+        "unchecking removes it")
+    ck(Config.SetWindowChannel(1, "Trade", true) == true and Config.WindowHasChannel(1, "TRADE"),
+        "channel routing is by name, case-folded")
+    ck(Config.SetWindowChannel(1, "Trade", false) == true
+        and not Config.WindowHasChannel(1, "Trade"), "…and unchecks again")
+
+    -- ── ADD A TAB (config-first) ─────────────────────────────────────────────
+    local before = Config.Rev()
+    local newId, why = Config.AddWindow({ name = "Loot" })
+    ck(type(newId) == "number" and newId >= 3,
+        "+ Add Tab picks a free window id (got " .. tostring(newId) .. " " .. tostring(why) .. ")")
+    if newId then
+        local w = Config.WindowEntry(newId)
+        ck(w and w.shown == true and w.name == "Loot",
+            "…and writes a LIVE window entry the reconciler can converge")
+        ck(w and type(w.docked) == "number" and w.docked > 1, "…docked past the ones we had")
+        ck(Config.Rev() > before, "…and the add is a rev-bumping, syncable edit")
+        local live = Config.WindowIds()
+        local found = false
+        for _, id in ipairs(live) do if id == newId then found = true end end
+        ck(found, "…and the new tab is in the config's live tab set")
+        ck(Config.NewWindowId() ~= newId, "…so the NEXT add picks a different id")
+
+        -- ── REMOVE ──────────────────────────────────────────────────────────
+        ck(Config.RemovableWindow(1) == false, "the primary window is never removable")
+        ck(Config.RemovableWindow(Config.COMBAT_LOG_ID) == false,
+            "…and neither is the client's combat log")
+        ck(Config.RemovableWindow(newId) == true, "a tab the config made IS removable")
+        ck(Config.RemoveWindow(newId) == true, "removing it lands")
+        local gone = Config.WindowEntry(newId)
+        ck(type(gone) == "table" and gone.shown == false and gone.docked == false,
+            "…as a config that says CLOSED (an ENTRY, so the next character closes it too)")
+        ck(Config.RemoveWindow(1) == false, "…and the primary refuses the verb outright")
+    end
+
+    -- ── THE ADDON SINK ───────────────────────────────────────────────────────
+    local sinkId = Config.AddWindow({ name = "Addon", addonSink = true })
+    ck(Config.AddonSinkId() == sinkId, "the addon tab is found by its config flag")
+    ck(Config.SetAddonSink(sinkId, true) == false, "an unchanged flag is a no-op")
+    -- The flag is CONFIG-ONLY: a wholesale capture-back must not delete it.
+    local merged = Config.MergeWindows(c.windows,
+        { [sinkId] = { name = "Addon", shown = true, groups = {}, channels = {} } })
+    ck(merged[sinkId] and merged[sinkId].addonSink == true,
+        "addonSink survives a capture-back (WINDOW_CONFIG_ONLY_FIELDS carries it)")
+    ck(Config.RouteAddonLines() == true, "addon routing defaults ON once a tab exists")
+    ck(Config.SetRouteAddonLines(false) == true and Config.RouteAddonLines() == false,
+        "…and the toggle is the recoverable red control")
+    Config.SetRouteAddonLines(true)
+    ck(Config.SetAddonSink(sinkId, false) == true and Config.AddonSinkId() == nil,
+        "unflagging leaves no sink at all")
+    Config.SetAddonSink(sinkId, true)
+
+    -- ── THE COMBAT LOG TOGGLE ────────────────────────────────────────────────
+    ck(Config.CombatLogTab() == false, "the combat log tab is OFF by default (rule 6 ships)")
+    ck(Config.SetCombatLogTab(true) == true and Config.CombatLogTab() == true,
+        "…and the toggle turns it on")
+    ck(Config.SetCombatLogTab(true) == false, "an unchanged toggle is a no-op")
+
+    -- ── THE WHITELIST, all three sites, for all four sections ────────────────
+    local snap = Config.Snapshot()
+    ck(type(snap) == "table" and type(snap.cfg) == "table", "the wire payload exists")
+    if type(snap) == "table" and type(snap.cfg) == "table" then
+        ck(type(snap.cfg.join) == "table" and #snap.cfg.join > 0,
+            "SITE 1 (Snapshot): the channel ORDER rides the wire")
+        ck(type(snap.cfg.colors) == "table" and snap.cfg.colors["trade"] ~= nil,
+            "SITE 1 (Snapshot): the channel COLOURS ride the wire")
+        ck(type(snap.cfg.windows) == "table"
+            and snap.cfg.windows[sinkId] and snap.cfg.windows[sinkId].addonSink == true,
+            "SITE 1 (Snapshot): the tab set + addon sink ride the wire")
+        ck(type(snap.cfg.skin) == "table" and snap.cfg.skin.combatLogTab == true,
+            "SITE 1 (Snapshot): the combat log + addon-routing toggles ride the wire")
+    end
+    local mine
+    for _, cand in ipairs(Config.Candidates()) do
+        if cand.owner == Config.LocalOwnerKey() then mine = cand end
+    end
+    ck(mine and type(mine.cfg.join) == "table" and type(mine.cfg.colors) == "table"
+        and type(mine.cfg.windows) == "table" and type(mine.cfg.skin) == "table",
+        "SITE 2 (Candidates): every rework section is in the LWW candidate")
+
+    local Nx = ns.Nexus
+    local savedRemote = Nx and Nx.RemoteCandidates
+    if Nx then
+        Nx.RemoteCandidates = function()
+            return { { at = Config.Now() + 500, rev = 0, owner = "peer",
+                       cfg = { join = { { 1, "Peer" } },
+                               colors = { peer = { r = 1, g = 0, b = 0 } },
+                               windows = { [5] = { name = "PeerTab", shown = true,
+                                                   docked = 5, addonSink = true,
+                                                   groups = {}, channels = {} } },
+                               skin = { combatLogTab = false, routeAddonLines = false } } } }
+        end
+        ck(Config.ChannelOrder()[1] == "Peer", "a peer's newer ORDER is the effective one")
+        ck(Config.ChannelColor("Peer") ~= nil, "…and its channel colours")
+        ck(Config.AddonSinkId() == 5, "…and its addon tab")
+        ck(Config.CombatLogTab() == false and Config.RouteAddonLines() == false,
+            "…and its strip toggles")
+        ck(c.skin.combatLogTab == true, "…with the local store untouched (receive never adopts)")
+        Config.SetCombatLogTab(true)
+        ck(c.join[1] and c.join[1][2] == "Peer",
+            "SITE 3 (AdoptEffective): an edit pulls the peer's ORDER in first")
+        ck(c.colors.peer ~= nil, "SITE 3 (AdoptEffective): …and its colours")
+        ck(c.windows[5] and c.windows[5].addonSink == true,
+            "SITE 3 (AdoptEffective): …and its tab set")
+        ck(c.skin.routeAddonLines == false,
+            "SITE 3 (AdoptEffective): …and its strip toggles")
+        Nx.RemoteCandidates = savedRemote
+    end
+
+    c.windows, c.join, c.colors, c.skin = savedWindows, savedJoin, savedColors, savedSkin
+    c.rev, c.at = savedRev, savedAt
+end
+
 ns:RegisterSelfTest("config", function(verbose)
     local suites = {
         { name = "deterministic serialization", fn = testSerialization },
@@ -1662,6 +2309,7 @@ ns:RegisterSelfTest("config", function(verbose)
         { name = "scale-normalized positions",  fn = testNormalizedPositions },
         { name = "channel aliases",             fn = testAliases },
         { name = "skin layout: placement + per-tab colour", fn = testSkinLayout },
+        { name = "the options rework's seams (order/colours/tabs/sink)", fn = testReworkSeams },
     }
     local allPass = true
     for _, suite in ipairs(suites) do

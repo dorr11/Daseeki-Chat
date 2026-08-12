@@ -92,6 +92,17 @@ view.lua
 # (it binds against their published default shapes) and BEFORE nexus.lua, which
 # only bridges what config.lua already owns.
 options.lua
+# options_tabs.lua: the options rework's TABS section - one page per chat tab
+# (name, colour, message-group tree, channel routing, per-tab notifications),
+# + Add Tab, tab removal, the Combat Log toggle and the addon tab. FILE MAP
+# AMENDMENT, 2026-08-11, owner-specified (the OPTIONS REWORK section of
+# DASEEKI_CHAT_DESIGN.md): the section is a pane of its own and carrying it
+# inside options.lua would have taken that file past 3,500 lines. The design
+# doc's file map and the harness's EXPECTED_FILE_MAP gate were amended in the
+# SAME COMMIT and the gate still pins this list byte-for-byte - the map stays
+# LAW, it simply has one more entry. Loads immediately AFTER options.lua, whose
+# binding index and wiring helpers it builds every control through.
+options_tabs.lua
 # nexus.lua: the OPTIONAL Daseeki-Nexus chatcfg bridge. ZERO hard dependency:
 # every call is type-guarded; Chat is unchanged without Nexus. Last on the list
 # because it only bridges what config.lua already owns.

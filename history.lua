@@ -69,6 +69,12 @@ ns.DEFAULTS.history = {
     cap         = DEFAULT_CAP,
     maxAgeHours = DEFAULT_AGE_H,
     optOut      = {},          -- [windowId] = true -> window excluded entirely
+    -- THE DIVIDER (the options rework's "restore behind a divider" toggle).
+    -- ON is the shipped behaviour: restored lines sit ABOVE a "-- session from
+    -- ... --" rule so old chat can never be misread as live chat. Off restores
+    -- the lines bare, for a player who would rather have the extra row of
+    -- scrollback than the marker.
+    divider     = true,
 }
 ns.CHAR_DEFAULTS.history = {}
 
@@ -269,6 +275,9 @@ function History.Restore(reason)
     local nowUp, nowSrv = gt(), gst()
     local ageCut = maxAgeSecs()
 
+    -- The divider is a SETTING now (the options rework): read once for the
+    -- whole restore so every window agrees about it.
+    local wantDivider = cfg().divider ~= false
     -- Divider ink: the theme's muted token (never hardcoded).
     local UI = _G.DaseekiUI
     local dr, dg, db_ = 0.5, 0.5, 0.5
@@ -320,17 +329,22 @@ function History.Restore(reason)
                         local okN, gotN = pcall(frame.GetNumMessages, frame)
                         have = (okN and tonumber(gotN)) or 0
                     end
-                    local room = maxN - have - 1        -- one slot for the divider
+                    -- One slot is reserved for the divider only when there is
+                    -- going to BE one: with the marker off, that row is
+                    -- scrollback the player gets back.
+                    local room = maxN - have - (wantDivider and 1 or 0)
                     if room > 0 then
                         local take = math.min(#kept, room)
-                        buf:PushFront({
-                            message = dividerText,
-                            r = dr, g = dg, b = db_,
-                            timestamp = History.RestampFor(nowUp, nowSrv,
-                                tonumber(snap.at) or nowSrv),
-                            daseekiRestored = true,
-                            daseekiDivider  = true,
-                        })
+                        if wantDivider then
+                            buf:PushFront({
+                                message = dividerText,
+                                r = dr, g = dg, b = db_,
+                                timestamp = History.RestampFor(nowUp, nowSrv,
+                                    tonumber(snap.at) or nowSrv),
+                                daseekiRestored = true,
+                                daseekiDivider  = true,
+                            })
+                        end
                         for i = #kept, #kept - take + 1, -1 do
                             local ln = kept[i]
                             buf:PushFront({
@@ -687,6 +701,35 @@ local function testLive(fails, verbose)
     ck(History.lastRestore and History.lastRestore.reason == "reload",
         "phase 6: the reload beat restores too (verdict says reload)")
     ns.db.history.optOut[3] = nil
+
+    -- ── Phase 6b: the DIVIDER toggle (the options rework's control). ─────────
+    -- The marker is the shipped default and it is now a setting, so the OFF
+    -- posture has to be pinned: the lines still restore, and the rule does not
+    -- appear at all (a toggle that only changed a comment would pass a
+    -- bind-check and still be a lie).
+    Sim.Logout()
+    Sim.NewSession()
+    ns.db.history.divider = false
+    History.rings[1] = nil
+    Sim.EnterWorld(false, true)
+    HT.flush()
+    local offDiv, offLines = 0, cf1:GetNumMessages()
+    for i = 1, #cf1.historyBuffer.list do
+        if cf1.historyBuffer.list[i].daseekiDivider then offDiv = offDiv + 1 end
+    end
+    ck(offDiv == 0, "phase 6b: divider OFF restores with NO session rule at all")
+    ck(offLines > 0, "phase 6b: …and the lines themselves still come back")
+    ns.db.history.divider = true
+    Sim.Logout()
+    Sim.NewSession()
+    History.rings[1] = nil
+    Sim.EnterWorld(false, true)
+    HT.flush()
+    local onDiv = 0
+    for i = 1, #cf1.historyBuffer.list do
+        if cf1.historyBuffer.list[i].daseekiDivider then onDiv = onDiv + 1 end
+    end
+    ck(onDiv == 1, "phase 6b: turning it back on restores behind the rule again")
 
     -- ── Phase 7: disable is inert; re-enable never double-wraps. ─────────────
     ns.SetModuleEnabled("history", false)

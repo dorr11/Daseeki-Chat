@@ -186,6 +186,69 @@ making room for the side rail.
   you drag, the snap on the drop, and the size still syncs to your other
   characters.
 
+### The settings menu, rebuilt
+
+The old settings page had eight sections and told you almost nothing about what
+any of them were for. It has been rebuilt as **three**, around what you actually
+set:
+
+**General — how chat looks.** Font, text size and theme (the whole Daseeki
+suite's, offered here rather than copied, so changing one changes every Daseeki
+window at once), message text size, line spacing, tab text size, tab style
+(top / left / right), and the lock. **No sliders anywhere** — every number is a
+dropdown of sensible steps, and the test suite now fails the build if a slider
+ever comes back. Timestamps, name colouring, web links and the copy button
+folded in underneath as one display group, and the game's-own-windows settings
+sit last, behind a line that says plainly which renderer they speak to.
+
+**General → Channels — one row per channel, and three things you can do to it:**
+
+- **Drag a row to change that channel's number.** The order you drop them in is
+  the order your characters get: it writes the shared configuration's channel
+  order, and the join-order engine drives the game's own numbering to match on
+  every character. A drag can only ever *renumber* — it can never join or leave
+  a channel — and a channel you are not currently in politely refuses to move
+  (there is no number to change) while keeping its colour and its name.
+- **A colour per channel**, stored by name, so it survives the game shuffling
+  channel numbers around between characters and sessions.
+- **A short name per channel.** "LookingForGroup" becomes "LFG" in the chat
+  line, on the typing bar's channel label, and on any tab that belongs to that
+  channel — the same one seam, three places. This replaces the separate
+  *Channel names* page; there is now exactly one place to rename a channel.
+
+**Tabs — one page per chat tab.** Its name, its colour, which kinds of message
+come to it (the game's own message groups, as a tidy checklist), which channels
+come to it, and its notifications (unread counter and whisper accent, per tab).
+Channel and message colours deliberately are *not* here: they belong to the
+channel, not to the tab, so they live in General and stay consistent everywhere.
+Plus three new things:
+
+- **+ Add Tab.** A new tab appears immediately, and on every one of your
+  characters — it is written into the shared configuration and the reconciler
+  creates the window, exactly the way a brand-new character gets your layout.
+  **Removing** a tab asks twice (the button re-labels itself to *Really
+  remove?*); your first chat window can never be removed.
+- **A Combat Log tab.** Off by default. Turned on, the game's own combat log
+  moves *inside* the chat box as a tab — it stays the game's log window, so it
+  is not timestamped, coloured, counted or kept by Daseeki; it is just hosted.
+  Turned off, it goes back where it was.
+- **An Addon tab.** A tab that collects what *other* addons print to chat, so
+  your conversation stays your conversation. **The honest part:** a chat line
+  carries no flag saying who wrote it, so this is a best guess — a line that
+  arrives outside the game's own chat delivery is treated as addon output. An
+  addon that prints while the game is delivering a message will read as chat and
+  stay where it is. Which is why there is a *Route addon messages here* switch:
+  turn it off (or do not make the tab at all) and every line goes exactly where
+  it would have gone before, unchanged.
+
+**Chat History** keeps its own page: on or off, how many lines per tab, how old
+is too old, and whether restored lines sit behind a session divider (new — turn
+it off and you get that row of scrollback back).
+
+Everything above is part of your shared configuration and reaches every
+character, the same as the rest: tab order, tab names, colours, routing, the two
+special tabs and the channel order, names and colours.
+
 **Moving and resizing, in one paragraph:** while the box is unlocked, drag the
 tab strip — anywhere on it, including past the last tab — to move it, or hold
 ALT and drag anywhere on it. Drop it near a screen edge, a screen centre line or
