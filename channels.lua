@@ -927,6 +927,55 @@ local function testAliasDecorator(fails)
     ck(Decor.Process(hostileDisplay) == hostileDisplay,
         "a URL-ish channel display with no alias is left exactly alone")
 
+    -- ── THE OWNER'S FEED, HIS EXACT TABLE (defect round 2, 2026-08-12) ───────
+    -- Live SavedVariables, rev 42: aliases = { lookingforgroup = "LFG",
+    -- general = "ZONE", oyfechat = "OYFE" }, aliasKeepNumber = false. Every key
+    -- is a BASE name (it is what the join list and the settings row carry), and
+    -- his screenshot showed "[LFG]" beside a raw "[5. General - Stormwind
+    -- City]" and a raw "[2. Trade - City]". The alias for General WAS saved.
+    -- This is that feed: the client's own zone-suffixed headers, his table,
+    -- asserted through the real decorator on the real pipeline.
+    do
+        cfg.aliases = { lookingforgroup = "LFG", general = "ZONE",
+                        oyfechat = "OYFE", trade = "TRADE" }
+        cfg.aliasKeepNumber = false
+        local L_LFG   = "|Hchannel:channel:3|h[3. LookingForGroup]|h"
+        local L_GEN   = "|Hchannel:channel:5|h[5. General - Stormwind City]|h"
+        local L_TRADE = "|Hchannel:channel:2|h[2. Trade - City]|h"
+        local L_OYFE  = "|Hchannel:channel:4|h[4. oyfechat]|h"
+
+        ck(Decor.Process(L_LFG):find("|Hchannel:channel:3|h[LFG]|h", 1, true) ~= nil,
+            "owner's feed: the zoneless channel rendered '[LFG]' before and still does")
+        local gen = Decor.Process(L_GEN)
+        ck(gen:find("|Hchannel:channel:5|h[ZONE]|h", 1, true) ~= nil,
+            "owner's feed RED CONTROL — '[5. General - Stormwind City]' renders '[ZONE]'. "
+            .. "His 'general' alias WAS saved and the feed showed the client's raw zoned "
+            .. "header, because the resolver only ever tried the full name (got: "
+            .. tostring(gen:match("|Hchannel:.-|h.-|h")) .. ")")
+        ck(gen:find("Stormwind City", 1, true) == nil,
+            "…and the zone suffix is gone from the line entirely")
+        local tr = Decor.Process(L_TRADE)
+        ck(tr:find("|Hchannel:channel:2|h[TRADE]|h", 1, true) ~= nil,
+            "owner's feed RED CONTROL — '[2. Trade - City]' renders '[TRADE]', the nickname "
+            .. "he was trying to set (got: " .. tostring(tr:match("|Hchannel:.-|h.-|h")) .. ")")
+        ck(tr:find("[2. TRADE]", 1, true) == nil,
+            "owner's feed: aliasKeepNumber = false still DROPS the number — '[TRADE]', "
+            .. "never '[2. TRADE]'")
+        ck(Decor.Process(L_OYFE):find("|Hchannel:channel:4|h[OYFE]|h", 1, true) ~= nil,
+            "owner's feed: his custom channel is unaffected by the zoned-name fallback")
+        -- The payload is still untouchable across the new resolution path.
+        ck(tr:find("|Hchannel:channel:2|h", 1, true) ~= nil
+            and gen:find("|Hchannel:channel:5|h", 1, true) ~= nil,
+            "owner's feed: every payload rode through the zoned rename byte-identical")
+        -- A channel with NO alias in his table still renders the client's bytes.
+        local L_WORLD = "|Hchannel:channel:9|h[9. World - Elwynn Forest]|h"
+        ck(Decor.Process(L_WORLD) == L_WORLD,
+            "owner's feed RED CONTROL — a zoned channel he never named is left byte-exact "
+            .. "(the fallback resolves, it does not invent)")
+        cfg.aliases, cfg.aliasKeepNumber = {}, false
+        C.SetAlias("Trade - City", "Trade")
+    end
+
     -- ── Inertness: disable the module and the aliases stop rendering ─────────
     ns.SetModuleEnabled("channels", false)
     ck(Decor.Process(TRADE) == TRADE,

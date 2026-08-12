@@ -1401,6 +1401,16 @@ function View.EnsureFrame(id)
     smf:SetScript("OnHyperlinkClick", function(_, link, text, button)
         View.OnHyperlink(link, text, button)
     end)
+    -- ── CLICK ONLY, NEVER HOVER (owner, 2026-08-12) ─────────────────────────
+    -- "chat links show their tooltip on hover; I want stock behaviour — click
+    -- only." A tooltip on a chat hyperlink is never automatic: it is always an
+    -- OnHyperlinkEnter script calling GameTooltip:SetHyperlink. This frame is
+    -- built by CreateFrame with NO TEMPLATE, so it inherits none — and these
+    -- two lines say so OUT LOUD rather than by omission, which is what makes it
+    -- a contract the suite can pin instead of an accident that a later template
+    -- or a copy-paste could quietly reverse.
+    smf:SetScript("OnHyperlinkEnter", nil)
+    smf:SetScript("OnHyperlinkLeave", nil)
     smf:SetScript("OnMouseWheel", function(self, delta)
         if delta > 0 then call(self, "ScrollUp") else call(self, "ScrollDown") end
     end)
@@ -2320,8 +2330,18 @@ function View.HostCombatLog()
     View._logHome = {
         parent = (type(frame.GetParent) == "function") and frame:GetParent() or nil,
         points = savePoints(frame),
+        -- The hosted log is the ONE frame in this window we did not build, so
+        -- it arrives carrying the client's own FloatingChatFrame scripts —
+        -- including the hover tooltip. Inside our box every feed behaves the
+        -- same way (click for a tooltip, never hover), so the two hover scripts
+        -- come off for as long as we are hosting it, and go back EXACTLY as
+        -- they were when we hand the frame home.
+        hlEnter = (type(frame.GetScript) == "function") and frame:GetScript("OnHyperlinkEnter") or nil,
+        hlLeave = (type(frame.GetScript) == "function") and frame:GetScript("OnHyperlinkLeave") or nil,
     }
     call(frame, "SetParent", View.chassis)
+    call(frame, "SetScript", "OnHyperlinkEnter", nil)
+    call(frame, "SetScript", "OnHyperlinkLeave", nil)
     View.logHosts = (View.logHosts or 0) + 1
     return true
 end
@@ -2334,6 +2354,9 @@ function View.ReleaseCombatLog()
     if type(frame) ~= "table" then return false end
     call(frame, "SetParent", home.parent)
     restorePoints(frame, home.points)
+    -- Give the client's own hover scripts back, byte-for-byte.
+    call(frame, "SetScript", "OnHyperlinkEnter", home.hlEnter)
+    call(frame, "SetScript", "OnHyperlinkLeave", home.hlLeave)
     return true
 end
 
@@ -3302,8 +3325,27 @@ local function ensureGrip(corner)
         ink("accent")
         call(self, "SetAlpha", GRIP_RESTING_ALPHA)
     end)
+    -- ── THE GESTURE WIRING (owner defect, 2026-08-12: "when i click and drag a
+    -- corner it isnt aligned with my mouse") ────────────────────────────────
+    -- THE ASYMMETRY: every MOVE surface in this file is wired the client's way
+    -- — RegisterForDrag + OnDragStart/OnDragStop (the chassis at 545/592, the
+    -- strip at 573, the minimised button at 906). The resize grips alone were
+    -- wired OnMouseDown/OnMouseUp, and a Button's OnMouseUp only fires if the
+    -- release happens OVER THE BUTTON. A corner drag is precisely the gesture
+    -- that walks the pointer off its own grip: the chassis is clamped to screen
+    -- (539) and floored by ClampChassisSize, so the moment the box stops
+    -- following the cursor the cursor slides off the grip — and the release
+    -- then lands on nothing. The sizing loop never ended, so the corner kept
+    -- tracking the mouse after the button was up. That is the misalignment.
+    --
+    -- Both halves are wired now, and both verbs are idempotent, so whichever
+    -- pair the client delivers, the gesture starts once and ENDS on release
+    -- wherever the pointer happens to be.
+    call(btn, "RegisterForDrag", "LeftButton")
     btn:SetScript("OnMouseDown", function() View.OnResizeStart(corner) end)
     btn:SetScript("OnMouseUp",   function() View.OnResizeStop() end)
+    btn:SetScript("OnDragStart", function() View.OnResizeStart(corner) end)
+    btn:SetScript("OnDragStop",  function() View.OnResizeStop() end)
     View.grips[corner] = btn
     return btn
 end
@@ -3418,6 +3460,10 @@ end
 function View.OnResizeStart(corner)
     if not View.active then return false end
     if View.Locked() then return false end            -- a locked box is a rock
+    -- IDEMPOTENT: the client may deliver OnMouseDown AND OnDragStart for one
+    -- grab. The second must not re-capture the anchor from the half-resized
+    -- box, or the corner the player is NOT dragging walks mid-gesture.
+    if View._sizing then return false end
     local f = View.chassis
     if not f then return false end
     corner = tostring(corner or "BOTTOMRIGHT"):upper()
@@ -3428,6 +3474,16 @@ function View.OnResizeStart(corner)
     local ax, ay = View.CornerPoint(OPPOSITE_CORNER[corner])
     if ax == nil then return false end
     call(f, "SetResizable", true)
+    -- HAND THE FLOOR TO THE CLIENT TOO, for the duration of ITS sizing loop.
+    -- The drop clamp below stays (a floor that only lives in the client's loop
+    -- is a floor that never runs on the paths we drive ourselves) — but without
+    -- this, the client happily shrinks the box past the minimum while the
+    -- player drags and ResizeAnchored snaps it back out at release. That snap
+    -- IS a corner leaving the cursor. Bounds here make the drag itself stop
+    -- where the drop would, so what the player drags is what they get.
+    local minW, minH = View.MinChassisSize()
+    local maxW, maxH = View.MaxChassisSize()
+    call(f, "SetResizeBounds", minW, minH, maxW, maxH)
     local ok = pcall(f.StartSizing, f, corner)
     if not ok then return false end
     View._sizing = true
@@ -4243,6 +4299,37 @@ local function testLive(fails, verbose)
     ck(type(copyText) == "string" and copyText:find("mirror%-me"),
         "phase 8: the copy affordance reads the VIEW's frame (one copy window, two callers)")
 
+    -- CLICK ONLY, NEVER HOVER (owner, 2026-08-12). A chat hyperlink's tooltip
+    -- is always an OnHyperlinkEnter script — there is no automatic one — so the
+    -- whole claim is "our feeds carry no such script, and hovering reaches the
+    -- client not at all".
+    do
+        local hovered = 0
+        for _, id in ipairs(View.ids) do
+            local smf = View.frames[id]
+            if smf then
+                if smf:GetScript("OnHyperlinkEnter") or smf:GetScript("OnHyperlinkLeave") then
+                    hovered = hovered + 1
+                end
+            end
+        end
+        ck(hovered == 0, "phase 8: RED CONTROL — NO view feed carries a hyperlink HOVER "
+            .. "script, so a link shows its tooltip on CLICK only, like stock chat ("
+            .. hovered .. " frame(s) would pop on hover)")
+        -- …and hovering really reaches the client nowhere: no tooltip verb, no
+        -- item-ref verb, nothing. (The click pin above already ran; this proves
+        -- the hover path is not a quieter way into the same call.)
+        Sim.ResetCalls()
+        local smf = View.frames[View.activeId]
+        local enter = smf and smf:GetScript("OnHyperlinkEnter")
+        if enter then pcall(enter, smf, "item:19019", "[Thunderfury]") end
+        ck(Sim.CallCount("SetItemRef") == 0,
+            "phase 8: …and a hover reaches the client's item-ref handler ZERO times")
+        View.OnHyperlink("item:19019", "[Thunderfury]", "LeftButton")
+        ck(Sim.CallCount("SetItemRef") == 1,
+            "phase 8: …while the CLICK still forwards exactly once (unchanged)")
+    end
+
     -- ── Phase 9: position, drag and the snap layer, reused whole. ────────
     local S = ns.Skin
     ck(S.SnapPeers() [1] == View.chassis,
@@ -4662,6 +4749,94 @@ local function testLive(fails, verbose)
         local fl3, fb3, fw3, fh3 = rect(View.frames[View.activeId])
         ck(fb3 ~= nil and rb2 ~= nil and fb3 + fh3 <= rb2 + 1e-6,
             "phase 17 [" .. corner .. "]: …and the feed still clears the strip")
+    end
+
+    -- ── THE CORNER TRACKS THE CURSOR (owner defect, 2026-08-12) ──────────
+    -- "when i click and drag a corner it isnt aligned with my mouse". Every
+    -- resize pin above drives Sim.SizeTo, which takes the destination ALREADY
+    -- IN THE FRAME'S UNITS — so no pin here has ever crossed the screen-pixel
+    -- boundary the pointer actually lives on. Sim.GripDragTo does, and it keeps
+    -- the GRAB OFFSET, so these assert the two failures apart: a corner that
+    -- JUMPS to the cursor at drag-start, and a corner that DRIFTS during it.
+    if type(Sim.GripDragTo) == "function" then
+        local savedScale = Sim.uiScale
+        for _, scale in ipairs({ 1.0, 0.71, 1.25 }) do
+            Sim.SetUIScale(scale)
+            View.Reflow()
+            for _, corner in ipairs(View.GRIP_CORNERS) do
+                local f = View.chassis
+                View.OnResizeStop()
+                -- Start well inside the size bounds, so this pin measures
+                -- TRACKING and never the clamp (the clamp has its own pins).
+                local mnW, mnH = View.MinChassisSize()
+                View.ResizeAnchored(mnW + 320, mnH + 320, corner, nil)
+                local fs = f:GetEffectiveScale()
+                -- Grab the grip NINE UNITS in from the corner on both axes, so
+                -- the pointer is deliberately NOT on the corner point.
+                local sx = (corner:find("RIGHT") and (f:GetLeft() + f:GetWidth() - 9)
+                                                 or (f:GetLeft() + 9)) * fs
+                local sy = (corner:find("TOP") and (f:GetBottom() + f:GetHeight() - 9)
+                                               or (f:GetBottom() + 9)) * fs
+                Sim.cursor = { sx, sy }
+                ck(View.OnResizeStart(corner) == true,
+                    ("phase 17 [%s @%.2f]: the grip starts a resize"):format(corner, scale))
+                local gx, gy = Sim.SizingCornerScreen(f)
+                -- The offset between pointer and corner AT THE GRAB, in pixels.
+                local offX, offY = gx - sx, gy - sy
+                -- RED CONTROL 1: the grab itself must move nothing.
+                local jx, jy = Sim.SizingCornerScreen(f)
+                ck(math.abs(jx - gx) < 1e-6 and math.abs(jy - gy) < 1e-6,
+                    ("phase 17 [%s @%.2f]: RED CONTROL — the corner does not JUMP to the "
+                    .. "cursor when the grip is grabbed off-centre"):format(corner, scale))
+                -- Now drag the pointer 40 SCREEN PIXELS INWARD on both axes — a
+                -- real resize that stays clear of BOTH bounds, so what this
+                -- measures is tracking and nothing else.
+                local dx = corner:find("RIGHT") and -40 or 40
+                local dy = corner:find("TOP") and -40 or 40
+                Sim.GripDragTo(f, sx + dx, sy + dy)
+                local ax, ay = Sim.SizingCornerScreen(f)
+                -- RED CONTROL 2: the corner is still exactly the grab offset
+                -- away from the pointer — it tracked, it did not drift.
+                ck(math.abs(ax - (Sim.cursor[1] + offX)) < 1e-6
+                   and math.abs(ay - (Sim.cursor[2] + offY)) < 1e-6,
+                    ("phase 17 [%s @%.2f]: RED CONTROL — the dragged corner stays under the "
+                    .. "cursor (grab offset preserved) at this UI scale: corner (%.3f,%.3f) "
+                    .. "vs cursor+offset (%.3f,%.3f)"):format(corner, scale, ax, ay,
+                        Sim.cursor[1] + offX, Sim.cursor[2] + offY))
+                -- …and the RELEASE must not move it either: the drop clamp has
+                -- nothing to correct, because the client's own bounds already
+                -- stopped the drag where the clamp would have.
+                View.OnResizeStop()
+                local rx, ry = (corner:find("RIGHT") and (f:GetLeft() + f:GetWidth()) or f:GetLeft()) * fs,
+                               (corner:find("TOP") and (f:GetBottom() + f:GetHeight()) or f:GetBottom()) * fs
+                ck(math.abs(rx - ax) < 1e-6 and math.abs(ry - ay) < 1e-6,
+                    ("phase 17 [%s @%.2f]: RED CONTROL — releasing does not SNAP the corner "
+                    .. "somewhere else (no jump at the drop)"):format(corner, scale))
+            end
+        end
+        -- THE RELEASE THAT LANDS OFF THE GRIP. A corner drag walks the pointer
+        -- off its own 12x18 grip; a Button's OnMouseUp never fires then. The
+        -- drag pair does, and that is why both are wired.
+        do
+            local g = View.grips.BOTTOMRIGHT
+            View.OnResizeStop()
+            ck(type(g:GetScript("OnDragStop")) == "function",
+                "phase 17: RED CONTROL — the grip carries OnDragStop, so a release that "
+                .. "lands anywhere on screen still ends the resize (OnMouseUp alone fires "
+                .. "only over the button — the corner kept tracking the mouse after the "
+                .. "button was up)")
+            ck(type(g:GetScript("OnDragStart")) == "function",
+                "phase 17: …and OnDragStart, the same pair every MOVE surface here uses")
+            g:GetScript("OnDragStart")(g)
+            ck(View._sizing == true, "phase 17: a drag-start really begins the gesture")
+            ck(View.OnResizeStart("BOTTOMRIGHT") == false,
+                "phase 17: …and a second start is refused, so OnMouseDown + OnDragStart "
+                .. "for one grab cannot re-capture the anchor mid-gesture")
+            g:GetScript("OnDragStop")(g)
+            ck(View._sizing == nil, "phase 17: …and the drag-stop ends it")
+        end
+        Sim.SetUIScale(savedScale)
+        View.Reflow()
     end
 
     -- LOCKED: every gesture is inert, nothing is captured, the grips are gone.

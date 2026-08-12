@@ -682,6 +682,7 @@ function WIDGET_API.StopMovingOrSizing(self)
     record("StopMovingOrSizing")
     self._moving = false
     self._sizing = nil
+    self._sizeGrab = nil
     -- w2/button-column sim extension: the window landed somewhere new, so the
     -- client re-decides which side its button column belongs on — and re-shows
     -- it in the process. This is the beat that makes two accounts differ.
@@ -729,6 +730,16 @@ function WIDGET_API.StartSizing(self, point)
     record("StartSizing")
     if not self._resizable then return end
     self._sizing = tostring(point or "BOTTOMRIGHT"):upper()
+    -- THE GRAB, recorded the way the client records it: the cursor's SCREEN
+    -- position and the frame's rect at the instant of the grab. Everything the
+    -- sizing loop does afterwards is a DELTA off this pair, which is what makes
+    -- the grab offset survive the drag (see Sim.GripDragTo).
+    local l, b, w, h = resolveRect(self)
+    if l == nil then l, b, w, h = self._left, self._bottom, self._w or 0, self._h or 0 end
+    self._sizeGrab = {
+        cx = Sim.cursor[1], cy = Sim.cursor[2],
+        l = l or 0, b = b or 0, w = w or 0, h = h or 0,
+    }
 end
 function WIDGET_API.IsResizing(self) return self._sizing and true or false end
 function WIDGET_API.SetHitRectInsets(self) end
@@ -800,6 +811,88 @@ function Sim.SizeTo(frame, x, y)
     frame._left, frame._bottom = nl, nb
     frame:SetSize(nw, nh)
     return nw, nh
+end
+
+-- ── THE CURSOR-FAITHFUL SIZING LOOP (resize sim extension, 2026-08-12) ───────
+--
+-- WHY Sim.SizeTo WAS NOT ENOUGH, named: it takes the corner's destination in
+-- the FRAME'S OWN UNITS, so it hands the code under test an answer that is
+-- already in the right space. Every scale bug in a resize path lives in the
+-- conversion from the pointer's SCREEN PIXELS into those units — and a sim that
+-- never makes that conversion cannot fail it. That is the same blind spot
+-- Class 9 named: the sim tested the fix, never the hazard.
+--
+-- So THIS is how a test drags a corner: in SCREEN PIXELS, like a mouse. The
+-- model is the client's own: the dragged corner moves by the cursor's DELTA
+-- since the grab, converted into the frame's units by the frame's EFFECTIVE
+-- SCALE, with the opposite corner held. The GRAB OFFSET therefore survives —
+-- grabbing a grip 9 units in from the corner keeps the corner 9 units from the
+-- pointer for the whole drag, exactly as the live client behaves — so a test
+-- can tell "tracks the mouse" apart from "jumps to the mouse".
+--
+-- The client's own resize bounds ARE enforced here (unlike SetResizeBounds'
+-- record-only posture on the paths WE drive), because during the client's
+-- sizing loop the client really does apply them — and a drag that runs past the
+-- floor and gets snapped back at release is a corner leaving the cursor.
+function Sim.GripDragTo(frame, screenX, screenY)
+    if type(frame) ~= "table" or not frame._sizing then return nil end
+    local g = frame._sizeGrab
+    if not g then return nil end
+    local fs = frame:GetEffectiveScale()
+    if not fs or fs <= 0 then return nil end
+    Sim.cursor = { tonumber(screenX) or g.cx, tonumber(screenY) or g.cy }
+    -- Screen pixels -> this frame's units. THE divide the hazard lives in.
+    local dx = (Sim.cursor[1] - g.cx) / fs
+    local dy = (Sim.cursor[2] - g.cy) / fs
+    local corner = tostring(frame._sizing):upper()
+    local l, b, w, h = g.l, g.b, g.w, g.h
+    local nl, nb, nw, nh = l, b, w, h
+    if corner:find("RIGHT") then nw = w + dx else nl, nw = l + dx, w - dx end
+    if corner:find("TOP")   then nh = h + dy else nb, nh = b + dy, h - dy end
+    -- The client's bounds, applied around the corner that is NOT moving.
+    local bounds = frame._resizeBounds
+    if bounds then
+        local minW, minH, maxW, maxH = bounds[1], bounds[2], bounds[3], bounds[4]
+        local cw, ch = nw, nh
+        if minW and cw < minW then cw = minW end
+        if maxW and maxW > 0 and cw > maxW then cw = maxW end
+        if minH and ch < minH then ch = minH end
+        if maxH and maxH > 0 and ch > maxH then ch = maxH end
+        if cw ~= nw then
+            if corner:find("RIGHT") then nw = cw else nl, nw = l + w - cw, cw end
+        end
+        if ch ~= nh then
+            if corner:find("TOP") then nh = ch else nb, nh = b + h - ch, ch end
+        end
+    end
+    frame._left, frame._bottom = nl, nb
+    -- AND RE-ANCHOR, because the client's sizing loop really does move the
+    -- frame: dragging a LEFT or BOTTOM corner changes the rect's ORIGIN, not
+    -- only its size. Writing _left/_bottom alone is invisible to any frame that
+    -- resolves its rect through SetPoint (which the chassis does), and that
+    -- kindness would hide exactly the half of the gesture — the two corners
+    -- that move the box — this model exists to test.
+    local P = _G.UIParent
+    if P then
+        frame:ClearAllPoints()
+        frame:SetPoint("BOTTOMLEFT", P, "BOTTOMLEFT", nl, nb)
+    end
+    frame:SetSize(nw, nh)
+    return nw, nh
+end
+
+-- Where the DRAGGED corner sits right now, in SCREEN PIXELS — the coordinate
+-- space a test can compare against the cursor without converting anything.
+function Sim.SizingCornerScreen(frame)
+    if type(frame) ~= "table" then return nil end
+    local corner = tostring(frame._sizing or "BOTTOMRIGHT"):upper()
+    local l, b, w, h = resolveRect(frame)
+    if l == nil then l, b, w, h = frame._left, frame._bottom, frame._w or 0, frame._h or 0 end
+    if l == nil then return nil end
+    local fs = frame:GetEffectiveScale()
+    local x = (corner:find("RIGHT") and (l + (w or 0)) or l) * fs
+    local y = (corner:find("TOP")   and (b + (h or 0)) or b) * fs
+    return x, y
 end
 
 -- ── THE CLIENT'S CLAMP *ENFORCEMENT* (w2/bounce sim extension) ───────────────

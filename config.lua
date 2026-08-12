@@ -847,19 +847,13 @@ end
 -- (the entry chip) asks THIS and a surface that renders the client's own shape
 -- when there is no alias (the chat line, the tab) keeps asking AliasLabel.
 --
--- The alias is looked up under the client's full name FIRST and the short name
--- SECOND: the chat line's own display text carries the short form ("[5.
--- General]") while the settings row carries whatever the client listed, so an
--- alias written from either surface lights the other one up.
+-- The alias lookup itself (full name, then short name) lives in AliasLabel now
+-- — see the resolver note there — so this function only adds the FLOOR.
 function Config.ChannelLabel(number, name)
     local label = Config.AliasLabel(number, name)
     if label then return label end
     local short = Config.ChannelShortName(name)
     if not short then return nil end
-    if short ~= name then
-        label = Config.AliasLabel(number, short)
-        if label then return label end
-    end
     if Config.AliasKeepNumber() then
         local n = tonumber(number)
         if n then return n .. ". " .. short end
@@ -884,8 +878,31 @@ end
 -- the display core every surface renders — "Trade", or "2. Trade" when the
 -- keep-number option is on — or nil when this channel has no alias, which is
 -- every surface's instruction to render the client's own text untouched.
+--
+-- ── THE ZONED-NAME RESOLUTION RULE (owner defect, 2026-08-12, round 2) ───────
+-- THE DEFECT: the owner's "general" -> "ZONE" alias WAS saved and his feed
+-- still read "[5. General - Stormwind City]", while "lookingforgroup" -> "LFG"
+-- rendered fine. The reason is the client's own naming convention: a ZONE
+-- channel's name carries the zone glued on (" - Stormwind City", " - City"),
+-- and every surface that asks the client gets that LONG form, while the name a
+-- player types in the settings row — and the name the join list carries — is
+-- the BASE. An exact-key lookup therefore hits for a zoneless channel and
+-- misses for every city channel: precisely the split the owner saw.
+--
+-- THE RULE, and it lives HERE, once: resolve the full name FIRST (so an alias
+-- deliberately written against the long form still wins), and the base name —
+-- ChannelShortName, the ONE place that knows how the client composes the
+-- suffix — SECOND. Every surface that renders a channel calls this function
+-- (the chat line's link decorator, the tab label, the edit box's header, the
+-- entry chip via ChannelLabel, the channel menu), so fixing the resolver fixes
+-- all of them and there is still no second place that knows how an alias is
+-- spelled. That single-seam property is what the suite pins.
 function Config.AliasLabel(number, name)
     local alias = Config.GetAlias(name)
+    if not alias then
+        local short = Config.ChannelShortName(name)
+        if short and short ~= name then alias = Config.GetAlias(short) end
+    end
     if not alias then return nil end
     local n = number ~= nil and tostring(number) or ""
     if n ~= "" and Config.AliasKeepNumber() then
@@ -2056,6 +2073,52 @@ local function testAliases(fails)
         .. "what the chat line's own display text carries) is found too — one channel, one "
         .. "nickname, whichever surface named it")
     Config.SetAlias("General", "")
+
+    -- ── THE OWNER'S OWN TABLE, at the SEAM (defect round 2, 2026-08-12) ──────
+    -- His live SavedVariables at rev 42: aliases = { lookingforgroup = "LFG",
+    -- general = "ZONE", oyfechat = "OYFE" }, aliasKeepNumber = false. His feed
+    -- showed "[LFG]" — and "[5. General - Stormwind City]" RAW, with "general"
+    -- SAVED. AliasLabel is what every rendering surface asks, and it answered
+    -- nothing for the zoned form, which is the whole defect. Same data, here.
+    do
+        local savedA, savedK = c.aliases, c.aliasKeepNumber
+        c.aliases = { lookingforgroup = "LFG", general = "ZONE",
+                      oyfechat = "OYFE", trade = "TRADE" }
+        c.aliasKeepNumber = false
+        ck(Config.AliasLabel(3, "LookingForGroup") == "LFG",
+            "owner's table: the zoneless channel aliased before and still does")
+        ck(Config.AliasLabel(5, "General - Stormwind City") == "ZONE",
+            "owner's table RED CONTROL — the ZONE-SUFFIXED channel resolves to his nickname "
+            .. "(this answered nil, which is why his feed read '[5. General - Stormwind "
+            .. "City]' with 'general' saved) — got "
+            .. tostring(Config.AliasLabel(5, "General - Stormwind City")))
+        ck(Config.AliasLabel(2, "Trade - City") == "TRADE",
+            "owner's table RED CONTROL — and so does '2. Trade - City', the channel he "
+            .. "named in the report — got " .. tostring(Config.AliasLabel(2, "Trade - City")))
+        ck(Config.AliasLabel(4, "oyfechat") == "OYFE",
+            "owner's table: his custom channel is untouched by the new fallback")
+        -- aliasKeepNumber = false must KEEP working through the new path.
+        ck(Config.AliasLabel(2, "Trade - City") == "TRADE"
+            and Config.AliasLabel(2, "Trade - City"):find("2", 1, true) == nil,
+            "owner's table: numbers stay DROPPED — '[TRADE]', never '[2. TRADE]'")
+        Config.SetAliasKeepNumber(true)
+        ck(Config.AliasLabel(2, "Trade - City") == "2. TRADE",
+            "…and the keep-number posture still prefixes the number on a zoned channel")
+        Config.SetAliasKeepNumber(false)
+        -- An alias written against the LONG form still wins over the base one.
+        c.aliases["trade - city"] = "LONGWINS"
+        ck(Config.AliasLabel(2, "Trade - City") == "LONGWINS",
+            "the FULL name is resolved first, so a long-form alias is never shadowed")
+        c.aliases["trade - city"] = nil
+        -- The rule is the client's " - <zone>" composition, not "any hyphen":
+        -- a hyphen with no spaces is part of the channel's own name.
+        c.aliases["big"] = "NOPE"
+        ck(Config.AliasLabel(9, "Big-Deal") == nil,
+            "RED CONTROL — a hyphen INSIDE a channel name is not a zone suffix, so nothing "
+            .. "is stripped and no alias is stolen from a different channel")
+        c.aliases = savedA
+        c.aliasKeepNumber = savedK
+    end
 
     -- ── Deterministic listing ────────────────────────────────────────────────
     Config.SetAlias("World", "W")
