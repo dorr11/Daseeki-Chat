@@ -259,10 +259,31 @@ local EDGEBAR_INSET  = 5     -- …its top/bottom inset
 local HOVER_WASH     = 0.04  -- .tab:hover rgba(255,255,255,.04)
 local TAB_MIN_W      = 40    -- a tab is never narrower than this (empty-name windows)
 local TAB_CHAR_W     = 0.52  -- fallback glyph advance as a share of the text size
-local GRIP_SIZE      = 12    -- the resize grip's corner square (no mockup row: the
-                             -- mockup is a still image and has no gestures in it —
-                             -- this is FURNITURE the owned frame adds, sized to the
-                             -- smallest square that is still a reliable click target)
+-- THE RESIZE GRIP (no mockup row: the mockup is a still image and has no
+-- gestures in it — this is FURNITURE the owned frame adds). Amended after the
+-- owner's second UAT, where "at least not one that's obvious" was the verdict
+-- on a 12-unit pair of one-unit --line-soft hairlines lying against the
+-- chassis' own border. The reasoning lives with the resize section below; the
+-- NUMBERS live here, once, because the feed's own top inset is computed from
+-- them (View.GripClearance) and two copies of a constant is how a click target
+-- ends up over message text.
+local GRIP_ARM_H     = 12    -- the bracket's HORIZONTAL arm
+local GRIP_ARM_V     = 16    -- …and its VERTICAL arm
+local GRIP_ARM_W     = 2     -- …and its thickness (a hairline is not an affordance)
+local GRIP_HIT_W     = 12    -- the click target's width  (see the budget below)
+local GRIP_HIT_H     = 18    -- …and its height
+local GRIP_INSET     = 1     -- flush with the chassis border
+-- THE WIDTH IS A BUDGET, NOT A PREFERENCE. The entry bar spans the box's full
+-- width by design (mockup `.entry`), and its 12-unit text padding is the ONLY
+-- gap between the box's bottom corners and the player's typing area. So a
+-- bottom grip may be at most GRIP_INSET + GRIP_HIT_W = 13 units wide from the
+-- chassis edge — exactly where the text begins — and the suite has pinned that
+-- since the first build. The grip therefore grows on the axis it CAN grow on
+-- (18 tall, up from 12) and gets its discoverability from INK AND WEIGHT
+-- instead: a 2-unit accent bracket rather than a 1-unit --line-soft hairline.
+-- Trading the typing area for six units of click target would be a worse bug
+-- than the one being fixed.
+local GRIP_SIZE      = GRIP_ARM_H    -- the name the older call sites use
 
 -- The vendored face's own line box, as a multiple of its point size. The one
 -- MEASURED constant here (a FontString's natural leading is the face's
@@ -687,6 +708,11 @@ end
 
 -- The message area's rect INSIDE the chassis, as four insets from its edges.
 -- Published so the harness can pin the mockup's padding instead of trusting it.
+-- How far into the box a corner grip reaches, hit rect and all. ONE number,
+-- derived from the grip's own constants, so the feed's clearance and the grip's
+-- size can never drift apart.
+function View.GripClearance() return GRIP_INSET + GRIP_HIT_H + 1 end
+
 function View.MessageInsets()
     local left  = CHASSIS_EDGE + MSG_PAD_X
     local right = CHASSIS_EDGE + MSG_PAD_X
@@ -699,11 +725,14 @@ function View.MessageInsets()
         -- ON A RAIL there is no strip band between the feed and the chassis'
         -- top corners, so the feed's own top inset is all that keeps message
         -- text out from under the two TOP corner grips. The mockup's 10 is not
-        -- enough for a 12-unit grip, and text under a click target is a worse
-        -- deviation than three units of extra air — so the inset is the larger
-        -- of the two. (On a top strip the band already provides the clearance,
-        -- and the grip lands on a tab's 14-unit padding, never on its label.)
-        top = CHASSIS_EDGE + math.max(MSG_PAD_TOP, GRIP_SIZE + 1)
+        -- enough, and text under a click target is a worse deviation than a few
+        -- units of extra air — so the inset is the larger of the two. It is
+        -- computed from the grip's REAL hit rect and inset (View.GripClearance)
+        -- rather than from a copied number, so growing the grip can never leave
+        -- text under it again. (On a top strip the band already provides the
+        -- clearance, and the grip lands on a tab's 14-unit padding, never on
+        -- its label.)
+        top = CHASSIS_EDGE + math.max(MSG_PAD_TOP, View.GripClearance())
         if place == "left" then
             left = CHASSIS_EDGE + TABRAIL_W + SEAM_W + MSG_PAD_X
         else
@@ -906,7 +935,18 @@ local function ensureTab(id)
     -- client's field name is the whole fix — no change in badges.lua, and the
     -- chip rides whatever layout this file lands on.
     btn.Text = label
-    btn:SetScript("OnClick", function() View.SelectTab(id, "click") end)
+    -- RIGHT-CLICK OPENS OUR MENU (owner UAT). RegisterForClicks is what makes a
+    -- Button hear anything but LeftButtonUp at all, so it is stated here rather
+    -- than left to the default — a right-click on a button that never
+    -- registered for it is a click the client simply does not deliver.
+    call(btn, "RegisterForClicks", "LeftButtonUp", "RightButtonUp")
+    btn:SetScript("OnClick", function(self, button)
+        if button == "RightButton" then
+            View.OpenTabMenu(id, self)
+            return
+        end
+        View.SelectTab(id, "click")
+    end)
     btn:SetScript("OnEnter", function() call(hover, "Show") end)
     btn:SetScript("OnLeave", function() call(hover, "Hide") end)
     -- Plain drag ON THE STRIP moves the box (our frame, our rules): the owner
@@ -917,6 +957,283 @@ local function ensureTab(id)
           underline = underline, edgebar = edgebar }
     View.tabs[id] = t
     return t
+end
+
+----------------------------------------------------------------------
+-- ============ THE TAB CONTEXT MENU (owner UAT, 2026-08-12) ============
+--
+-- "right clicking the 'main' tab in the chat window should open a drop down"
+--
+-- OUR OWN FRAMES, not UIDropDownMenu. The client's dropdown machinery brings
+-- its own art, its own fonts, its own taint surface and its own idea of what a
+-- menu looks like — every one of which this addon exists to not inherit. The
+-- menu below is the same shape Core's own dropdown popup uses (an owned frame
+-- at TOOLTIP strata plus a fullscreen invisible CLOSER that eats the next click
+-- anywhere else), so it dismisses on click-away with NO OnUpdate anywhere.
+--
+-- THE RULE THAT MATTERS MORE THAN THE PIXELS: every action here is the SAME
+-- SEAM the settings pane calls. Not a copy of it, not "the equivalent write" —
+-- literally Options.SetLocked / OptionsTabs.AddTab / OptionsTabs.PressRemove /
+-- Options.SetTabPlacement. There is no second write path to the config, which
+-- is why the suite can pin that a menu action and its pane equivalent leave
+-- BYTE-IDENTICAL config snapshots behind them. A context menu that wrote the
+-- store itself would be a second implementation of every rule in config.lua.
+--
+-- The item list is DATA (View.TabMenuItems), so the suite drives the menu by
+-- asking for it and calling the actions — the frame glue below only draws what
+-- the data says and is never what a test has to reach through.
+----------------------------------------------------------------------
+
+View.MENU_W       = 176
+View.MENU_ROW_H   = 20
+View.MENU_PAD     = 3
+
+local function suiteHub() return _G.DaseekiSuite end
+
+-- Open the Daseeki window on Chat's page — the same hub call /dchat options
+-- makes, so there is one way in.
+function View.OpenSettings(sectionId)
+    local hub = suiteHub()
+    if type(hub) ~= "table" then return false end
+    -- Deliberately NOT Options.Register() here. Registration is the options
+    -- MODULE's own lifecycle act, and a menu that registered the page as a side
+    -- effect would put a settings page in the hub for a player who had turned
+    -- the settings module off — which is the inertness contract every module in
+    -- this addon signs. The menu asks the hub to show a page; whether that page
+    -- exists is the module's answer, not the menu's.
+    if type(hub.ShowAddon) == "function" then
+        local ok = pcall(hub.ShowAddon, hub, "chat", sectionId or "settings")
+        if ok then return true end
+    end
+    if type(hub.Open) == "function" then
+        return pcall(hub.Open, hub, "chat") and true or false
+    end
+    return false
+end
+
+-- THE MENU, AS DATA. Every entry carries what it says, whether it can be used,
+-- whether it is the current answer, and the ONE function it runs.
+function View.TabMenuItems(id)
+    local items = {}
+    local O, T, C = ns.Options, ns.OptionsTabs, ns.Config
+    local locked = View.Locked()
+
+    items[#items + 1] = {
+        key = "lock", text = locked and "Unlock the chat box" or "Lock the chat box",
+        enabled = O and type(O.SetLocked) == "function",
+        action = function()
+            -- The pane's own seam, which goes through Skin.SetLocked -> the
+            -- synced config. The menu never touches the store.
+            if O and O.SetLocked then O.SetLocked(not locked) end
+        end,
+    }
+    items[#items + 1] = {
+        key = "settings", text = "Open settings",
+        enabled = suiteHub() ~= nil,
+        action = function() View.OpenSettings("settings") end,
+    }
+    items[#items + 1] = {
+        key = "newtab", text = "New tab",
+        enabled = T and type(T.AddTab) == "function"
+                  and (C and C.NewWindowId and C.NewWindowId() ~= nil),
+        action = function()
+            if T and T.AddTab then T.AddTab("New tab") end
+        end,
+    }
+    items[#items + 1] = {
+        key = "rename", text = "Rename this tab\226\128\166",
+        enabled = (T and type(T.Select) == "function") and suiteHub() ~= nil,
+        action = function()
+            -- Renaming is an edit box, and an edit box belongs on the page that
+            -- owns it: select this tab's page and open it there rather than
+            -- growing a second name field with its own rules.
+            if T and T.Select then T.Select(id) end
+            View.OpenSettings("settings")
+        end,
+    }
+    local removable = T and type(T.Removable) == "function" and T.Removable(id) or false
+    items[#items + 1] = {
+        key = "remove",
+        -- Two presses, and the label says which press you are on — the same
+        -- arming affordance the pane's own Remove button uses, from the same
+        -- state, so opening the menu twice cannot mean two different things.
+        text = (T and T.RemovePending and T.RemovePending() == id)
+               and "Really remove this tab?" or "Remove this tab",
+        enabled = removable,
+        danger = true,
+        action = function()
+            if T and T.PressRemove then T.PressRemove(id) end
+        end,
+    }
+    items[#items + 1] = { key = "sep", separator = true }
+    local place = View.TabPlacement()
+    for _, opt in ipairs({ { "top", "Tabs on top" }, { "left", "Tabs on the left" },
+                           { "right", "Tabs on the right" } }) do
+        items[#items + 1] = {
+            key = "place:" .. opt[1], text = opt[2],
+            enabled = O and type(O.SetTabPlacement) == "function",
+            checked = (place == opt[1]),
+            action = function()
+                if O and O.SetTabPlacement then O.SetTabPlacement(opt[1]) end
+            end,
+        }
+    end
+    return items
+end
+
+-- Run one menu entry by key. The suite drives THIS, so what a test exercises is
+-- exactly what a right-click runs.
+View.menuActions = 0
+
+function View.RunTabMenuItem(id, key)
+    for _, it in ipairs(View.TabMenuItems(id)) do
+        if it.key == key then
+            if not it.enabled then return false end
+            View.menuActions = View.menuActions + 1
+            View.CloseTabMenu()
+            it.action()
+            return true
+        end
+    end
+    return nil
+end
+
+View.menu = nil
+
+local function ensureMenu()
+    if View.menu then return View.menu end
+    local cf = _G.CreateFrame
+    if type(cf) ~= "function" then return nil end
+    local UI = UIKit()
+    local ok, f = pcall(cf, "Frame", "DaseekiChatTabMenu", _G.UIParent, "BackdropTemplate")
+    if not ok or type(f) ~= "table" then return nil end
+    call(f, "SetFrameStrata", "TOOLTIP")
+    call(f, "EnableMouse", true)
+    call(f, "Hide")
+    if UI and UI.FLAT_BACKDROP then call(f, "SetBackdrop", UI.FLAT_BACKDROP) end
+    local pr, pg, pb = View.Ink("panel")
+    if pr then call(f, "SetBackdropColor", pr, pg, pb, 1) end
+    local lr, lg, lb = View.Ink("line")
+    if lr then call(f, "SetBackdropBorderColor", lr, lg, lb, 1) end
+
+    -- The click-away closer: one fullscreen invisible button that eats the next
+    -- click anywhere else. No polling, no OnUpdate — Core's own pattern.
+    local okC, closer = pcall(cf, "Button", nil, _G.UIParent)
+    if okC and type(closer) == "table" then
+        call(closer, "SetFrameStrata", "FULLSCREEN_DIALOG")
+        call(closer, "SetAllPoints", _G.UIParent)
+        call(closer, "Hide")
+        closer:SetScript("OnClick", function() View.CloseTabMenu() end)
+        f:SetScript("OnHide", function() call(closer, "Hide") end)
+        f._closer = closer
+    end
+    -- ESCAPE closes it, and keyboard input still PROPAGATES so the menu can
+    -- never swallow a keystroke meant for chat. A client without the propagate
+    -- API keeps click-away only, rather than eating the keyboard for a menu.
+    if type(f.SetPropagateKeyboardInput) == "function" then
+        call(f, "EnableKeyboard", true)
+        call(f, "SetPropagateKeyboardInput", true)
+        f:SetScript("OnKeyDown", function(self, key)
+            if key == "ESCAPE" then View.CloseTabMenu() end
+        end)
+    end
+    f._rows = {}
+    View.menu = f
+    return f
+end
+
+local function menuRow(f, i)
+    local r = f._rows[i]
+    if r then return r end
+    local cf = _G.CreateFrame
+    local okR, btn = pcall(cf, "Button", nil, f)
+    if not okR or type(btn) ~= "table" then return nil end
+    call(btn, "SetHeight", View.MENU_ROW_H)
+    local hover = call(btn, "CreateTexture", nil, "BACKGROUND")
+    paint(hover, "accent", 0.25)
+    call(hover, "Hide")
+    local label = call(btn, "CreateFontString", nil, "OVERLAY")
+    local UI = UIKit()
+    if UI and type(UI.FontFile) == "function" and type(label) == "table"
+       and type(label.SetFont) == "function" then
+        pcall(label.SetFont, label, UI.FontFile(), 12, "")
+    end
+    call(label, "SetJustifyH", "LEFT")
+    call(label, "SetWordWrap", false)
+    call(label, "SetPoint", "LEFT", btn, "LEFT", 8, 0)
+    call(label, "SetPoint", "RIGHT", btn, "RIGHT", -8, 0)
+    btn._label, btn._hover = label, hover
+    btn:SetScript("OnEnter", function() call(hover, "Show") end)
+    btn:SetScript("OnLeave", function() call(hover, "Hide") end)
+    f._rows[i] = btn
+    return btn
+end
+
+function View.OpenTabMenu(id, anchor)
+    if not View.active then return false end
+    local f = ensureMenu()
+    if not f then return false end
+    local items = View.TabMenuItems(id)
+    View._menuId = id
+    local y = View.MENU_PAD
+    local shown = 0
+    for i, it in ipairs(items) do
+        local btn = menuRow(f, i)
+        if btn then
+            shown = shown + 1
+            call(btn, "ClearAllPoints")
+            call(btn, "SetPoint", "TOPLEFT", f, "TOPLEFT", View.MENU_PAD, -y)
+            call(btn, "SetPoint", "TOPRIGHT", f, "TOPRIGHT", -View.MENU_PAD, -y)
+            if it.separator then
+                call(btn, "SetHeight", 5)
+                call(btn._label, "SetText", "")
+                call(btn, "EnableMouse", false)
+                btn:SetScript("OnClick", nil)
+                y = y + 5
+            else
+                call(btn, "SetHeight", View.MENU_ROW_H)
+                call(btn._label, "SetText",
+                    (it.checked and "\226\128\162 " or "") .. tostring(it.text or ""))
+                local ink = "text"
+                if not it.enabled then ink = "faint"
+                elseif it.danger then ink = "accent"
+                elseif it.checked then ink = "accent" end
+                local r, g, b = View.Ink(ink)
+                if r and type(btn._label) == "table" and type(btn._label.SetTextColor) == "function" then
+                    pcall(btn._label.SetTextColor, btn._label, r, g, b, 1)
+                end
+                call(btn, "EnableMouse", it.enabled and true or false)
+                local key = it.key
+                btn:SetScript("OnClick", function() View.RunTabMenuItem(View._menuId, key) end)
+                y = y + View.MENU_ROW_H
+            end
+            call(btn, "Show")
+        end
+    end
+    for i = shown + 1, #f._rows do call(f._rows[i], "Hide") end
+    call(f, "SetSize", View.MENU_W, y + View.MENU_PAD)
+    call(f, "ClearAllPoints")
+    if type(anchor) == "table" then
+        call(f, "SetPoint", "TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
+    else
+        call(f, "SetPoint", "CENTER", _G.UIParent, "CENTER", 0, 0)
+    end
+    if f._closer then call(f._closer, "Show") end
+    call(f, "Show")
+    View.menuOpens = (View.menuOpens or 0) + 1
+    return true
+end
+
+function View.CloseTabMenu()
+    local f = View.menu
+    if not f then return false end
+    call(f, "Hide")
+    if f._closer then call(f._closer, "Hide") end
+    return true
+end
+
+function View.MenuOpen()
+    return (View.menu and View.menu._shown) and true or false
 end
 
 -- badges.lua's rebind seam: the tab button a window's unread pip belongs on.
@@ -2158,8 +2475,52 @@ end
 -- whole drag reflows without a single OnUpdate.
 ----------------------------------------------------------------------
 
-local GRIP_RESTING_ALPHA = 0.55   -- always visible while unlocked (the ask)
+-- ── THE SECOND AMENDMENT (owner UAT, 2026-08-12) ─────────────────────────
+-- "there is still no drag to re-size function. at least not one that's obvious"
+--
+-- THE DIAGNOSIS, and it is not layering. The grips were at frame level
+-- chassis+8 the whole time — above the feed (chassis+1), above the strip
+-- (chassis+5), above the copy button (chassis+7) — and all four really were
+-- shown while unlocked. The suite proved every one of those facts and the owner
+-- still could not see them, because what it never asked was WHAT THEY LOOK LIKE:
+--
+--   * the art was TWO ONE-UNIT HAIRLINES. `bar(GRIP_SIZE, 1)` and
+--     `bar(1, GRIP_SIZE)` — a 12x1 and a 1x12 texture.
+--   * inked --line-soft (#3a1512) at alpha 0.55. Over the --panel fill
+--     (#16100f) that composites to roughly #251311: about four percent of a
+--     step away from the panel it is drawn on.
+--   * anchored AT the grip's own corner, and the grip is anchored one unit
+--     inside the chassis, whose backdrop border is a one-unit --line (#6e1d1a).
+--     So the whole affordance was a near-panel-coloured hairline lying directly
+--     against a brighter hairline that is always there.
+--
+-- Nobody was ever going to find that. The fix is entirely about WEIGHT and
+-- CONTRAST, plus the structure that keeps it that way:
+--   * BRACKET CORNERS: two arms, 2 units thick, 14 long — an L that reads as a
+--     corner handle rather than as a border artefact.
+--   * inked --accent (#c2402e) at 0.85 resting and --text at 1.0 under the
+--     pointer. Accent on panel is the single highest-contrast pair the palette
+--     has, and it is the ink the box already uses to mean "this is live".
+--   * INSET 3 units off the chassis edge, so the bracket never lies on the
+--     border it was hiding against.
+--   * an 18-unit HIT RECT around the 14-unit visual (the brief's >=16), so the
+--     target is bigger than the thing you aim at, not smaller.
+--   * frame level chassis+20 — clear of every chassis region by a margin
+--     nothing can close by accident, and PINNED by the suite against the region
+--     set rather than against one remembered number.
+--   * and, on the beat the box is unlocked, ONE pulse: full alpha, one timer,
+--     back to resting. No OnUpdate, no loop, no animation state to leak.
+-- (GRIP_ARM_H / GRIP_ARM_V / GRIP_ARM_W / GRIP_HIT_W / GRIP_HIT_H / GRIP_INSET
+-- live with the rest of the geometry at the top of the file — the feed's own
+-- top inset is computed from them, and one number in two places is how a click
+-- target ends up over message text.)
+local GRIP_RESTING_ALPHA = 0.85   -- always visible while unlocked (the ask)
 local GRIP_HOVER_ALPHA   = 1.0
+local GRIP_LEVEL_LIFT    = 20     -- above every chassis region, with room to spare
+local GRIP_PULSE_SECS    = 0.7    -- the one-shot unlock affordance
+View.GRIP_HIT_W, View.GRIP_HIT_H = GRIP_HIT_W, GRIP_HIT_H
+View.GRIP_ARM_W, View.GRIP_INSET = GRIP_ARM_W, GRIP_INSET
+View.GRIP_LEVEL_LIFT = GRIP_LEVEL_LIFT
 
 View.GRIP_CORNERS = { "BOTTOMRIGHT", "BOTTOMLEFT", "TOPLEFT", "TOPRIGHT" }
 
@@ -2193,31 +2554,34 @@ local function ensureGrip(corner)
     if type(cf) ~= "function" or not View.chassis then return nil end
     local ok, btn = pcall(cf, "Button", "DaseekiChatViewGrip" .. corner, View.chassis)
     if not ok or type(btn) ~= "table" then return nil end
-    call(btn, "SetSize", GRIP_SIZE, GRIP_SIZE)
+    -- THE HIT RECT IS BIGGER THAN THE GLYPH. The button is the target; the
+    -- bracket inside it is what you aim at.
+    call(btn, "SetSize", GRIP_HIT_W, GRIP_HIT_H)
     call(btn, "EnableMouse", true)
     call(btn, "SetAlpha", GRIP_RESTING_ALPHA)
-    -- Two hairlines meeting in THIS corner: the quietest thing that still reads
-    -- as "this corner is a handle". No glyph, so no tofu risk.
+    -- A BRACKET, not a hairline: two 2-unit arms meeting in THIS corner, in the
+    -- accent. No glyph, so no tofu risk on any locale's font.
     local bars = {}
     local function bar(w, h)
         local t = call(btn, "CreateTexture", nil, "OVERLAY")
-        paint(t, "lineSoft", 1)
+        paint(t, "accent", 1)
         call(t, "SetSize", w, h)
         call(t, "SetPoint", corner, btn, corner, 0, 0)
         bars[#bars + 1] = t
         return t
     end
-    bar(GRIP_SIZE, 1)
-    bar(1, GRIP_SIZE)
+    bar(GRIP_ARM_H, GRIP_ARM_W)      -- the horizontal arm
+    bar(GRIP_ARM_W, GRIP_ARM_V)      -- the vertical arm
     local function ink(name)
         for _, t in ipairs(bars) do paint(t, name, 1) end
     end
     btn._bars = bars
+    btn._ink = ink
     btn:SetScript("OnEnter", function(self)
-        call(self, "SetAlpha", GRIP_HOVER_ALPHA) ink("accent")
+        call(self, "SetAlpha", GRIP_HOVER_ALPHA) ink("text")
     end)
     btn:SetScript("OnLeave", function(self)
-        ink("lineSoft")
+        ink("accent")
         call(self, "SetAlpha", GRIP_RESTING_ALPHA)
     end)
     btn:SetScript("OnMouseDown", function() View.OnResizeStart(corner) end)
@@ -2239,15 +2603,29 @@ function View.EnsureGrips()
     return View.grips
 end
 
+-- The chassis regions a grip must never end up underneath. Published as a SET
+-- rather than as a remembered number, so the suite pins the grips against
+-- whatever the chassis is actually made of today.
+function View.ChassisRegions()
+    local out = {}
+    local function add(w) if type(w) == "table" then out[#out + 1] = w end end
+    add(View.strip); add(View.entry); add(View.copyBtn)
+    for _, id in ipairs(View.ids or {}) do add(View.frames[id]) end
+    return out
+end
+
 function View.LayoutGrips()
     if not View.chassis then return false end
     View.EnsureGrips()
-    local level = (widgetNum(View.chassis, "GetFrameLevel") or 1) + 8
+    local level = (widgetNum(View.chassis, "GetFrameLevel") or 1) + GRIP_LEVEL_LIFT
     for _, corner in ipairs(View.GRIP_CORNERS) do
         local g = View.grips[corner]
         if g then
-            local dx = corner:find("RIGHT") and -CHASSIS_EDGE or CHASSIS_EDGE
-            local dy = corner:find("TOP") and -CHASSIS_EDGE or CHASSIS_EDGE
+            -- INSET OFF THE BORDER. The old grip sat one unit in, which put its
+            -- hairline directly against the chassis' own 1-unit border — the
+            -- single biggest reason it read as part of the frame.
+            local dx = corner:find("RIGHT") and -GRIP_INSET or GRIP_INSET
+            local dy = corner:find("TOP") and -GRIP_INSET or GRIP_INSET
             call(g, "ClearAllPoints")
             call(g, "SetPoint", corner, View.chassis, corner, dx, dy)
             call(g, "SetFrameLevel", level)
@@ -2259,8 +2637,14 @@ end
 -- The lock's own pixel act: grips exist while unlocked and are gone while
 -- locked. Called by the layout, by the slash verbs and by the options pane —
 -- one seam, three callers.
+--
+-- AND, ON THE TRANSITION TO UNLOCKED, one pulse (owner UAT: the affordance has
+-- to announce itself once). It is a single C_Timer, not a loop: full alpha now,
+-- resting alpha in GRIP_PULSE_SECS, nothing running in between. A pulse that
+-- cost an OnUpdate would not be worth having.
 function View.ApplyLock()
     local locked = View.Locked()
+    local was = View._wasLocked
     for _, corner in ipairs(View.GRIP_CORNERS) do
         local g = View.grips[corner]
         if g then
@@ -2268,17 +2652,47 @@ function View.ApplyLock()
             call(g, "SetAlpha", locked and 0 or GRIP_RESTING_ALPHA)
         end
     end
+    if (not locked) and was == true then View.PulseGrips() end
+    View._wasLocked = locked
     return not locked
 end
 
+View.gripPulses = 0
+
+function View.PulseGrips()
+    if View.Locked() then return false end
+    View.gripPulses = View.gripPulses + 1
+    for _, corner in ipairs(View.GRIP_CORNERS) do
+        local g = View.grips[corner]
+        if g then call(g, "SetAlpha", GRIP_HOVER_ALPHA) end
+    end
+    local T = _G.C_Timer
+    if type(T) ~= "table" or type(T.After) ~= "function" then
+        -- No timer surface at all: settle immediately rather than leaving the
+        -- grips stuck at full alpha (a pulse nobody can end is a bug, not a hint).
+        return View.SettleGrips()
+    end
+    pcall(T.After, GRIP_PULSE_SECS, function() View.SettleGrips() end)
+    return true
+end
+
+function View.SettleGrips()
+    if View.Locked() then return false end
+    for _, corner in ipairs(View.GRIP_CORNERS) do
+        local g = View.grips[corner]
+        if g then call(g, "SetAlpha", GRIP_RESTING_ALPHA) end
+    end
+    return true
+end
+
 -- Kept for the pointer-on-the-box beat: the grips are ALWAYS up while unlocked
--- now, and hovering the box just brings them a little further forward.
+-- now, and hovering the box just brings them fully forward.
 function View.SetGripVisible(on)
     View._gripVisible = on and true or false
     if View.Locked() then return View.ApplyLock() end
     for _, corner in ipairs(View.GRIP_CORNERS) do
         local g = View.grips[corner]
-        if g then call(g, "SetAlpha", on and 0.85 or GRIP_RESTING_ALPHA) end
+        if g then call(g, "SetAlpha", on and GRIP_HOVER_ALPHA or GRIP_RESTING_ALPHA) end
     end
     return true
 end
@@ -3560,6 +3974,216 @@ local function testLive(fails, verbose)
     ck(backUp == 4, "phase 17: …and all four grips with it")
     ck(View.OnResizeStart("TOPLEFT") == true, "phase 17: …and a resize starts again")
     View.OnResizeStop()
+
+    -- ── Phase 18: CAN THE OWNER SEE THE GRIP? ───────────────────────────
+    -- "there is still no drag to re-size function. at least not one that's
+    -- obvious." Phase 17 above proved every fact the first build had to offer —
+    -- four grips, shown, unlocked, resizing correctly — and the owner still
+    -- could not find them, because none of those facts is about what the thing
+    -- LOOKS LIKE. This phase asks the questions phase 17 never did.
+    View.LayoutGrips()
+    -- 1. IT IS NOT A HAIRLINE. The old art was a 12x1 and a 1x12 texture; a
+    --    one-unit arm is a border artefact, not a handle.
+    ck(View.GRIP_ARM_W >= 2, "phase 18: the grip's arms are at least 2 units thick "
+        .. "(got " .. tostring(View.GRIP_ARM_W) .. ") — a 1-unit hairline is what he could not see")
+    -- 2. IT IS NOT PANEL-COLOURED. --line-soft over --panel composites to
+    --    roughly the panel; --accent is the highest-contrast ink the palette
+    --    has, and it is what this box already uses to mean "live".
+    do
+        local badInk = {}
+        for _, corner in ipairs(View.GRIP_CORNERS) do
+            local g = View.grips[corner]
+            for _, t in ipairs((g and g._bars) or {}) do
+                local c = t._color or {}
+                local ar, ag, ab = View.Ink("accent")
+                if not (c[1] and math.abs(c[1] - ar) < 1e-6 and math.abs(c[2] - ag) < 1e-6
+                        and math.abs(c[3] - ab) < 1e-6) then
+                    badInk[#badInk + 1] = corner
+                end
+            end
+        end
+        ck(#badInk == 0, "phase 18: RED CONTROL — every grip arm is inked in the ACCENT, not in "
+            .. "the near-panel --line-soft it was invisible in (" .. table.concat(badInk, ",") .. ")")
+    end
+    ck((View.grips.BOTTOMRIGHT:GetAlpha() or 0) >= 0.8,
+        "phase 18: …at a resting alpha you can actually see (got "
+        .. tostring(View.grips.BOTTOMRIGHT:GetAlpha()) .. ")")
+    -- 3. THE TARGET IS BIGGER THAN THE GLYPH, on the axis it is allowed to grow
+    --    on. The width is capped by the entry bar's own 12-unit text padding
+    --    (see the constant block) — trading the typing area for click target
+    --    would be a worse defect than the one being fixed, and BOTH halves of
+    --    that trade are pinned: here, and by the matrix's typing-area check.
+    ck(View.GRIP_HIT_H >= 16, "phase 18: the hit rect is at least 16 units on its free axis "
+        .. "(got " .. tostring(View.GRIP_HIT_H) .. ")")
+    ck(View.GRIP_INSET + View.GRIP_HIT_W <= 13,
+        "phase 18: …and never crosses into the edit box's typing area (the budget is 13)")
+    ck(View.GripClearance() == View.GRIP_INSET + View.GRIP_HIT_H + 1,
+        "phase 18: the feed's clearance is COMPUTED from the grip, not copied from it")
+    -- 4. NOTHING IS ON TOP OF IT. Frame level alone is not the answer — strata
+    --    beats level — so the sim is asked who is really drawn above the grip
+    --    where the two rects meet, for the whole chassis region set.
+    do
+        local regions = View.ChassisRegions()
+        ck(#regions >= 3, "phase 18: the chassis region set is real (" .. #regions .. " region(s))")
+        local feedLevel = View.frames[View.activeId]:GetFrameLevel()
+        local covered = {}
+        for _, corner in ipairs(View.GRIP_CORNERS) do
+            local g = View.grips[corner]
+            ck(g:GetFrameLevel() > feedLevel,
+                "phase 18 [" .. corner .. "]: the grip's frame level is above the feed's ("
+                .. tostring(g:GetFrameLevel()) .. " > " .. tostring(feedLevel) .. ")")
+            for _, nm in ipairs(Sim.Occluders(g, regions)) do
+                covered[#covered + 1] = corner .. "<-" .. tostring(nm)
+            end
+        end
+        ck(#covered == 0, "phase 18: RED CONTROL — NO chassis region is drawn over any grip "
+            .. "(" .. table.concat(covered, ", ") .. ")")
+        -- …and the sim can really answer the question (a check that can only
+        -- ever say "no occluders" because it cannot see is not a check).
+        ck(Sim.DrawsAbove(View.grips.BOTTOMRIGHT, View.frames[View.activeId]) == true,
+            "phase 18: …and the sim CAN answer occlusion (it says the grip is above the feed)")
+        ck(Sim.DrawsAbove(View.frames[View.activeId], View.grips.BOTTOMRIGHT) == false,
+            "phase 18: …in both directions, so the answer is not a constant")
+    end
+    -- 5. THE UNLOCK PULSE: once, on the transition, with no OnUpdate anywhere.
+    do
+        local HT = _G.__DaseekiChatHarnessTimer
+        local pulsesBefore = View.gripPulses
+        ns.Skin.SetLocked(true)
+        ck(View.gripPulses == pulsesBefore, "phase 18: LOCKING does not pulse anything")
+        ns.Skin.SetLocked(false)
+        ck(View.gripPulses == pulsesBefore + 1,
+            "phase 18: RED CONTROL — unlocking pulses the grips exactly ONCE")
+        ck((View.grips.TOPLEFT:GetAlpha() or 0) > GRIP_RESTING_ALPHA,
+            "phase 18: …the pulse is really up on the pixel side")
+        if HT then HT.flush() end
+        ck(math.abs((View.grips.TOPLEFT:GetAlpha() or 0) - GRIP_RESTING_ALPHA) < 1e-6,
+            "phase 18: …and it settles back by itself, on ONE timer")
+        local after = View.gripPulses
+        View.LayoutGrips(); View.Reflow()
+        ck(View.gripPulses == after,
+            "phase 18: …and an ordinary layout beat never pulses again (no loop, no repeat)")
+    end
+
+    -- ── Phase 19: THE TAB CONTEXT MENU. ─────────────────────────────────
+    -- "right clicking the 'main' tab in the chat window should open a drop
+    -- down". OUR frames, and — the part that matters more than the pixels —
+    -- ONE write path: every action is the seam the settings pane calls, proven
+    -- by driving both and comparing what the config looks like afterwards.
+    do
+        local id = View.ids[1]
+        local btn = View.tabs[id] and View.tabs[id].button
+        ck(btn ~= nil, "phase 19: the tab has a button to right-click")
+        ck(View.MenuOpen() == false, "phase 19: nothing is open to start with")
+        -- The right-click, delivered the way the client delivers it.
+        if btn then btn:Click("RightButton") end
+        ck(View.MenuOpen() == true,
+            "phase 19: RED CONTROL — right-clicking a tab opens the menu")
+        ck(_G.UIDropDownMenu_Initialize == nil or View.menu._name == "DaseekiChatTabMenu",
+            "phase 19: …and it is OUR frame, not the client's dropdown machinery")
+        -- A LEFT click is still a tab select, not a menu.
+        View.CloseTabMenu()
+        local otherId = View.ids[2] or View.ids[1]
+        local otherBtn = View.tabs[otherId] and View.tabs[otherId].button
+        if otherBtn then otherBtn:Click("LeftButton") end
+        ck(View.MenuOpen() == false and View.ActiveId() == otherId,
+            "phase 19: a LEFT click still selects the tab and opens nothing")
+
+        -- Every entry says something, and the state-aware ones say the right
+        -- thing (a menu with a blank row is the same defect as a blank label).
+        local items = View.TabMenuItems(id)
+        ck(#items >= 8, "phase 19: the menu carries its entries (" .. #items .. ")")
+        local blank = {}
+        for _, it in ipairs(items) do
+            if not it.separator and (type(it.text) ~= "string" or it.text == "") then
+                blank[#blank + 1] = tostring(it.key)
+            end
+        end
+        ck(#blank == 0, "phase 19: RED CONTROL — no menu entry renders blank ("
+            .. table.concat(blank, ",") .. ")")
+        local function itemText(key)
+            for _, it in ipairs(View.TabMenuItems(id)) do if it.key == key then return it.text end end
+        end
+        local function itemOn(key)
+            for _, it in ipairs(View.TabMenuItems(id)) do if it.key == key then return it end end
+        end
+        ck(itemText("lock"):find("Lock", 1, true) ~= nil,
+            "phase 19: unlocked, the entry offers to LOCK (got " .. tostring(itemText("lock")) .. ")")
+        ns.Skin.SetLocked(true)
+        ck(itemText("lock"):find("Unlock", 1, true) ~= nil,
+            "phase 19: …and locked it offers to UNLOCK — the label is state-aware")
+        ns.Skin.SetLocked(false)
+        ck(itemOn("remove").enabled == false or View.ids[1] ~= 1,
+            "phase 19: the PRIMARY window refuses to be removed, from the menu too")
+
+        -- THE ONE-WRITE-PATH PIN. The placement is set through the PANE, its
+        -- config snapshot is remembered, the world is put back, and then the
+        -- same change is made through the MENU. The two snapshots must be
+        -- identical — not equivalent, identical — because there is exactly one
+        -- function underneath both.
+        local C, O = ns.Config, ns.Options
+        local function serialize(t, out)
+            out = out or {}
+            local keys = {}
+            for k in pairs(t) do keys[#keys + 1] = tostring(k) end
+            table.sort(keys)                       -- Class 8: a stable rendering
+            for _, k in ipairs(keys) do
+                local v = t[k] ~= nil and t[k] or t[tonumber(k)]
+                if type(v) == "table" then
+                    out[#out + 1] = k .. "{"; serialize(v, out); out[#out + 1] = "}"
+                else
+                    out[#out + 1] = k .. "=" .. tostring(v)
+                end
+            end
+            return out
+        end
+        local wasPlace = C.TabPlacement()
+        O.SetTabPlacement("top")
+        O.SetTabPlacement("left")
+        local viaPane = table.concat(serialize(C.Snapshot().cfg.skin), ",")
+        O.SetTabPlacement("top")
+        ck(View.RunTabMenuItem(id, "place:left") == true, "phase 19: the menu's placement entry runs")
+        local viaMenu = table.concat(serialize(C.Snapshot().cfg.skin), ",")
+        ck(viaPane == viaMenu, "phase 19: RED CONTROL — a MENU write and a PANE write leave "
+            .. "BYTE-IDENTICAL config behind them (there is no second write path)\n      pane: "
+            .. viaPane .. "\n      menu: " .. viaMenu)
+        ck(C.TabPlacement() == "left", "phase 19: …and the change really landed")
+        O.SetTabPlacement(wasPlace or "top")
+
+        -- The lock, the same way.
+        local wasLock = C.Locked()
+        O.SetLocked(true)
+        local lockViaPane = C.Locked()
+        O.SetLocked(false)
+        ck(View.RunTabMenuItem(id, "lock") == true, "phase 19: the menu's lock entry runs")
+        ck(C.Locked() == lockViaPane,
+            "phase 19: RED CONTROL — the menu's lock lands in the SYNCED config exactly as "
+            .. "the pane's checkbox does")
+        ns.Skin.SetLocked(wasLock and true or false)
+
+        -- Running an entry closes the menu; so does asking it to close.
+        if btn then btn:Click("RightButton") end
+        ck(View.MenuOpen() == true, "phase 19: …the menu opens again")
+        ck(View.RunTabMenuItem(id, "settings") ~= nil, "phase 19: an entry runs")
+        ck(View.MenuOpen() == false, "phase 19: …and running one closes the menu")
+        if btn then btn:Click("RightButton") end
+        local closer = View.menu and View.menu._closer
+        ck(closer and closer._shown == true,
+            "phase 19: a click-away closer is armed while the menu is up (no OnUpdate anywhere)")
+        if closer then closer:Click("LeftButton") end
+        ck(View.MenuOpen() == false, "phase 19: RED CONTROL — clicking away closes it")
+        ck(closer == nil or closer._shown == false, "phase 19: …and disarms the closer with it")
+        -- A disabled entry refuses rather than half-running.
+        local disabled
+        for _, it in ipairs(View.TabMenuItems(id)) do if not it.enabled and not it.separator then disabled = it.key end end
+        if disabled then
+            ck(View.RunTabMenuItem(id, disabled) == false,
+                "phase 19: a disabled entry REFUSES (" .. disabled .. ")")
+        end
+        ck(View.RunTabMenuItem(id, "nosuchkey") == nil,
+            "phase 19: …and an entry that does not exist answers nothing, never a guess")
+        View.SelectTab(id, "phase19-restore")
+    end
 
     -- Put the world back the way phase 13 found it.
     for id = 3, 5 do

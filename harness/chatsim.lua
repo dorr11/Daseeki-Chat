@@ -590,6 +590,61 @@ function Sim.RectsOverlap(a, b)
     return true
 end
 
+-- ── OCCLUSION (ui/grip-visibility sim extension, 2026-08-12) ────────────────
+-- "The grip is at a higher frame level" is not the same claim as "the player
+-- can see and click the grip", and the difference is what the owner's "there is
+-- still no drag to re-size function. at least not one that's obvious" was
+-- about. A test can only tell those two apart if the sim can answer WHO IS ON
+-- TOP where two rects meet — so it does.
+--
+-- The client's own rule, modeled: strata first (a coarse band), frame level
+-- second (within a band). A widget with no strata of its own inherits its
+-- parent's, exactly as the client does, which is what makes a reparented
+-- client edit box answerable at all.
+local STRATA_RANK = {
+    BACKGROUND = 1, LOW = 2, MEDIUM = 3, HIGH = 4,
+    DIALOG = 5, FULLSCREEN = 6, FULLSCREEN_DIALOG = 7, TOOLTIP = 8,
+}
+
+function Sim.EffectiveStrata(w)
+    local guard = 0
+    while type(w) == "table" and guard < 32 do
+        if w._strata then return w._strata end
+        w = w._parent
+        guard = guard + 1
+    end
+    return "MEDIUM"
+end
+
+-- Is `a` drawn ABOVE `b`? nil when neither can be placed in the order (never a
+-- hopeful "yes").
+function Sim.DrawsAbove(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then return nil end
+    local sa = STRATA_RANK[tostring(Sim.EffectiveStrata(a)):upper()]
+    local sb = STRATA_RANK[tostring(Sim.EffectiveStrata(b)):upper()]
+    if not (sa and sb) then return nil end
+    if sa ~= sb then return sa > sb end
+    local la = (type(a.GetFrameLevel) == "function") and a:GetFrameLevel() or nil
+    local lb = (type(b.GetFrameLevel) == "function") and b:GetFrameLevel() or nil
+    if la == nil or lb == nil then return nil end
+    return la > lb
+end
+
+-- Every candidate that OVERLAPS `target` and is drawn ABOVE it while visible.
+-- An empty list is the only honest way to say "nothing is covering this".
+function Sim.Occluders(target, candidates)
+    local out = {}
+    if type(target) ~= "table" then return out end
+    for _, c in ipairs(candidates or {}) do
+        if type(c) == "table" and c ~= target and c._shown and (c._alpha or 1) > 0 then
+            if Sim.RectsOverlap(target, c) and Sim.DrawsAbove(c, target) then
+                out[#out + 1] = c._name or c._kind or "?"
+            end
+        end
+    end
+    return out
+end
+
 function WIDGET_API.SetScale(self, s) self._scale = tonumber(s) or 1 end
 function WIDGET_API.GetScale(self) return self._scale or 1 end
 function WIDGET_API.GetEffectiveScale(self)

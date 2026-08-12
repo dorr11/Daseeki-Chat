@@ -194,9 +194,55 @@ end
 --      build(flow) runs the REAL page builder and every control's get/set
 --      closure is captured and drivable. A control that reads or writes the
 --      wrong config field then fails a test instead of failing a player.
--- Deliberately NOT modeled: layout, scroll, geometry. Those are Core's, they
--- are pinned in Core's own repo, and pretending to have them here would only
--- invite assertions that prove nothing.
+--
+-- ════════════════════════════════════════════════════════════════════════
+-- THE UNKIND REWRITE (2026-08-12) — "THERE ARE NO LABELS ON THE DROP DOWNS"
+-- ════════════════════════════════════════════════════════════════════════
+--
+-- The owner's UAT found four surfaces rendering with NO CAPTION AT ALL: the
+-- General dropdowns, the channel rows, the Tabs sub-tab buttons and the
+-- per-tab channel checkboxes. Every one of them was GREEN here. The recording
+-- flow was KINDER THAN CORE in three separate, independently fatal ways, and
+-- each one hid one of the three real root causes:
+--
+--   KINDNESS 1 — "a Label always renders." Core's UI.MakeLabel returns a FRAME
+--     carrying no `uiWidth` and never sized. Core's row arranger then does
+--     `ww = w.uiWidth or w:GetWidth()` (= 0) and `w:SetWidth(ww)` — a
+--     ZERO-WIDTH frame inside the clipping ScrollChild, which culls it and its
+--     FontString. Core's own file names this exact defect class three times in
+--     comments (the checkbox fix, the segmented fix, the stackBlocks net) and
+--     the ROW-ITEM net it added covers HEIGHT only. So every `row:Label("Font")`
+--     caption in the pane was invisible, and the dropdown beside it moved 8
+--     units left. The stub recorded a label object and called it drawn.
+--     => modeled: rec items carry Core's real uiWidth/_fillWidth, the row
+--        ARRANGES them by Core's own rule, and an item left at width 0 is
+--        CULLED (IsDrawn() == false).
+--
+--   KINDNESS 2 — "anything answers SetText." A Core Label is a FRAME; a frame
+--     has no SetText, and the caption lives on frame._label. options.lua's
+--     RefreshChannelRows called `ui.label:SetText(text)` behind a
+--     `type(...)=="function"` guard, so in game the guard was false, the
+--     `elseif ui.label._text` fallback did not match either, and the channel
+--     name was NEVER WRITTEN. Here every rec widget answered SetText.
+--     => modeled: a rec label has NO SetText method, exactly like the frame.
+--
+--   KINDNESS 3 — "Button:SetText paints the button." A real Button HAS a
+--     SetText method, but Core's UI.MakeButton never calls SetFontString, so
+--     the text goes to a fontstring that does not exist and the caption keeps
+--     whatever it was born with. options_tabs.lua's nav relabel tried
+--     `btn:SetText` FIRST — it "succeeded", the `elseif btn._label` branch was
+--     unreachable, and all four sub-tab buttons stayed blank forever.
+--     => modeled: a rec button HAS SetText, and it writes to a dead field that
+--        no caption is ever read from — Core's behaviour exactly.
+--
+-- The pane audit (UI.__PaneAudit) turns all three into red: every shown
+-- control must carry a DRAWN caption, either its own or a drawn Label in its
+-- own row. A caption the kit does not draw is a failure, not a courtesy.
+--
+-- Still deliberately NOT modeled: scroll, clipping, pixel geometry. Those are
+-- Core's and are pinned in Core's own repo. What IS modeled is the arithmetic
+-- that decides whether a widget has a rect at all, because that is the
+-- arithmetic that decided whether the owner could read his own settings.
 ----------------------------------------------------------------------
 
 local Suite = { sections = {}, regOrder = {} }
@@ -215,10 +261,129 @@ function Suite:ShowAddon(id, sectionId) self._shown = { id, sectionId } end
 function UI.__RegisteredAddon(id) return Suite.sections[id] end
 function UI.__ClearRegistry() Suite.sections, Suite.regOrder = {}, {} end
 
+-- ── CORE'S OWN LAYOUT CONSTANTS (daseekiui.lua, read not guessed) ──────────
+local ITEM_GAP = 8            -- horizontal gap between row items
+-- The hub's content width, both ends. hub.lua: overhead is 264px and MIN_W is
+-- 1140, so avail = min(W - 264, contentMaxW 880) — 876 at the narrowest window
+-- the hub can be dragged to, 880 at any larger one. A pane that overflows 876
+-- overflows for real, on a window the player can actually make.
+UI.MIN_CONTENT_W = 876
+UI.MAX_CONTENT_W = 880
+
+-- A fontstring stub: the object Core's factories hang a caption on
+-- (frame._label). It is NOT the widget — that distinction is the whole of
+-- kindness 2 above.
+local function recFontString(text)
+    local fs = { _text = text or "" }
+    function fs:SetText(t) self._text = tostring(t or "") end
+    function fs:GetText() return self._text end
+    function fs:SetTextColor(r, g, b, a) self._textColor = { r, g, b, a } end
+    function fs:GetTextColor()
+        local c = self._textColor or {}
+        return c[1], c[2], c[3], c[4]
+    end
+    function fs:SetJustifyH(j) self._justifyH = j end
+    -- A deterministic width MODEL (not a measurement): the stub has no font
+    -- engine, and a flat "7 units a character" is enough to answer the only
+    -- question the layout asks — is this wider than zero.
+    function fs:GetStringWidth() return #self._text * 7 end
+    return fs
+end
+
+-- Which kinds draw a caption of their own, and where it comes from. Straight
+-- off daseekiui.lua: a Checkbox/Button/Label/Hint always draw one; a
+-- Dropdown/EditBox draw one ONLY when opts.label is a non-empty string
+-- (`hasLabel`), and draw NOTHING otherwise; a Segmented/Slider/List/Separator/
+-- EditorCard have no caption of their own at all.
+local CAPTION_FROM = {
+    checkbox = function(o) return o.label end,
+    button   = function(o) return o.text end,
+    label    = function(o) return o.text end,
+    hint     = function(o) return o.text end,
+    dropdown = function(o) return (type(o.label) == "string" and o.label ~= "") and o.label or nil end,
+    editbox  = function(o) return (type(o.label) == "string" and o.label ~= "") and o.label or nil end,
+    slider   = function(o) return o.label end,
+    editorcard = function(o) return o.title end,
+}
+-- Core's _fillWidth flags, verbatim: these stretch to the row's remaining
+-- width, so they can never be culled. Everything else must carry a uiWidth or
+-- it is a zero-width frame.
+local FILL_WIDTH = {
+    slider = true, editbox = true, hint = true, list = true,
+    separator = true, editorcard = true,
+}
+-- The CONTROLS a player is expected to read a caption on. A separator has
+-- nothing to say; a dropdown with no caption is the owner's screenshot.
+local NEEDS_CAPTION = {
+    checkbox = true, dropdown = true, editbox = true, button = true,
+    slider = true, segmented = true,
+}
+
+-- Core's own intrinsic widths, per factory (daseekiui.lua).
+local function intrinsicWidth(kind, opts, label)
+    if kind == "dropdown"  then return opts.width or 180 end
+    if kind == "editbox"   then return opts.width or 200 end
+    if kind == "slider"    then return opts.width or 200 end
+    if kind == "checkbox"  then return 18 + 6 + (label and #label * 7 or 0) + 4 end
+    if kind == "button"    then return opts.width or math.max(80, (opts.text and #opts.text * 7 or 40) + 28) end
+    if kind == "segmented" then
+        local x = 0
+        for _, c in ipairs(opts.choices or {}) do
+            local t = (type(c) == "table") and (c.text or tostring(c.value)) or tostring(c)
+            x = x + math.max(52, #t * 7 + 22) + 4
+        end
+        return math.max(1, x - 4)
+    end
+    -- LABEL AND HINT ANSWER NOTHING, exactly as Core's factories do. That nil
+    -- is kindness 1's whole hazard: it is what becomes SetWidth(0).
+    return nil
+end
+
 -- A recording widget. `_opts` is the exact table the page builder handed the
 -- factory, so a test drives the control by calling _opts.set / _opts.get.
-local function recWidget(kind, opts, pane, section)
-    local w = { _kind = kind, _opts = opts or {}, _section = section }
+local function recWidget(kind, opts, pane, section, row)
+    opts = opts or {}
+    local w = { _kind = kind, _opts = opts, _section = section, _row = row,
+                _shown = true, _width = 0, _height = 0 }
+
+    local caption = CAPTION_FROM[kind] and CAPTION_FROM[kind](opts) or nil
+    if caption ~= nil then w._label = recFontString(tostring(caption)) end
+    w.uiWidth   = intrinsicWidth(kind, opts, caption)
+    w._fillWidth = FILL_WIDTH[kind] or false
+
+    function w:SetWidth(v) self._width = tonumber(v) or 0 end
+    function w:GetWidth() return self._width or 0 end
+    function w:SetHeight(v) self._height = tonumber(v) or 0 end
+    function w:GetHeight() return self._height or 0 end
+    function w:Show() self._shown = true end
+    function w:Hide() self._shown = false end
+    function w:SetShown(on) self._shown = on and true or false end
+    function w:IsShown() return self._shown and true or false end
+
+    -- KINDNESS 3, MODELED. A real Button has SetText; Core's MakeButton never
+    -- calls SetFontString, so the text lands nowhere a caption is read from.
+    -- The dead field exists so a test can prove the write happened AND that it
+    -- changed nothing a player can see.
+    if kind == "button" then
+        function w:SetText(t) self._deadButtonText = tostring(t or "") end
+        function w:GetText() return self._deadButtonText or "" end
+    end
+    -- KINDNESS 2, MODELED: a label is a FRAME. No SetText, at all. The caption
+    -- is on w._label, which is where Core puts it and where an honest caller
+    -- has to write.
+
+    -- What a player can actually READ on this widget right now.
+    function w:Caption()
+        local t = self._label and self._label:GetText() or nil
+        if t == nil or t == "" then return nil end
+        return t
+    end
+    -- …and whether the widget has a rect at all (the culling rule).
+    function w:IsDrawn()
+        if not self._shown then return false end
+        return (self._width or 0) >= 1
+    end
+
     w.Refresh = function()
         local get = w._opts.get
         if type(get) == "function" then
@@ -230,13 +395,42 @@ local function recWidget(kind, opts, pane, section)
     end
     w.Refresh()
     pane.controls[#pane.controls + 1] = w
+    if row then row._items[#row._items + 1] = w end
     return w
 end
 
-local function newRecFlow(pane, section)
-    local flow = { _section = section }
+-- CORE'S ROW ARRANGER, the non-centered path, verbatim in its arithmetic
+-- (daseekiui.lua newRow.arrange). This is the function that decides whether a
+-- caption exists on screen, so it is the function the stub has to run.
+local function arrangeRow(row, width)
+    local leftX, over = 0, false
+    for _, w in ipairs(row._items) do
+        if w._shown then
+            local ww = w._fillWidth and nil or (w.uiWidth or w:GetWidth())
+            if w._fillWidth then ww = math.max(40, width - leftX) end
+            -- `if ww then w:SetWidth(ww) end` — and when uiWidth is nil AND the
+            -- widget was never sized, ww is 0 and this is SetWidth(0).
+            if ww then w:SetWidth(ww) end
+            leftX = leftX + (ww or w.uiWidth or 80) + ITEM_GAP
+        end
+    end
+    if leftX - ITEM_GAP > width then over = true end
+    row._laidWidth = leftX - ITEM_GAP
+    row._overflow = over
+    return over
+end
+
+local function newRecFlow(pane, section, row)
+    local flow = { _section = section, _row = row }
+    -- Core's `convenience(name)`: a widget added to a FLOW gets a row of its
+    -- own; one added to a ROW joins that row. Both paths end in the same row
+    -- arranger, which is why both have to exist here.
     local function adder(kind)
-        return function(self, opts) return recWidget(kind, opts, pane, self._section) end
+        return function(self, opts)
+            if self._row then return recWidget(kind, opts, pane, self._section, self._row) end
+            local r = self:AddRow()
+            return recWidget(kind, opts, pane, self._section, r._row)
+        end
     end
     flow.Checkbox        = adder("checkbox")
     flow.Slider          = adder("slider")
@@ -245,38 +439,150 @@ local function newRecFlow(pane, section)
     flow.Button          = adder("button")
     flow.SegmentedChoice = adder("segmented")
     flow.List            = adder("list")
-    function flow:Label(text)
-        local w = recWidget("label", { text = text }, pane, self._section)
-        w._text = text
-        return w
+    function flow:Label(text, o)
+        o = o or {}
+        o.text = text
+        if self._row then return recWidget("label", o, pane, self._section, self._row) end
+        local r = self:AddRow()
+        return recWidget("label", o, pane, self._section, r._row)
     end
     function flow:Hint(text)
-        local w = recWidget("hint", { text = text }, pane, self._section)
+        local w = recWidget("hint", { text = text }, pane, self._section, self._row)
         w._text = text
-        w._label = { SetText = function(_, t) w._text = t end,
-                     GetText = function() return w._text end }
         pane.hints[#pane.hints + 1] = w
         return w
     end
     function flow:AddSeparator()
-        return recWidget("separator", {}, pane, self._section)
+        return recWidget("separator", {}, pane, self._section, self._row)
+    end
+    -- Core's bordered, titled card that hosts a nested flow (MakeEditorCard).
+    -- The form language's GROUP BOX is this widget, so the stub carries it.
+    function flow:EditorCard(opts)
+        local card = recWidget("editorcard", opts or {}, pane, self._section, self._row)
+        card.uiHeight = (opts and opts.height) or 180
+        card.flow = newRecFlow(pane, self._section, nil)
+        card.flow._card = card
+        function card:Relayout() self._relayouts = (self._relayouts or 0) + 1 end
+        pane.cards[#pane.cards + 1] = card
+        return card
     end
     function flow:AddRow(opts)
-        local row = newRecFlow(pane, self._section)
-        row._isRow = true
-        pane.rows[#pane.rows + 1] = row
-        return row
+        local r = { _items = {}, _opts = opts }
+        local sub = newRecFlow(pane, self._section, r)
+        r._flow = sub
+        sub._isRow = true
+        pane.rows[#pane.rows + 1] = r
+        -- A row created on a CARD's flow belongs to that card's own pane, but
+        -- the widths it lays against are the card's inner width.
+        r._avail = self._card and "card" or "pane"
+        return sub
+    end
+    -- Core's two-column checkbox grid (AddChecklist). It self-sizes every box,
+    -- so a checklist box is never culled — which is exactly why the form
+    -- language reaches for it.
+    function flow:AddChecklist(items)
+        local grid = { _boxes = {}, _kind = "checklist" }
+        for _, it in ipairs(items or {}) do
+            local box = recWidget("checkbox", it, pane, self._section, nil)
+            box:SetWidth(box.uiWidth or 1)     -- MakeCheckbox self-sizes (Core)
+            grid._boxes[#grid._boxes + 1] = box
+        end
+        pane.checklists[#pane.checklists + 1] = grid
+        return grid
     end
     function flow:AddSection(title)
         pane.sections[#pane.sections + 1] = title
-        return newRecFlow(pane, title)
+        return newRecFlow(pane, title, nil)
     end
     return flow
 end
 
+-- Lay every recorded row at a given content width, exactly as Core's pane
+-- Layout would. Called at both ends of the hub's real width range, so an
+-- overflow only the NARROW window shows is still a failure.
+function UI.__ArrangePane(pane, width)
+    width = width or UI.MIN_CONTENT_W
+    pane._arrangedAt = width
+    pane._overflowRows = {}
+    for _, r in ipairs(pane.rows or {}) do
+        -- A card's inner flow lays against the card's inner width, not the
+        -- page's (MakeEditorCard's inner pane is padded by 10 a side).
+        local avail = (r._avail == "card") and (width - 20) or width
+        if arrangeRow(r, avail) then
+            pane._overflowRows[#pane._overflowRows + 1] = r
+        end
+    end
+    return pane
+end
+
+-- THE PANE AUDIT — the red control for the blank-label defect class.
+-- Returns a list of problem strings; empty means every control a player can
+-- see carries a caption a player can read.
+function UI.__PaneAudit(pane)
+    local out = {}
+    if type(pane) ~= "table" then return { "no pane" } end
+    -- Which row a control sits in, and the drawn labels in that row.
+    for _, w in ipairs(pane.controls or {}) do
+        if w._shown and NEEDS_CAPTION[w._kind] then
+            local own = w:Caption()
+            local drawnOwn = own and w:IsDrawn()
+            local via = nil
+            if not drawnOwn and w._row then
+                for _, sib in ipairs(w._row._items) do
+                    if sib ~= w and sib._kind == "label" and sib._shown
+                       and sib:Caption() and sib:IsDrawn() then
+                        via = sib:Caption()
+                        break
+                    end
+                end
+            end
+            if not drawnOwn and not via then
+                local why
+                if own and not w:IsDrawn() then
+                    why = "its own caption is CULLED (width " .. tostring(w:GetWidth()) .. ")"
+                elseif own then
+                    why = "?"
+                else
+                    why = "no caption, and no drawn label in its row"
+                end
+                out[#out + 1] = ("%s [%s]: %s"):format(w._kind,
+                    tostring(own or (w._opts and (w._opts.id or w._opts.text)) or "?"), why)
+            end
+        end
+        -- A caption that EXISTS but is culled is a defect even when a sibling
+        -- rescues the control: it is text the builder meant to show.
+        if w._shown and w._kind == "label" and w:Caption() and not w:IsDrawn() then
+            out[#out + 1] = ("label [%s]: written but CULLED (width %s)")
+                :format(w:Caption(), tostring(w:GetWidth()))
+        end
+    end
+    for _, r in ipairs(pane._overflowRows or {}) do
+        out[#out + 1] = ("a row overflows the page (%d items, %s of %s units)")
+            :format(#r._items, tostring(r._laidWidth), tostring(pane._arrangedAt))
+    end
+    -- TWO ITEMS BOTH CLAIMING THE REMAINING WIDTH. Core's row arranger gives
+    -- the FIRST `_fillWidth` item everything left over, so the second is
+    -- squeezed to its 40-unit floor — which is why the channel rows rendered as
+    -- one enormous hex field beside a stub of a rename field. Any row with two
+    -- of them is that defect, whether or not anybody has looked at it yet.
+    for _, r in ipairs(pane.rows or {}) do
+        local fills = {}
+        for _, w in ipairs(r._items) do
+            if w._shown and w._fillWidth then fills[#fills + 1] = w._kind end
+        end
+        if #fills > 1 then
+            out[#out + 1] = ("a row carries %d items that all claim the remaining width (%s): "
+                .. "the first swallows it and the rest are squeezed to Core's 40-unit floor")
+                :format(#fills, table.concat(fills, ","))
+        end
+    end
+    return out
+end
+
 -- Build (and refresh) one registered section, returning the recording pane.
 -- Mirrors Core's own order: build once, then refresh — the sequence hub.lua
--- runs inside its show latch.
+-- runs inside its show latch — and then LAYS IT OUT, because a pane that has
+-- never been laid out cannot answer whether anything is on screen.
 function UI.__BuildPane(addonId, sectionId)
     local def = Suite.sections[addonId]
     if not def then return nil end
@@ -286,21 +592,27 @@ function UI.__BuildPane(addonId, sectionId)
     end
     if not section then return nil end
     local pane = { controls = {}, sections = {}, rows = {}, hints = {},
+                   cards = {}, checklists = {},
                    addonId = addonId, sectionId = section.id }
-    local flow = newRecFlow(pane, nil)
+    local flow = newRecFlow(pane, nil, nil)
+    pane.flow = flow
     if section.build then section.build(flow) end
     if section.refresh then section.refresh(pane) end
+    UI.__ArrangePane(pane, UI.MIN_CONTENT_W)
     section._pane = pane
     return pane
 end
 
--- Re-run a built section's refresh (the beat Core runs on every re-show).
-function UI.__RefreshPane(addonId, sectionId)
+-- Re-run a built section's refresh (the beat Core runs on every re-show), then
+-- re-lay it: a refresh that re-points a pooled row changes what is on screen,
+-- so the arrangement has to follow it.
+function UI.__RefreshPane(addonId, sectionId, width)
     local def = Suite.sections[addonId]
     if not def then return nil end
     for _, s in ipairs(def.sections or {}) do
         if (not sectionId or s.id == sectionId) and s.refresh then
             s.refresh(s._pane)
+            if s._pane then UI.__ArrangePane(s._pane, width or UI.MIN_CONTENT_W) end
             return s._pane
         end
     end
