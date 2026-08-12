@@ -228,7 +228,8 @@ Options.APPLY_SEAMS = {
         end,
     },
     ["aliases.refresh"] = {
-        what = "re-render the three alias surfaces: the tab label, the edit-box prefix, the next line",
+        what = "re-render the alias surfaces: the tab label, the edit-box prefix, "
+            .. "the entry chip, the next line",
         run = function()
             local S = skin()
             if S then
@@ -237,6 +238,10 @@ Options.APPLY_SEAMS = {
             end
             local V = view()
             if V and V.ApplyTabs then ns:SafeCall(V.ApplyTabs) end
+            -- The entry chip is an alias surface too (2026-08-12): a rename made
+            -- in the pane has to reach the indicator the player is looking at,
+            -- in the same beat, not on the next sticky change.
+            if V and V.ApplyEditBox then ns:SafeCall(V.ApplyEditBox) end
         end,
     },
     ["lock.apply"] = {
@@ -1633,9 +1638,21 @@ end
 -- is the REMOVE verb, not "rename Trade to Trade": the greyed placeholder must
 -- never turn into a stored alias just because the player clicked into the box
 -- and back out of it again.
+--
+-- THE RULE, NARROWED (owner defect, 2026-08-12: "for channel 2, Trade, im
+-- trying to add the nickname 'TRADE' but it wont save"). The comparison used to
+-- fold CASE as well as whitespace, so an alias that differs from the channel's
+-- name only in capitals — TRADE for Trade — was read as "the player put the
+-- placeholder back" and silently REMOVED. That is why LFG, OYFE and ZONE all
+-- saved and TRADE alone did not: they are different words, TRADE is the same
+-- word shouted. Capitalisation is exactly the kind of rename the owner wants,
+-- so only the placeholder EXACTLY as it is shown — byte-equal after trimming —
+-- is still the remove verb. Anything else, including a case-different spelling
+-- of the same word, is a real alias and is stored as typed.
 function Options.SetAliasFromRow(name, typed)
-    local function fold(s) return (tostring(s or ""):gsub("%s+", "")):lower() end
-    if fold(typed) == "" or fold(typed) == fold(name) then
+    local function trim(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
+    local t = trim(typed)
+    if t == "" or t == trim(name) then
         return Options.SetAlias(name, "")
     end
     return Options.SetAlias(name, typed)
@@ -3594,6 +3611,28 @@ local function testCaptions(fails)
                 .. "greyed placeholder can never become a stored alias")
             Options.SetAliasFromRow(r.name, "Shorter")
             ck(C.GetAlias(r.name) == "Shorter", "…and a real rename still lands")
+            -- OWNER DEFECT 2026-08-12: "for channel 2, Trade, im trying to add
+            -- the nickname 'TRADE' but it wont save". LFG, OYFE and ZONE all
+            -- saved because they are different WORDS; TRADE is the same word
+            -- shouted, and the placeholder comparison folded case — so the one
+            -- rename the owner most obviously wanted was read as "put the
+            -- placeholder back" and thrown away. Capitals are a rename.
+            local SHOUT = tostring(r.name):upper()
+            Options.SetAliasFromRow(r.name, SHOUT)
+            ck(C.GetAlias(r.name) == SHOUT,
+                "RED CONTROL — a rename that differs from the channel's name only in CASE is "
+                .. "a real rename and is stored as typed (wanted " .. SHOUT .. ", got "
+                .. tostring(C.GetAlias(r.name)) .. ")")
+            -- …and it is a real config write, so it rides the mesh like any
+            -- other rename rather than living only in the pane.
+            local snapA = C.Snapshot()
+            ck(snapA and snapA.cfg and snapA.cfg.aliases
+                and snapA.cfg.aliases[C.AliasKey(r.name)] == SHOUT,
+                "…and the snapshot carries it, so it syncs like every other alias")
+            -- The remove verb still exists, and it is now the EXACT placeholder.
+            Options.SetAliasFromRow(r.name, " " .. r.name .. " ")
+            ck(C.GetAlias(r.name) == nil,
+                "…while the placeholder itself, trimmed, is still the REMOVE verb")
             C.SetAlias(r.name, was or "")
         end
     end

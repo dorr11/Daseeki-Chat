@@ -821,6 +821,52 @@ function Config.AliasList()
     return out
 end
 
+-- ── THE CLIENT'S LONG FORM (owner defect, 2026-08-12) ───────────────────────
+-- `GetChannelName` answers a ZONE channel's name with its zone glued on —
+-- "General - Stormwind City", "Trade - City" — and that is the string every
+-- surface that asks the client gets back. The owner's entry indicator read
+-- "5. General - Stormwind City:" because the chip mirrored that string instead
+-- of resolving the channel's IDENTITY and rendering our own word for it.
+--
+-- PURE, and the ONE place that knows the client's long form. Everything before
+-- the first " - " is the channel; the rest is the zone the character happens to
+-- be standing in, which is not part of what the channel is called. A name with
+-- no " - " is already short and comes back unchanged.
+function Config.ChannelShortName(name)
+    if type(name) ~= "string" then return nil end
+    name = name:gsub("^%s+", ""):gsub("%s+$", "")
+    if name == "" then return nil end
+    local short = name:match("^(.-)%s+%-%s+%S.*$")
+    if short and short ~= "" then return short end
+    return name
+end
+
+-- WHAT A CHANNEL IS CALLED ON OUR SURFACES — alias first, the client's SHORT
+-- name otherwise, and never the zone-suffixed long form. This is AliasLabel
+-- with a floor under it, so a surface that must always have a word to draw
+-- (the entry chip) asks THIS and a surface that renders the client's own shape
+-- when there is no alias (the chat line, the tab) keeps asking AliasLabel.
+--
+-- The alias is looked up under the client's full name FIRST and the short name
+-- SECOND: the chat line's own display text carries the short form ("[5.
+-- General]") while the settings row carries whatever the client listed, so an
+-- alias written from either surface lights the other one up.
+function Config.ChannelLabel(number, name)
+    local label = Config.AliasLabel(number, name)
+    if label then return label end
+    local short = Config.ChannelShortName(name)
+    if not short then return nil end
+    if short ~= name then
+        label = Config.AliasLabel(number, short)
+        if label then return label end
+    end
+    if Config.AliasKeepNumber() then
+        local n = tonumber(number)
+        if n then return n .. ". " .. short end
+    end
+    return short
+end
+
 -- PURE. Split a channel link's DISPLAY text into its number and its name:
 --   "[2. Trade - City]" -> "2", "Trade - City"
 --   "[Guild]"           -> nil, "Guild"
@@ -1985,6 +2031,31 @@ local function testAliases(fails)
     Config.SetAliasKeepNumber(false)
     ck(Config.AliasLabel(2, "General") == nil,
         "label: an UNALIASED channel answers nothing (the render-native instruction)")
+
+    -- ── THE CLIENT'S LONG FORM, and the label with a floor under it ──────────
+    -- (owner defect 2026-08-12: the entry indicator read the client's
+    -- "5. General - Stormwind City:" instead of his nickname.)
+    ck(Config.ChannelShortName("General - Stormwind City") == "General",
+        "short: the zone comes off the client's own channel name")
+    ck(Config.ChannelShortName("Trade - City") == "Trade", "short: …however the zone is spelled")
+    ck(Config.ChannelShortName("LookingForGroup") == "LookingForGroup",
+        "short: a name with no zone comes back unchanged")
+    ck(Config.ChannelShortName("  World  ") == "World", "short: …trimmed")
+    ck(Config.ChannelShortName(nil) == nil and Config.ChannelShortName("") == nil,
+        "short: a non-name answers nothing (Class 5)")
+    ck(Config.ChannelLabel(5, "General - Stormwind City") == "General",
+        "label-with-floor: an UNALIASED channel still has a word — the SHORT one, never "
+        .. "the zone-suffixed long form")
+    Config.SetAlias("General - Stormwind City", "ZONE")
+    ck(Config.ChannelLabel(5, "General - Stormwind City") == "ZONE",
+        "label-with-floor: …and the owner's nickname wins when there is one")
+    Config.SetAlias("General - Stormwind City", "")
+    Config.SetAlias("General", "ZONE2")
+    ck(Config.ChannelLabel(5, "General - Stormwind City") == "ZONE2",
+        "label-with-floor: RED CONTROL — an alias stored against the SHORT name (which is "
+        .. "what the chat line's own display text carries) is found too — one channel, one "
+        .. "nickname, whichever surface named it")
+    Config.SetAlias("General", "")
 
     -- ── Deterministic listing ────────────────────────────────────────────────
     Config.SetAlias("World", "W")

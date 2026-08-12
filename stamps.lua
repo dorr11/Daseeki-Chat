@@ -50,11 +50,15 @@ ns.Stamps = Stamps
 --     brackets. The bracketed shape stays available as `brackets = true`;
 --   * the ink is the mockup's --faint (#5c534c), delivered as the shipped
 --     custom colour so the Theme/Custom control keeps meaning what it meant;
---   * the SEPARATOR between the stamp and the line is a space run, not one
---     space, because skin.lua centres the `.stampline` hairline in it and the
---     mockup wants ~8px of air each side. A chat line is one string in one
---     FontString, so spaces are the only unit available (see skin.lua's
---     mapping table, the .stampline row).
+--   * the SEPARATOR between the stamp and the line is ONE space (owner
+--     amendment, 2026-08-12: "reduce the space between the time and actual
+--     message"). It shipped as a four-space RUN so skin.lua could centre the
+--     `.stampline` hairline in ~8px of air each side, and that is exactly the
+--     gap the owner read as too wide — a chat line is one string in one
+--     FontString, so the run WAS the gap, there is nothing else it could have
+--     been. One space is the tightest a single string can be while still
+--     separating the two, and the hairline still centres in it (skin.lua's
+--     .stampline row, which now sits in one space's worth rather than four).
 local DEFAULTS = {
     format      = "HH:MM",     -- "HH:MM" | "HH:MM:SS" | "hh:MM" | "hh:MM:SS"
     brackets    = false,       -- wrap the time in [ ] (the mockup does not)
@@ -68,7 +72,7 @@ local DEFAULTS = {
 
 -- Published so skin.lua can MEASURE it (it never calls into this file): the
 -- gap the divider is centred in.
-Stamps.SEPARATOR = "    "     -- four spaces; see the note above
+Stamps.SEPARATOR = " "        -- ONE space; see the note above
 
 -- Published so the settings pane can bind controls against the REAL default
 -- shape (and so a control naming a field this module does not have fails a
@@ -351,11 +355,19 @@ local function testStamps(fails)
     ck(Stamps.DEFAULTS.customColor == "5c534c" and Stamps.DEFAULTS.colorMode == "custom",
         "phase 1: …in the mockup's --faint ink")
     local SEP = Stamps.Separator()
-    ck(#SEP > 1, "phase 1: the separator is a space RUN (the divider is centred in it)")
+    -- OWNER AMENDMENT 2026-08-12: "reduce the space between the time and actual
+    -- message". The gap IS the separator (one string, one FontString), so this
+    -- is the whole fix and this is the pin that would have caught it coming
+    -- back. Exactly one space, and it is a space — not a tab, not a run.
+    ck(SEP == " ", "phase 1: the default separator is exactly ONE space (got "
+        .. ("%q"):format(SEP) .. ")")
     f6:AddMessage("hello", 1, 1, 1)
     local e1 = f6.historyBuffer:GetEntryAtIndex(1)
     ck(e1 and e1.message:match("^|cff" .. stampHex() .. "%d%d:%d%d|r" .. SEP .. "hello$") ~= nil,
         "phase 1: newest entry stamped in place, bare and faint (got " .. tostring(e1 and e1.message) .. ")")
+    ck(e1 and e1.message:match("|r%s%s") == nil,
+        "phase 1: RED CONTROL — the default line carries ONE space between the stamp and "
+        .. "the message, never a run (got " .. ("%q"):format(tostring(e1 and e1.message)) .. ")")
 
     -- ── Phase 1b: brackets are a CHOICE, and the guard knows both shapes. ────
     ns.db.stamps.brackets = true
