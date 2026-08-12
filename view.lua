@@ -52,6 +52,10 @@ local View = {
     reHides         = 0,   -- times the client showed an engine window and we re-hid it
     resyncs         = 0,   -- full buffer re-reads into a view frame
     moves           = 0,   -- completed chassis drags
+    -- the options rework's counters
+    addonRouted     = 0,   -- lines classified as addon output and re-tabbed
+    dispatches      = 0,   -- client message-event brackets observed
+    logHosts        = 0,   -- times the client's combat log was taken in
     -- RED CONTROL state (Class 9 posture: a latch armed BEFORE the first call
     -- of the sequence, save/restore rather than clear-to-nil, with a depth fuse
     -- under it so an unforeseen composition degrades to a refusal).
@@ -338,8 +342,40 @@ local function isCombatLog(frame, id)
     return id == COMBAT_LOG_ID
 end
 
+----------------------------------------------------------------------
+-- THE COMBAT LOG TAB (options rework, 2026-08-11).
+--
+-- The design's rule 6 — "the combat log stays native" — still holds and is
+-- still the default. What the owner asked for is an OPT-IN: when the toggle is
+-- on, our strip carries a Combat Log tab and the CLIENT'S OWN log frame is
+-- hosted inside the chassis (reparented and re-anchored into the feed rect,
+-- nothing more). We never mirror it, never badge it, never keep its history:
+-- the log frame remains the client's, with our chassis as its parent.
+--
+-- OFF is not "left floating": with the tab off the log is hidden alongside the
+-- rest of the engine, because a stock gold-bordered log window standing beside
+-- our drawn box is the exact defect the satellite sweep exists to prevent.
+-- Either way, disabling the view restores it (ShowEngine + the parent and the
+-- points we saved).
+----------------------------------------------------------------------
+
+function View.CombatLogTab()
+    local C = ns.Config
+    if C and type(C.CombatLogTab) == "function" then
+        local ok, v = pcall(C.CombatLogTab)
+        if ok then return v and true or false end
+    end
+    return false
+end
+
+-- Is THIS id the hosted log? (A tab with no message surface of ours.)
+function View.IsHostedLog(id)
+    return id == COMBAT_LOG_ID and View.CombatLogTab()
+end
+
 -- A window the view owns: shown or docked in the CLIENT's own store, and not
--- the combat log (which stays native, per the design's rule 6).
+-- the combat log (which stays native, per the design's rule 6) unless the
+-- owner has asked for it as a tab.
 local function windowEligible(id)
     local gcwi = _G.GetChatWindowInfo
     if type(gcwi) ~= "function" then return false end
@@ -426,9 +462,11 @@ end
 
 function View.OwnedIds()
     local out = {}
+    local wantLog = View.CombatLogTab()
     for id = 1, numWindows() do
         local frame = _G["ChatFrame" .. id]
-        if frame and not isCombatLog(frame, id) and windowEligible(id) then
+        local log = frame and isCombatLog(frame, id)
+        if frame and windowEligible(id) and ((not log) or wantLog) then
             out[#out + 1] = id
         end
     end
@@ -906,6 +944,9 @@ end
 ----------------------------------------------------------------------
 
 function View.EnsureFrame(id)
+    -- THE ONE TAB WITH NO SURFACE OF OURS: the hosted combat log is the
+    -- client's own frame, and giving it a second one would be two logs.
+    if View.IsHostedLog(id) then return nil end
     local f = View.frames[id]
     if f then return f end
     local cf = _G.CreateFrame
@@ -1041,6 +1082,104 @@ local function newestLine(frame)
     return nil
 end
 
+----------------------------------------------------------------------
+-- ============ THE ADDON CLASSIFIER (options rework, 2026-08-11) ============
+--
+-- THE QUESTION IT ANSWERS: "did the GAME put this line in a chat window, or did
+-- an ADDON?" There is no flag on the line that says so, and there never will
+-- be. What there IS, on 11509, is a bracket: every CHAT_MSG_* line the client
+-- itself routes goes through ChatFrame_MessageEventHandler, and an addon's
+-- frame:AddMessage("...") does not. So:
+--
+--   an AddMessage that lands on an engine window while the client's own
+--   message-event handler is on the stack is CHAT; one that lands outside it
+--   is ADDON OUTPUT.
+--
+-- CLASS 9 IN FULL, because this is exactly its shape: the latch is armed
+-- BEFORE the client's handler runs (the first call of the sequence, not after
+-- it), it is SAVED AND RESTORED rather than cleared (nesting is safe), the call
+-- is pcall-fenced so an error cannot wedge the latch UP forever, and the error
+-- is then re-raised unchanged and the return values forwarded — the bracket is
+-- an OBSERVER and must be invisible to the client whether it fires or not.
+--
+-- THE HONEST LIMITS, written down rather than discovered:
+--   1. An addon that prints from inside a CHAT_MSG_* handler (a filter, a
+--      re-post, a "you were whispered" echo) is on the stack when it prints and
+--      reads as chat. That is the classifier's known blind spot and the reason
+--      the routing has a per-user toggle at all.
+--   2. Client code that writes to a chat frame outside the event path (some
+--      system prints) reads as addon output.
+--   3. Classification happens AT MIRROR TIME. A resync (the view coming up
+--      mid-session, or history's cross-session restore) re-reads the engine's
+--      buffer, where nothing records who wrote a line — so previously routed
+--      lines come back in their origin tab. The routing is a live display
+--      decision, not a rewrite of the engine's history.
+--   4. No hook, no classifier: a client without the handler global leaves
+--      Armed() false and every line takes the path it always took.
+----------------------------------------------------------------------
+
+View._dispatchDepth = 0
+
+function View.InEventDispatch() return View._dispatchDepth > 0 end
+ns.ViewInEventDispatch = View.InEventDispatch
+
+-- Installed once, at enable, and TRANSPARENT: it observes, it never decides.
+-- The deciding is Armed() below, which is the control the owner can turn off.
+local function wrapEventDispatch()
+    if View._dispatchWrapped then return true end
+    local prev = _G.ChatFrame_MessageEventHandler
+    if type(prev) ~= "function" then return false end
+    View._dispatchWrapped = true
+    View._dispatchPrev = prev
+    _G.ChatFrame_MessageEventHandler = function(...)
+        local saved = View._dispatchDepth
+        View._dispatchDepth = saved + 1
+        local res = { pcall(prev, ...) }
+        View._dispatchDepth = saved
+        View.dispatches = (View.dispatches or 0) + 1
+        if not res[1] then error(res[2], 0) end     -- re-raised unchanged
+        return unpack(res, 2)
+    end
+    return true
+end
+
+-- The routing facts, resolved once per layout beat rather than once per line:
+-- Config.AddonSinkId walks the window set through the LWW winner, and a chat
+-- line is the last place to do that work.
+function View.RefreshRouting()
+    local C = ns.Config
+    View._sinkId = nil
+    View._routeAddon = false
+    if not (C and type(C.AddonSinkId) == "function") then return false end
+    local okS, sink = pcall(C.AddonSinkId)
+    local okR, route = pcall(C.RouteAddonLines)
+    if okS and type(sink) == "number" then View._sinkId = sink end
+    View._routeAddon = (okR and route) and true or false
+    return true
+end
+
+-- Is the classifier deciding anything right now? Every leg must be true, and
+-- when any is false the mirror behaves EXACTLY as it did before this landed.
+function View.ClassifierArmed()
+    if not View.active then return false end
+    if not View._dispatchWrapped then return false end     -- no bracket, no verdict
+    if not View._routeAddon then return false end          -- the owner's toggle
+    if not View._sinkId then return false end              -- no tab to route to
+    for _, id in ipairs(View.ids) do
+        if id == View._sinkId then return true end         -- …and it is a live tab
+    end
+    return false
+end
+
+-- Which tab a line arriving on window `originId` is DISPLAYED in. The identity
+-- answer (originId) is the answer in every posture but one.
+function View.TargetIdFor(originId)
+    if not View.ClassifierArmed() then return originId end
+    if View.InEventDispatch() then return originId end     -- the client wrote it
+    if originId == View._sinkId then return originId end
+    return View._sinkId
+end
+
 -- Forward the line that just landed on a client window into its tab's view
 -- frame. Called from the wrapper AFTER the rest of the stack has run.
 function View.MirrorLine(clientFrame, fallbackText, fr, fg, fb, lineId)
@@ -1054,7 +1193,9 @@ function View.MirrorLine(clientFrame, fallbackText, fr, fg, fb, lineId)
     end
     local id = View.IdOf(clientFrame)
     if not id then return false end
-    local smf = View.frames[id]
+    local target = View.TargetIdFor(id)
+    if target ~= id then View.addonRouted = (View.addonRouted or 0) + 1 end
+    local smf = View.frames[target]
     if not smf then return false end
     local text, r, g, b = newestLine(clientFrame)
     if text == nil then
@@ -1209,11 +1350,16 @@ function View.HideEngine()
     local n = 0
     for id = 1, numWindows() do
         local frame = View.ClientFrame(id)
-        if frame and not isCombatLog(frame, id) and windowEligible(id) then
+        if frame and windowEligible(id) then
+            -- THE HOSTED LOG IS THE ONE FRAME WE DO NOT HIDE: it is the tab's
+            -- own surface. Its SATELLITES (the dock tab, the button column, the
+            -- resize grip) are hidden exactly like everyone else's — they are
+            -- what would otherwise float over our chassis.
+            local hosted = View.IsHostedLog(id)
             if type(View._engineHidden[frame]) ~= "table" then
                 View._engineHidden[frame] = { id = id, satellites = {} }
             end
-            if type(frame.IsShown) == "function" then
+            if not hosted and type(frame.IsShown) == "function" then
                 local ok, shown = pcall(frame.IsShown, frame)
                 if ok and shown then
                     call(frame, "Hide")
@@ -1235,7 +1381,10 @@ function View.KeepEngineHidden(frame)
     local rec = View._engineHidden[frame]
     if type(frame) ~= "table" or type(rec) ~= "table" then return false end
     local beat = false
-    if type(frame.IsShown) == "function" then
+    -- The hosted combat log is ON SCREEN ON PURPOSE (it is its tab's surface),
+    -- exactly like the reparented edit box. Its family still goes down.
+    local hosted = View.IsHostedLog(rec.id)
+    if not hosted and type(frame.IsShown) == "function" then
         local ok, shown = pcall(frame.IsShown, frame)
         if ok and shown then call(frame, "Hide") beat = true end
     end
@@ -1353,6 +1502,58 @@ local function releaseEditBox()
     return true
 end
 
+----------------------------------------------------------------------
+-- HOSTING THE CLIENT'S COMBAT LOG (the toggle's pixel half).
+--
+-- REPARENT AND RE-ANCHOR, AND NOTHING ELSE. The log keeps its own buffer, its
+-- own fonts, its own scroll and its own everything — we move it into the feed
+-- rect and take the last word on its visibility with the tab selection. The
+-- home (parent + points) is saved on the way in and restored on the way out,
+-- so the round trip is exact rather than approximate.
+----------------------------------------------------------------------
+
+function View.HostedLogFrame()
+    return View.ClientFrame(COMBAT_LOG_ID)
+end
+
+function View.HostCombatLog()
+    local frame = View.HostedLogFrame()
+    if type(frame) ~= "table" or not View.chassis then return false end
+    if View._logHome then return true end
+    View._logHome = {
+        parent = (type(frame.GetParent) == "function") and frame:GetParent() or nil,
+        points = savePoints(frame),
+    }
+    call(frame, "SetParent", View.chassis)
+    View.logHosts = (View.logHosts or 0) + 1
+    return true
+end
+
+function View.ReleaseCombatLog()
+    local home = View._logHome
+    if not home then return false end
+    View._logHome = nil
+    local frame = View.HostedLogFrame()
+    if type(frame) ~= "table" then return false end
+    call(frame, "SetParent", home.parent)
+    restorePoints(frame, home.points)
+    return true
+end
+
+-- Place the hosted log in the feed rect, at the same level our own surfaces
+-- get, and show it only while its tab is the active one.
+function View.PlaceHostedLog(ml, mt, mr, mb, level)
+    local frame = View.HostedLogFrame()
+    if type(frame) ~= "table" or not View.chassis then return false end
+    View.HostCombatLog()
+    call(frame, "ClearAllPoints")
+    call(frame, "SetPoint", "TOPLEFT", View.chassis, "TOPLEFT", ml, -mt)
+    call(frame, "SetPoint", "BOTTOMRIGHT", View.chassis, "BOTTOMRIGHT", -mr, mb)
+    if level then call(frame, "SetFrameLevel", level) end
+    call(frame, View.activeId == COMBAT_LOG_ID and "Show" or "Hide")
+    return true
+end
+
 function View.RetargetEditBox(id)
     if not View.active then return false end
     local eb = View.EditBoxOf(id)
@@ -1438,6 +1639,11 @@ function View.SelectTab(id, why)
     for _, wid in ipairs(View.ids) do
         local smf = View.frames[wid]
         if smf then call(smf, wid == id and "Show" or "Hide") end
+        if View.IsHostedLog(wid) then
+            -- The hosted log's surface is the CLIENT's frame, so the same
+            -- show/hide rule reaches for it instead of one of ours.
+            call(View.HostedLogFrame(), wid == id and "Show" or "Hide")
+        end
     end
     View.RetargetEditBox(id)
     -- The client's own selection verb (badges clear on it; the dock's notion of
@@ -1661,6 +1867,10 @@ function View.Layout()
     local f = View.EnsureChassis()
     if not f then return false end
     View.ids = View.OwnedIds()
+    -- The routing facts are re-read on the LAYOUT beat, never per line: that is
+    -- what makes a peer account's addon tab arrive without a local write (the
+    -- placement's own read-time-resolution rule, applied to the sink).
+    View.RefreshRouting()
     if #View.ids == 0 then return false end
     if not View.activeId then View.activeId = View.ids[1] end
     local liveActive = false
@@ -1719,6 +1929,10 @@ function View.Reflow()
     -- through a resize with no arithmetic at all.
     local feedLevel = (widgetNum(f, "GetFrameLevel") or 1) + 1
     for _, id in ipairs(View.ids) do
+        if View.IsHostedLog(id) then
+            -- The client's own log, in the same rect our surfaces get.
+            View.PlaceHostedLog(ml, mt, mr, mb, feedLevel)
+        end
         local smf = View.EnsureFrame(id)
         if smf then
             View.ApplyFont(id)
@@ -2286,6 +2500,54 @@ function View.Refresh()
 end
 
 ----------------------------------------------------------------------
+-- THE TAB SET CHANGED (options rework: + Add Tab, remove, the combat log
+-- toggle, the addon tab).
+--
+-- CONFIG-FIRST, ALWAYS. Nothing here creates or destroys a client window: the
+-- pane writes the config, the reconciler converges the client's own store, and
+-- THIS re-reads the world the reconciler left. A window that just became live
+-- gets its surface, its AddMessage wrap and its scrollback; one that went away
+-- has its surface hidden (never destroyed — a window can come back, and its
+-- buffer is the player's).
+----------------------------------------------------------------------
+
+function View.RebuildTabs(why)
+    if not View.active then return false end
+    View.ids = View.OwnedIds()
+    View.RefreshRouting()
+    if #View.ids == 0 then return false end
+
+    local live = {}
+    for _, id in ipairs(View.ids) do live[id] = true end
+
+    -- Gone: hide our surface for it, and hand the combat log back if its tab
+    -- was the thing that went.
+    for id, smf in pairs(View.frames) do
+        if not live[id] then call(smf, "Hide") end
+    end
+    if not View.IsHostedLog(COMBAT_LOG_ID) and View._logHome then
+        View.ReleaseCombatLog()
+        call(View.HostedLogFrame(), "Hide")     -- back into the hidden engine
+    end
+
+    -- New: a surface, the mirror wrap and whatever the engine already holds.
+    for _, id in ipairs(View.ids) do
+        if not View.IsHostedLog(id) then
+            local fresh = View.frames[id] == nil
+            View.EnsureFrame(id)
+            wrapAddMessage(View.ClientFrame(id))
+            if fresh then View.Resync(id) end
+        end
+    end
+
+    View.HideEngine()
+    if not live[View.activeId] then View.activeId = View.ids[1] end
+    View.Layout()
+    View.SelectTab(View.activeId, why or "tabset")
+    return true
+end
+
+----------------------------------------------------------------------
 -- ============ THE LIVE-APPLY SEAMS (2026-08-11) ============
 --
 -- WHY THEY EXIST (owner: "the options dont seem to actually do anything. when
@@ -2404,11 +2666,18 @@ function View.OnEnable()
     end
 
     View.ids = View.OwnedIds()
+    View.RefreshRouting()
+    -- The classifier's bracket: an OBSERVER over the client's own message-event
+    -- handler (see THE ADDON CLASSIFIER above). Installed here, at enable, so a
+    -- module that was never enabled has still touched nothing.
+    wrapEventDispatch()
     View.EnsureChassis()
     View.HideEngine()
     for _, id in ipairs(View.ids) do
-        View.EnsureFrame(id)
-        wrapAddMessage(View.ClientFrame(id))
+        if not View.IsHostedLog(id) then
+            View.EnsureFrame(id)
+            wrapAddMessage(View.ClientFrame(id))
+        end
     end
     View.Layout()
     View.SelectTab(View.activeId or View.ids[1], "enable")
@@ -2436,6 +2705,9 @@ function View.OnDisable()
     -- it back before the windows come up means the client's own beat finds it
     -- where it expects it.
     releaseEditBox()
+    -- …and so does the combat log, if we were hosting it: parent and points
+    -- exactly as we found them, before ShowEngine puts the world back.
+    View.ReleaseCombatLog()
     for _, smf in pairs(View.frames) do call(smf, "Hide") end
     if View.chassis then call(View.chassis, "Hide") end
     View.ShowEngine()
@@ -2618,8 +2890,16 @@ local function testLive(fails, verbose)
     ck(#View.ids > 0, "phase 1: the view owns at least one window")
     local ownsCombat = false
     for _, id in ipairs(View.ids) do if id == 2 then ownsCombat = true end end
-    ck(not ownsCombat, "phase 1: THE COMBAT LOG IS EXCLUDED and stays native")
-    ck(_G.ChatFrame2:IsShown() == true, "phase 1: …and its window is still shown")
+    ck(not ownsCombat, "phase 1: THE COMBAT LOG IS EXCLUDED from the tab run by default")
+    -- …and it is not left FLOATING beside our box either. Rule 6 says the log
+    -- stays NATIVE (we never mirror it, never badge it, never keep it) — but a
+    -- stock gold-bordered log window standing next to the drawn chassis is the
+    -- same defect the satellite sweep exists to prevent, so with its tab off it
+    -- goes down with the rest of the engine and comes back on disable.
+    ck(_G.ChatFrame2:IsShown() == false,
+        "phase 1: …and with its tab OFF it is hidden with the engine, not floating")
+    ck(Sim.windows[2].shown == true,
+        "phase 1: …as a DISPLAY act only — the client's store still routes to it")
 
     -- THE CHASSIS IS OURS, at the mockup's colours.
     local bd = View.chassis._backdropColor
@@ -3288,6 +3568,156 @@ local function testLive(fails, verbose)
         _G.FloatingChatFrame_Update(id)
     end
     View.Refresh()
+    if HT then HT.flush() end
+
+    -- ── Phase 18: THE COMBAT LOG TAB (options rework). ───────────────────
+    -- The client's own log, hosted in our chassis: reparented and re-anchored,
+    -- never mirrored, never given a surface of ours, and handed back exactly as
+    -- we found it when the toggle goes off.
+    local C = ns.Config
+    local cfgT = C.Get()
+    local savedWindowsT, savedSkinT = cfgT.windows, cfgT.skin
+    local savedRevT, savedAtT = cfgT.rev, cfgT.at
+    cfgT.windows = C.CopyCfg(cfgT.windows or {})
+    cfgT.skin    = C.CopyCfg(cfgT.skin or {})
+
+    local cl = _G.ChatFrame2
+    local logParentBefore = cl._parent
+    ck(View.frames[2] == nil, "phase 18: the log has no surface of ours while its tab is off")
+    C.SetCombatLogTab(true)
+    View.RebuildTabs("phase18")
+    if HT then HT.flush() end
+    local hasLogTab = false
+    for _, id in ipairs(View.ids) do if id == 2 then hasLogTab = true end end
+    ck(hasLogTab, "phase 18: RED CONTROL — turning the toggle on puts a Combat Log tab in the run")
+    ck(View.tabs[2] and View.tabs[2].button._shown == true, "phase 18: …and the tab is drawn")
+    ck(View.frames[2] == nil,
+        "phase 18: …with NO message surface of ours (two logs would be one too many)")
+    ck(View.wrappedFrames[cl] == nil,
+        "phase 18: …and its AddMessage is NOT wrapped (mirroring does not apply to it)")
+    ck(cl._parent == View.chassis, "phase 18: the CLIENT's log frame is hosted in the chassis")
+    View.SelectTab(2, "phase18")
+    if HT then HT.flush() end
+    ck(cl._shown == true, "phase 18: RED CONTROL — selecting the tab shows the native log")
+    local lrect = { rect(cl) }
+    local frect = { rect(View.frames[View.ids[1]]) }
+    ck(lrect[1] and frect[1] and math.abs(lrect[1] - frect[1]) < 1e-6
+        and math.abs(lrect[3] - frect[3]) < 1e-6,
+        "phase 18: …in the same feed rect our own surfaces get")
+    local otherHidden = true
+    for _, id in ipairs(View.ids) do
+        local smf = View.frames[id]
+        if smf and smf._shown then otherHidden = false end
+    end
+    ck(otherHidden, "phase 18: …and every surface of ours is out of the way")
+    -- Badges never count it (the client's own log is not chat).
+    local Bp = ns.Badges
+    local logCountBefore = Bp and Bp.counts and Bp.counts[cl]
+    cl:AddMessage("combat spam", 1, 1, 1)
+    ck((Bp and Bp.counts and Bp.counts[cl]) == logCountBefore,
+        "phase 18: the log never badges")
+    local mirroredB4Log = View.mirrored
+    ck(View.mirrored == mirroredB4Log, "phase 18: …and nothing of its traffic is mirrored")
+
+    View.SelectTab(View.ids[1], "phase18")
+    C.SetCombatLogTab(false)
+    View.RebuildTabs("phase18-off")
+    if HT then HT.flush() end
+    hasLogTab = false
+    for _, id in ipairs(View.ids) do if id == 2 then hasLogTab = true end end
+    ck(not hasLogTab, "phase 18: turning it off takes the tab away")
+    ck(cl._parent == logParentBefore,
+        "phase 18: RED CONTROL — the log's PARENT is exactly what it was before we took it")
+    ck(cl._shown == false, "phase 18: …and it goes back down with the rest of the engine")
+
+    -- ── Phase 19: THE ADDON CLASSIFIER (options rework). ─────────────────
+    -- A line arriving on an engine window OUTSIDE the client's own message-event
+    -- dispatch is addon output and is displayed in the addon tab. Everything
+    -- else is untouched, and with the toggle off NOTHING changes at all.
+    local sinkId = C.AddWindow({ name = "Addon", addonSink = true })
+    ck(type(sinkId) == "number", "phase 19: the addon tab is a config-first window")
+    if type(sinkId) == "number" then
+        local sw = Sim.windows[sinkId]
+        local sinkSaved = { sw.name, sw.shown, sw.docked }
+        -- What the reconciler does with that config, done here directly (the
+        -- options suite drives the real reconcile path end to end).
+        sw.name, sw.shown, sw.docked = "Addon", true, 6
+        sw.groups, sw.channels = {}, {}
+        _G.FloatingChatFrame_Update(sinkId)
+        View.RebuildTabs("phase19")
+        if HT then HT.flush() end
+
+        ck(View._sinkId == sinkId, "phase 19: the view resolved the sink from the config")
+        ck(View.ClassifierArmed() == true, "phase 19: …and the classifier is armed")
+        ck(View._dispatchWrapped == true, "phase 19: the event bracket is installed")
+        ck((View.dispatches or 0) > 0, "phase 19: …and it has observed real dispatches")
+        -- THE BRACKET IS TRANSPARENT: the client's own return value survives it.
+        ck(_G.ChatFrame_MessageEventHandler(_G.ChatFrame1, "CHAT_MSG_SAY",
+            "bracket probe", 1, 1, 1) == true,
+            "phase 19: …and it forwards the handler's return value unchanged")
+        ck(View.InEventDispatch() == false, "phase 19: …and the latch is DOWN again after it")
+
+        local origin = _G.ChatFrame1
+        local originSmf = View.frames[1]
+        local sinkSmf = View.frames[sinkId]
+        ck(type(sinkSmf) == "table", "phase 19: the addon tab has a surface of ours")
+
+        -- RED CONTROL: an out-of-event line goes to the sink and NOWHERE else.
+        local o0, s0, routed0 = originSmf:GetNumMessages(), sinkSmf:GetNumMessages(),
+            View.addonRouted
+        origin:AddMessage("|cff00ff00SomeAddon|r: build 42 loaded", 1, 1, 1)
+        ck(sinkSmf:GetNumMessages() == s0 + 1,
+            "phase 19: RED CONTROL — an addon line is displayed in the ADDON tab")
+        ck(originSmf:GetNumMessages() == o0,
+            "phase 19: RED CONTROL — …and NOWHERE else (the origin tab never shows it)")
+        ck(View.addonRouted == routed0 + 1, "phase 19: …and the routing is counted")
+        ck(origin:GetNumMessages() > 0,
+            "phase 19: …while the ENGINE window still holds the line (routing is display)")
+
+        -- RED CONTROL: an in-event line is untouched.
+        local o1, s1 = originSmf:GetNumMessages(), sinkSmf:GetNumMessages()
+        Sim.SendChat{ event = "CHAT_MSG_SAY", text = "real chat",
+                      sender = "Puu-Whitemane", guid = "Player-1-00000001" }
+        if HT then HT.advance(0) end
+        ck(originSmf:GetNumMessages() == o1 + 1,
+            "phase 19: RED CONTROL — a line the CLIENT routed lands in its own tab")
+        ck(sinkSmf:GetNumMessages() == s1,
+            "phase 19: …and the addon tab does not see chat")
+
+        -- RED CONTROL: classifier OFF is byte-identical to the old behaviour.
+        C.SetRouteAddonLines(false)
+        View.RefreshRouting()
+        ck(View.ClassifierArmed() == false, "phase 19: the toggle disarms the classifier")
+        local o2, s2, routed2 = originSmf:GetNumMessages(), sinkSmf:GetNumMessages(),
+            View.addonRouted
+        origin:AddMessage("|cff00ff00SomeAddon|r: and again", 1, 1, 1)
+        ck(originSmf:GetNumMessages() == o2 + 1,
+            "phase 19: RED CONTROL — classifier OFF: the line takes the path it always took")
+        ck(sinkSmf:GetNumMessages() == s2, "phase 19: …and the addon tab stays empty")
+        ck(View.addonRouted == routed2, "phase 19: …with nothing counted as routed")
+        C.SetRouteAddonLines(true)
+        View.RefreshRouting()
+
+        -- …and with NO sink at all the same is true (inert by absence, not by
+        -- a flag we remembered to check).
+        C.SetAddonSink(sinkId, false)
+        View.RefreshRouting()
+        ck(View.ClassifierArmed() == false, "phase 19: no addon tab, no classifier")
+        local o3 = originSmf:GetNumMessages()
+        origin:AddMessage("no sink here", 1, 1, 1)
+        ck(originSmf:GetNumMessages() == o3 + 1, "phase 19: …and lines flow exactly as before")
+
+        -- Put the world back.
+        C.RemoveWindow(sinkId)
+        sw.name, sw.shown, sw.docked = sinkSaved[1], sinkSaved[2], sinkSaved[3]
+        _G.FloatingChatFrame_Update(sinkId)
+        View.RebuildTabs("phase19-cleanup")
+        if HT then HT.flush() end
+    end
+
+    cfgT.windows, cfgT.skin = savedWindowsT, savedSkinT
+    cfgT.rev, cfgT.at = savedRevT, savedAtT
+    View.RebuildTabs("phase19-restore")
     if HT then HT.flush() end
 
     -- ── Phase 12: RED CONTROL 4 — disable/restore leaves the world tidy. ─

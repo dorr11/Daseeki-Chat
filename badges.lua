@@ -54,6 +54,12 @@ local COMBAT_LOG_ID = 2     -- the combat log never badges
 -- configured table back to the default on every login.
 ns.DEFAULTS.badges = {
     optOut = {},            -- [windowId] = true -> window never badges
+    -- THE WHISPER ACCENT, per tab (the options rework's per-tab notification
+    -- controls). Shipped behaviour is that a pile containing a whisper wears
+    -- the ACCENT ink instead of the muted one; this is the per-window opt-out
+    -- for a tab where a whisper should count quietly like everything else.
+    -- Same polarity as optOut: absent means ON.
+    accentOptOut = {},      -- [windowId] = true -> whispers do not accent here
 }
 
 local function cfg()
@@ -157,9 +163,21 @@ local function ink(name)
     return nil
 end
 
+-- Does a whisper in THIS window's unread pile get to shout? The flag is up and
+-- the window has not opted out (absent means on, the polarity every per-window
+-- table in this addon uses).
+function Badges.WhisperAccent(frame)
+    if not Badges.whisperFlag[frame] then return false end
+    local id = Badges.frameIds[frame]
+    local oo = cfg().accentOptOut
+    if type(oo) == "table" and id ~= nil and oo[id] == true then return false end
+    return true
+end
+
 local function applyInk(frame, w)
     local UI = _G.DaseekiUI
     if not (UI and UI.Color and w and w.fs and w.fs.SetTextColor) then return end
+    local accent = Badges.WhisperAccent(frame)
     if boxed() then
         -- The mockup's chip: accent fill, white digits, whatever the line was.
         -- A WHISPER still gets to say so — the chip is already accent, so the
@@ -167,13 +185,13 @@ local function applyInk(frame, w)
         w.fs:SetTextColor(1, 1, 1, 1)
         if w.chip and type(w.chip.SetColorTexture) == "function" then
             local r, g, b = ink("accent")
-            if r then w.chip:SetColorTexture(r, g, b, Badges.whisperFlag[frame] and 1 or 0.85) end
+            if r then w.chip:SetColorTexture(r, g, b, accent and 1 or 0.85) end
             w.chip:Show()
         end
         return
     end
     if w.chip then w.chip:Hide() end
-    w.fs:SetTextColor(UI.Color(Badges.whisperFlag[frame] and "accent" or "muted"))
+    w.fs:SetTextColor(UI.Color(accent and "accent" or "muted"))
 end
 
 ----------------------------------------------------------------------
@@ -685,6 +703,22 @@ local function testLive(fails, verbose)
     ck(Badges.counts[cf1] == 2, "phase 5: further lines keep counting")
     ck(math.abs(w1.fs._textColor[1] - ar) < 1e-6,
         "phase 5: accent holds while ANY whisper is unread")
+
+    -- ── Phase 5b: the per-tab whisper-accent opt-out (options rework). ───────
+    -- The count is untouched — only how loudly it says so — and the tab goes
+    -- back to the muted ink IN THE SAME BEAT the setting is written.
+    local mr = select(1, UI.Color("muted"))
+    ns.db.badges.accentOptOut[1] = true
+    Badges.UpdateBadge(cf1)
+    ck(Badges.WhisperAccent(cf1) == false, "phase 5b: the tab opted out of the whisper accent")
+    ck(w1.fs._textColor and math.abs(w1.fs._textColor[1] - mr) < 1e-6,
+        "phase 5b: …so the count wears the MUTED ink even with a whisper unread")
+    ck(Badges.counts[cf1] == 2 and Badges.whisperFlag[cf1] == true,
+        "phase 5b: …and the count and the flag themselves are untouched")
+    ns.db.badges.accentOptOut[1] = nil
+    Badges.UpdateBadge(cf1)
+    ck(math.abs(w1.fs._textColor[1] - ar) < 1e-6, "phase 5b: clearing it shouts again")
+
     _G.FCF_SelectDockFrame(cf1)
     ck(Badges.counts[cf1] == 0 and Badges.whisperFlag[cf1] == nil,
         "phase 5: focus clears count AND whisper flag")

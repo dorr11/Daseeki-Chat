@@ -104,9 +104,52 @@ UI.fonts = {
 local VENDORED_FACE = "Interface\\AddOns\\Daseeki-Core\\fonts\\FiraSansCondensed-Medium.ttf"
 function UI.FontFile() return VENDORED_FACE end
 function UI.FontFileRaw() return VENDORED_FACE end
-function UI.GetFont() return "Fira Sans Condensed Medium" end
-function UI.GetFontScale() return 1.0 end
 function UI.IsFaceFallback() return false, nil end
+
+----------------------------------------------------------------------
+-- THE SUITE-WIDE APPEARANCE SETTINGS (theme.lua's own accessors).
+--
+-- Modeled because the options rework's General section OFFERS them rather than
+-- copying them: Font / Text size / Theme are Core's, and a chat-local copy
+-- would be two settings that disagree. The sim keeps Core's real shape —
+-- Get/Set pairs plus the name lists the pickers are built from — and firing the
+-- theme callbacks on SetTheme is Core's own live-apply posture (which is also
+-- Class 9's synchronous in-call dispatch: every listener runs to completion
+-- before the setter returns).
+----------------------------------------------------------------------
+
+local fontChoice, fontScale = "Fira Sans Condensed Medium", 1.0
+local themeOrder = { "Field Ledger", "Midnight", "Parchment" }
+local themeName  = themeOrder[1]
+
+function UI.GetFont() return fontChoice end
+function UI.FontNames() return { "Fira Sans Condensed Medium", "Friz Quadrata TT", "Arial Narrow" } end
+function UI.SetFont(name)
+    if type(name) ~= "string" or name == "" then return end
+    fontChoice = name
+    UI.__FireFontChanged()
+end
+
+function UI.GetFontScale() return fontScale end
+function UI.SetFontScale(n)
+    n = tonumber(n) or 1.0
+    if n < 0.85 then n = 0.85 elseif n > 1.3 then n = 1.3 end
+    fontScale = n
+    UI.__FireFontChanged()
+end
+
+function UI.GetThemeName()  return themeName end
+function UI.GetThemeNames() return themeOrder end
+function UI.SetTheme(name)
+    local ok = false
+    for _, n in ipairs(themeOrder) do if n == name then ok = true end end
+    if not ok then return end
+    themeName = name
+    -- A theme change moves every token: the epoch is what makes a test that
+    -- asserts "the widget wears UI.Color('panel')" prove the addon RE-READ it.
+    themeEpoch = themeEpoch + 1
+    UI.__FireThemeChanged()
+end
 
 function UI.FlatFrame(parent, bgToken, borderToken)
     local f = _G.CreateFrame("Frame", nil, parent, "BackdropTemplate")

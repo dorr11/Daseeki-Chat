@@ -2243,10 +2243,30 @@ local function clientRoute(event, args)
     for id = 1, _G.NUM_CHAT_WINDOWS do
         local w = Sim.windows[id]
         if w and (w.shown or w.docked) and windowRoutes(w, event, args) then
-            Sim.Frame(id):AddMessage(line, info.r, info.g, info.b)
+            -- THROUGH THE CLIENT'S OWN HANDLER, never straight to AddMessage.
+            -- On 11509 ChatFrame_OnEvent hands every CHAT_MSG_* to
+            -- ChatFrame_MessageEventHandler, and THAT is the bracket an addon
+            -- can tell "the game wrote this line" from "an addon printed this
+            -- line" with (view.lua's addon classifier). A sim that called
+            -- AddMessage directly would be a KINDER client than the real one in
+            -- the precise place the classifier lives — the Class 9 "an absent
+            -- API is a kinder client" lesson, applied to a call SHAPE.
+            _G.ChatFrame_MessageEventHandler(Sim.Frame(id), event, line,
+                info.r, info.g, info.b, args)
         end
     end
     return line
+end
+
+-- The client's message-event handler, in the one property that matters here:
+-- it is ON THE STACK while the line it is routing lands in the frame. Addons
+-- replace this global (Prat does; so does our view's classifier bracket), so
+-- it is a plain global function and callers reach it through _G.
+_G.ChatFrame_MessageEventHandler = function(frame, event, line, r, g, b)
+    record("ChatFrame_MessageEventHandler")
+    if type(frame) ~= "table" or type(frame.AddMessage) ~= "function" then return false end
+    frame:AddMessage(line, r, g, b)
+    return true
 end
 
 -- spec = { event=, text=, sender=, guid= ("zero" | a guid string | nil -> ""),

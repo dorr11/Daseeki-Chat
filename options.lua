@@ -1,4 +1,5 @@
--- Daseeki Chat — options.lua  (post-V1: the settings pane + the alias editor)
+-- Daseeki Chat — options.lua  (the settings pane: General + Chat History,
+-- the wiring every section is built through, and the gates)
 --
 -- THE ASK (owner, 2026-08-11: "do we not have a configuration menu for chat?").
 -- Everything in this addon has been config-gated since Wave 1, but the only
@@ -7,6 +8,14 @@
 -- suite addon registers one (DaseekiSuite:RegisterAddon{ flow = true }, one
 -- section with build(flow)/refresh — the Daseeki-Bags and Daseeki-Nexus idiom,
 -- read and matched rather than reinvented).
+--
+-- THE REWORK (owner, 2026-08-11: "we need to rework the config menu, there is
+-- a lot of noise in it and it doesnt quite accomplish the goal"). The flat
+-- eight-section pane retired; three pages replaced it — GENERAL (dropdowns and
+-- toggles only, plus the CHANNELS subsection), TABS (one page per chat tab,
+-- built in options_tabs.lua) and CHAT HISTORY. This file owns the first and
+-- the third, and the WIRING all three are built through: the branch access,
+-- the apply seams, the binding index, the step lists and the gates.
 --
 -- THE ONE RULE THIS FILE HOLDS ITSELF TO: every control maps to a config field
 -- that ALREADY EXISTS and is ALREADY READ by a shipping module. No control
@@ -43,8 +52,8 @@ local Options = {
 }
 ns.Options = Options
 
-local MAX_ALIAS_ROWS = 10    -- pooled alias editor rows (the flow builds once)
-local MAX_TAB_ROWS   = 10    -- one row per permanent chat window, same idiom
+-- (The pooled-row counts live with the sections that own them:
+-- Options.MAX_CHANNEL_ROWS here, Tabs.MAX_PAGES in options_tabs.lua.)
 
 ----------------------------------------------------------------------
 -- THE CONFIG BRANCHES this pane speaks about.
@@ -246,6 +255,64 @@ Options.APPLY_SEAMS = {
             if S and not V and S.StyleAll then ns:SafeCall(S.StyleAll) end
         end,
     },
+    -- ── THE OPTIONS REWORK's SEAMS (2026-08-11) ─────────────────────────
+    ["core.appearance"] = {
+        what = "Daseeki-Core applies the theme/font to the whole suite; the drawn window "
+            .. "re-lays around the new face and re-inks its tabs",
+        run = function()
+            local V = view()
+            if V and V.ApplyLook then ns:SafeCall(V.ApplyLook) end
+            if V and V.ApplyTabs then ns:SafeCall(V.ApplyTabs) end
+            local S = skin()
+            if S and not V and S.StyleAll then ns:SafeCall(S.StyleAll) end
+        end,
+    },
+    ["config.converge"] = {
+        what = "replay the whole configuration onto this character (windows, tabs, routing, "
+            .. "channels) and rebuild the drawn tab strip around what landed",
+        run = function()
+            local R = ns.Reconcile
+            if R and R.active and R.Run then ns:SafeCall(R.Run, "options") end
+            local V = view()
+            if V and V.RebuildTabs then ns:SafeCall(V.RebuildTabs, "options") end
+        end,
+    },
+    ["view.tabset"] = {
+        what = "rebuild the drawn tab run itself: surfaces created, the combat log taken in "
+            .. "or handed back, the addon tab appearing or leaving",
+        run = function()
+            local V = view()
+            if V and V.RebuildTabs then ns:SafeCall(V.RebuildTabs, "options") end
+        end,
+    },
+    ["channels.order"] = {
+        what = "drive the deterministic numbering toward the new channel order, then re-ink "
+            .. "the tabs that read a channel identity",
+        run = function()
+            local C, Ch = ns.Config, ns.Channels
+            if C and Ch and Ch.active and type(Ch.IsListWarm) == "function"
+               and Ch.IsListWarm() and type(Ch.Converge) == "function" then
+                local cfg = C.EffectiveCfg()
+                if type(cfg) == "table" and type(cfg.join) == "table" and #cfg.join > 0 then
+                    ns:SafeCall(Ch.Converge, cfg.join)
+                end
+            end
+            local V = view()
+            if V and V.ApplyTabs then ns:SafeCall(V.ApplyTabs) end
+        end,
+    },
+    ["channels.colors"] = {
+        what = "re-impose every configured channel colour BY NAME onto the client's own "
+            .. "colour table, which is what the next line in that channel wears",
+        run = function()
+            local Ch = ns.Channels
+            if Ch and Ch.active and type(Ch.ImposeAllColors) == "function" then
+                ns:SafeCall(Ch.ImposeAllColors)
+            end
+            local V = view()
+            if V and V.ApplyTabs then ns:SafeCall(V.ApplyTabs) end
+        end,
+    },
     -- The two honest "nothing standing to re-apply" routes. Declared, named and
     -- reason-checked rather than silently absent.
     ["next-line"] = {
@@ -320,16 +387,54 @@ end
 ----------------------------------------------------------------------
 
 Options.BINDINGS = {
+    -- ── GENERAL: the suite-wide look, through CORE's own seams ──────────
+    -- THE `core` KIND (options rework). Font, text size and theme are
+    -- Daseeki-Core settings for the WHOLE suite — Core's own Appearance page
+    -- owns them and its hub applies them live. Chat does not keep a second
+    -- copy: these controls read and write CORE's accessors, so changing one
+    -- here is changing it everywhere, which is what "one suite" means. The
+    -- kind exists so the bind-check can insist the choice was written down.
+    { id = "core.font", kind = "core", apply = "core.appearance",
+      why = "UI.GetFont/UI.SetFont — Daseeki-Core's own font registry (built-in faces plus "
+         .. "whatever LibSharedMedia has). Storing a chat-local copy would give the player "
+         .. "two fonts that disagree and one of them would win at random." },
+    { id = "core.fontScale", kind = "core", apply = "core.appearance",
+      why = "UI.GetFontScale/UI.SetFontScale — the suite's text scale. Offered here as a "
+         .. "DROPDOWN of steps rather than the slider Core's own page uses (the owner: "
+         .. "\"I dont want sliders, drop downs are fine\")." },
+    { id = "core.theme", kind = "core", apply = "core.appearance",
+      why = "UI.GetThemeName/UI.SetTheme — the suite's colour theme, which the drawn chat "
+         .. "window reads every token from. Core publishes the list; duplicating it here "
+         .. "would be this file deciding which of Core's themes chat is allowed to have." },
+
+    -- The drawn window's own typography (account-local LOOK: per-monitor taste).
+    -- Dropdowns of sensible steps, never sliders.
+    { id = "general.fontSize",    kind = "field", branch = "view", key = "fontSize",    apply = "view.look" },
+    { id = "general.lineHeight",  kind = "field", branch = "view", key = "lineHeight",  apply = "view.look" },
+    -- The tab type size is LAYOUT, not just ink: it decides the tab's height
+    -- and width, and through them the box's own floor.
+    { id = "general.tabTextSize", kind = "field", branch = "view", key = "tabTextSize", apply = "view.layout" },
+
+    -- ── GENERAL / CHANNELS (the flagship of the rework) ─────────────────
+    { id = "channels.order", kind = "config", apply = "channels.order",
+      why = "the drag-and-drop order IS the config's join list (config.join, already on the "
+         .. "wire), which is the { number, name } intent channels.lua's deterministic "
+         .. "numbering engineers the client toward. Config.SetChannelOrder is its seam and "
+         .. "it RENUMBERS ONLY - a reorder can never join or leave a channel." },
+    { id = "channels.color", kind = "config", apply = "channels.colors",
+      why = "a channel's colour is stored BY NAME in config.colors (the client keys colours "
+         .. "by NUMBER and numbers move between characters - the survey's channel-colour "
+         .. "memory lesson). Config.SetChannelColor is the seam; channels.lua re-imposes it "
+         .. "onto the client on every join and renumber." },
+    { id = "channels.rename", kind = "alias", apply = "aliases.refresh" },
+    { id = "channels.add",    kind = "alias", apply = "aliases.refresh" },
+    { id = "channels.keepNumber", kind = "alias", apply = "aliases.refresh" },
+
     -- The owned view (D2 revision). The module switch is the big one: off gives
     -- stock client chat back, windows shown and edit box home, nothing
     -- destroyed. The three below it are the view's own typography, which is
     -- account-local LOOK — the layout it draws is bound in Tabs, as `config`.
     { id = "view.module",      kind = "module", module = "view", apply = "lifecycle" },
-    { id = "view.fontSize",    kind = "field",  branch = "view", key = "fontSize",    apply = "view.look" },
-    { id = "view.lineHeight",  kind = "field",  branch = "view", key = "lineHeight",  apply = "view.look" },
-    -- The tab type size is LAYOUT, not just ink: it decides the tab's height and
-    -- width, and through them the box's own floor. It takes the layout seam.
-    { id = "view.tabTextSize", kind = "field",  branch = "view", key = "tabTextSize", apply = "view.layout" },
     { id = "view.copyButton",  kind = "field",  branch = "view", key = "copyButton",  apply = "view.furniture" },
 
     -- Appearance
@@ -376,6 +481,10 @@ Options.BINDINGS = {
 
     -- History
     { id = "history.module",      kind = "module", module = "history", apply = "lifecycle" },
+    { id = "history.divider",     kind = "field",  branch = "history", key = "divider",     apply = "on-save",
+      whyNoApply = "whether restored lines sit behind a session rule is read at RESTORE time, "
+         .. "on the next login. The lines already on screen were restored under the old "
+         .. "answer and re-writing them would be a lie about when they were said." },
     { id = "history.cap",         kind = "field",  branch = "history", key = "cap",         apply = "on-save",
       whyNoApply = "how many lines are KEPT is read when the snapshot is written at logout and "
          .. "when it is restored at login. Nothing on screen answers to it." },
@@ -413,9 +522,41 @@ Options.BINDINGS = {
          .. "disagree." },
     { id = "windows.reconcileNow", kind = "action" },
 
-    -- Tabs: the per-window row editor (skin v3). One row per chat window
-    -- carrying everything that is decided PER TAB, so the three per-window
-    -- opt-outs that used to have no control at all now have one.
+    -- ── TABS: one PAGE per chat tab (the rework's second section; the
+    -- controls themselves live in options_tabs.lua) ─────────────────────
+    { id = "tabs.name", kind = "config", apply = "config.converge",
+      why = "a tab's NAME is the client's own per-window field and rides the synced config "
+         .. "(config.windows[id].name). Config.SetWindowName writes the intent and the "
+         .. "reconciler's convergeWindow calls SetChatWindowName - the pane never touches "
+         .. "the client store itself." },
+    { id = "tabs.group", kind = "config", apply = "config.converge",
+      why = "which message groups route to a tab is config.windows[id].groups, replayed by "
+         .. "the reconciler through ChatFrame_RemoveAllMessageGroups/AddMessageGroup. "
+         .. "Config.SetWindowGroup is the seam; the checkbox tree is a view of it." },
+    { id = "tabs.channel", kind = "config", apply = "config.converge",
+      why = "which channels route to a tab is config.windows[id].channels (BY NAME), "
+         .. "replayed by the reconciler through AddChatWindowChannel. "
+         .. "Config.SetWindowChannel is the seam." },
+    { id = "tabs.add", kind = "config", apply = "config.converge",
+      why = "+ Add Tab is CONFIG-FIRST: Config.AddWindow writes a live window entry and the "
+         .. "reconciler creates it on the client, exactly the path a brand-new character "
+         .. "takes at login. Nothing here makes a frame." },
+    { id = "tabs.remove", kind = "config", apply = "config.converge",
+      why = "Config.RemoveWindow writes the entry CLOSED (never deletes it - a config that "
+         .. "says nothing about a window is one the reconciler will never close on the next "
+         .. "character). The primary window and the combat log refuse the verb." },
+    { id = "tabs.combatLog", kind = "config", apply = "view.tabset",
+      why = "config.skin.combatLogTab, beside tabPlacement in the already-synced skin "
+         .. "section. It changes OUR strip only - the client's log frame is hosted, never "
+         .. "re-routed - so its seam rebuilds the tab run rather than the client store." },
+    { id = "tabs.addonTab", kind = "config", apply = "config.converge",
+      why = "the addon tab is an ordinary config window carrying addonSink = true "
+         .. "(Config.SetAddonSink), created and removed through the same Add Tab path. The "
+         .. "flag rides WINDOW_CONFIG_ONLY_FIELDS so a capture-back cannot delete it." },
+    { id = "tabs.routeAddon", kind = "config", apply = "view.tabset",
+      why = "config.skin.routeAddonLines - the recoverable red control over a HEURISTIC "
+         .. "classifier. Off (or no addon tab at all) and every line takes exactly the path "
+         .. "it always took; view.lua's ClassifierArmed is the one gate." },
     { id = "tabs.placement", kind = "config", apply = "view.layout",
       why = "where the tabs sit is LAYOUT, so it rides the SYNCED chat config "
          .. "(config.skin.tabPlacement) rather than the account-local db.skin branch - set it "
@@ -427,6 +568,7 @@ Options.BINDINGS = {
          .. "capture by Config.WINDOW_CONFIG_ONLY_FIELDS). Config.SetTabColor is its seam; "
          .. "skin.lua owns what a spec string MEANS and view.lua paints the answer." },
     { id = "tabs.badge",   kind = "field", branch = "badges",  key = "optOut",  apply = "badges.refresh" },
+    { id = "tabs.accent",  kind = "field", branch = "badges",  key = "accentOptOut", apply = "badges.refresh" },
     { id = "tabs.stamp",   kind = "field", branch = "stamps",  key = "windows", apply = "next-line",
       whyNoApply = "whether THIS window's lines are stamped is asked when a line arrives in it; "
          .. "the lines already in the buffer keep the shape they were drawn with." },
@@ -434,11 +576,19 @@ Options.BINDINGS = {
       whyNoApply = "whether this window's lines are KEPT is read when the snapshot is written at "
          .. "logout. Nothing on screen answers to it." },
 
-    -- Channel aliases
-    { id = "aliases.keepNumber", kind = "alias", apply = "aliases.refresh" },
-    { id = "aliases.rows",       kind = "alias", apply = "aliases.refresh" },
-    { id = "aliases.add",        kind = "alias", apply = "aliases.refresh" },
 }
+
+-- Bindings the TABS file adds at load (options_tabs.lua). Declared through
+-- this seam rather than by appending to the table above, so the id index stays
+-- in step — a control built from an id the index never learned would be
+-- recorded in _badIds and fail the suite, which is the whole point of it.
+function Options.AddBindings(list)
+    for _, b in ipairs(list or {}) do
+        Options.BINDINGS[#Options.BINDINGS + 1] = b
+        Options._IndexBinding(b)
+    end
+    return #Options.BINDINGS
+end
 
 -- Config fields this pane deliberately leaves without a control, and why. Kept
 -- HERE rather than in a design doc so it travels with the code, and pinned by
@@ -484,7 +634,8 @@ Options.UNBOUND = {
 ----------------------------------------------------------------------
 
 local BY_ID = {}
-for _, b in ipairs(Options.BINDINGS) do BY_ID[b.id] = b end
+function Options._IndexBinding(b) BY_ID[b.id] = b end
+for _, b in ipairs(Options.BINDINGS) do Options._IndexBinding(b) end
 
 Options._used   = {}     -- binding id -> how many controls were built from it
 Options._badIds = {}     -- ids a builder asked for that do not exist
@@ -500,6 +651,7 @@ local function bind(id)
     Options._used[id] = (Options._used[id] or 0) + 1
     return b
 end
+Options._bind = bind      -- published for options_tabs.lua (one wiring seam)
 
 -- Dispatch one binding's declared route (the write already happened).
 function Options.Dispatch(id)
@@ -540,6 +692,62 @@ end
 
 local intFmt = function(v) return tostring(math.floor((tonumber(v) or 0) + 0.5)) end
 
+-- Published so options_tabs.lua builds its controls through the SAME wiring
+-- (the binding table is the pane's wiring, not a description of it).
+Options._fieldGet, Options._fieldSet = fieldGet, fieldSet
+Options._boolSet,  Options._moduleGet, Options._moduleSet = boolSet, moduleGet, moduleSet
+
+-- ── NO SLIDERS (the owner's constraint, 2026-08-11: "I dont want sliders,
+-- drop downs are fine"). Every number in this pane is a dropdown of sensible
+-- steps, and the suite pins that no control of kind "slider" is ever built.
+-- The step lists live here, as data, so the pin has something to check.
+local function steps(list, fmt)
+    local out = {}
+    for _, v in ipairs(list) do
+        out[#out + 1] = { value = v, text = fmt and fmt(v) or tostring(v) }
+    end
+    return out
+end
+local function pct(v) return ("%d%%"):format(math.floor(v * 100 + 0.5)) end
+local function px(v) return (v == math.floor(v)) and ("%dpx"):format(v) or ("%.1fpx"):format(v) end
+
+Options.STEPS = {
+    fontSize    = steps({ 10, 11, 12, 12.5, 13, 13.5, 14, 15, 16, 18, 20, 22 }, px),
+    lineHeight  = steps({ 1.0, 1.1, 1.2, 1.3, 1.45, 1.6, 1.8, 2.0 }, pct),
+    tabTextSize = steps({ 10, 11, 12, 12.5, 13, 14, 16, 18 }, px),
+    fadeTime    = steps({ 10, 20, 30, 45, 60, 90, 120, 180, 300 },
+                        function(v) return ("%d seconds"):format(v) end),
+    historyCap  = steps({ 25, 50, 100, 200, 300, 500, 750, 1000 },
+                        function(v) return ("%d lines"):format(v) end),
+    historyAge  = steps({ 1, 3, 6, 12, 24, 48, 72, 168 }, function(v)
+                        if v < 24 then return ("%d hour%s"):format(v, v == 1 and "" or "s") end
+                        return ("%d day%s"):format(v / 24, v == 24 and "" or "s")
+                  end),
+    coreScale   = steps({ 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3 }, pct),
+}
+
+-- A dropdown's `get` has to answer one of the offered values or the control
+-- shows nothing: snap the stored number to the nearest step.
+function Options.NearestStep(list, value)
+    local v = tonumber(value)
+    if not v then return list[1] and list[1].value end
+    local best, bestD
+    for _, c in ipairs(list) do
+        local d = math.abs((tonumber(c.value) or 0) - v)
+        if not bestD or d < bestD then best, bestD = c.value, d end
+    end
+    return best
+end
+
+local function stepGet(id, list)
+    local g = fieldGet(id)
+    return function() return Options.NearestStep(list, g()) end
+end
+local function stepSet(id, list)
+    return fieldSet(id, function(v) return tonumber(v) or Options.NearestStep(list, nil) end)
+end
+Options._stepGet, Options._stepSet = stepGet, stepSet
+
 ----------------------------------------------------------------------
 -- Refresher registry (the Bags idiom): every control that can go stale hands
 -- its Refresh back, and the section's refresh(pane) re-runs the lot.
@@ -554,9 +762,12 @@ local function reg(widget)
 end
 local function refreshAll()
     for i = 1, #refreshers do ns:SafeCall(refreshers[i]) end
+    if ns.OptionsTabs and ns.OptionsTabs.Refresh then ns:SafeCall(ns.OptionsTabs.Refresh) end
     Options.RefreshStatusLines()
 end
 Options._refresh = refreshAll
+Options._reg = reg        -- published for options_tabs.lua
+function Options._ResetRefreshers() refreshers = {} end
 
 ----------------------------------------------------------------------
 -- STATUS LINES (read-only truth, refreshed on every show): the reconciler's
@@ -610,98 +821,34 @@ local function statusHint(section, fn)
     return hint
 end
 
+Options._statusHint = statusHint      -- published for options_tabs.lua
+
 ----------------------------------------------------------------------
--- THE PER-TAB ROW EDITOR's data (skin v3) — pure, and driven directly by the
--- suite. One row per chat window carrying everything decided PER TAB:
---   * its COLOR (synced config, Config.SetTabColor);
---   * whether it BADGES, STAMPS and is KEPT across sessions — the three
---     per-window opt-outs that had no control at all until this editor.
+-- ============ THE OPTIONS REWORK (owner-specified, 2026-08-11) ============
 --
--- The three opt-outs do not share a polarity (badges/history store `true` for
--- OFF; stamps stores `false` for OFF, absent for ON), so the shape below names
--- each module's own table AND its own polarity rather than inventing a fourth
--- convention this file would then have to keep in step. Nothing here is a
--- second copy of a module's rule: it is a pointer at it.
+-- THE ASK: "we need to rework the config menu, there is a lot of noise in it
+-- and it doesnt quite accomplish the goal" — followed by a full section spec
+-- with the client's own per-window config (message groups, global channels,
+-- per-group colours, drag-to-reorder channels) as the capability reference.
+--
+-- The flat eight-section pane RETIRES here. What replaces it is three pages:
+--
+--   GENERAL  the look, in dropdowns and toggles ONLY (the owner's constraint:
+--            "I dont want sliders, drop downs are fine" — the font-size and
+--            line-height sliders became dropdowns of sensible steps, and the
+--            suite pins that no slider is ever built again), the display group
+--            the old Timestamps/Names/Links sections folded into, and the
+--            CHANNELS subsection: one row per channel with drag-to-reorder, a
+--            colour and a rename.
+--   TABS     one page per chat tab (options_tabs.lua), plus + Add Tab, remove,
+--            the combat log toggle and the addon tab.
+--   HISTORY  retention: keep/lines/age/divider.
+--
+-- WHAT DID NOT CHANGE, and must not: every control is still declared in
+-- Options.BINDINGS with a named apply seam, the bind-check still refuses a
+-- control that names nothing real or routes nowhere, and CheckCoverage still
+-- fails the suite for a stored field that is neither bound nor excused.
 ----------------------------------------------------------------------
-
--- The colour palette the pane offers. Two families, both live in-game: a Core
--- theme token follows the theme, a chat type follows the player's own chat
--- colours. skin.lua owns what a spec means; this is the curated menu of them.
-Options.TAB_COLOR_CHOICES = {
-    { value = "",             text = "Automatic" },
-    { value = "token:accent", text = "Accent" },
-    { value = "token:text",   text = "Text" },
-    { value = "token:muted",  text = "Muted" },
-    { value = "token:danger", text = "Danger" },
-    { value = "chat:SAY",     text = "Say" },
-    { value = "chat:GUILD",   text = "Guild" },
-    { value = "chat:WHISPER", text = "Whisper" },
-    { value = "chat:PARTY",   text = "Party" },
-    { value = "chat:RAID",    text = "Raid" },
-    { value = "chat:CHANNEL", text = "Channel" },
-    { value = "chat:SYSTEM",  text = "System" },
-    { value = "chat:LOOT",    text = "Loot" },
-}
-
--- `binding` is NAMED rather than derived from `key`: the ids are tabs.badge /
--- tabs.stamp / tabs.history while the keys are the module names, and building
--- one from the other by string arithmetic is exactly how a dispatch quietly
--- goes to a seam that does not exist (it did, for one build).
-Options.WINDOW_TOGGLES = {
-    { key = "badges",  binding = "tabs.badge",   branch = "badges",  store = "optOut",  offValue = true,  onValue = nil,
-      label = "Badge", tooltip = "Count unread lines on this window's tab." },
-    { key = "stamps",  binding = "tabs.stamp",   branch = "stamps",  store = "windows", offValue = false, onValue = nil,
-      label = "Stamp", tooltip = "Timestamp the lines in this window." },
-    { key = "history", binding = "tabs.history", branch = "history", store = "optOut",  offValue = true,  onValue = nil,
-      label = "Keep",  tooltip = "Keep this window's lines across a logout or reload." },
-}
-
-function Options.WindowToggleGet(spec, id)
-    local t = Options.Branch(spec.branch)
-    local tbl = (type(t) == "table") and t[spec.store] or nil
-    if type(tbl) ~= "table" then return true end
-    return tbl[id] ~= spec.offValue          -- absent (and anything else) is ON
-end
-
-function Options.WindowToggleSet(spec, id, on)
-    local t = Options.Branch(spec.branch)
-    if type(t) ~= "table" then return false end
-    if type(t[spec.store]) ~= "table" then t[spec.store] = {} end
-    -- Written out rather than `on and X or Y`: the ON value is nil, which that
-    -- idiom silently turns into the OFF value (Class 5, the plain way).
-    if on then t[spec.store][id] = spec.onValue else t[spec.store][id] = spec.offValue end
-    -- The ROW's own binding names the seam (badges re-place their pips; stamps
-    -- and history ride the next line / the next save), so the three toggles do
-    -- not share one branch-shaped guess about what to re-apply.
-    Options.Dispatch(spec.binding)
-    return true
-end
-
--- One row per permanent chat window. Deterministic by construction (the client
--- numbers its windows), and the name is the client's own.
-function Options.TabRows()
-    local out = {}
-    local C = ns.Config
-    local gcwi = _G.GetChatWindowInfo
-    for id = 1, math.min(MAX_TAB_ROWS, _G.NUM_CHAT_WINDOWS or 10) do
-        local name
-        if type(gcwi) == "function" then
-            local ok, nm = pcall(gcwi, id)
-            if ok and type(nm) == "string" and nm ~= "" then name = nm end
-        end
-        out[#out + 1] = {
-            id    = id,
-            name  = name or ("Window " .. id),
-            color = (C and C.TabColor and C.TabColor(id)) or "",
-        }
-    end
-    return out
-end
-
-function Options.TabRowLabel(row)
-    if type(row) ~= "table" then return "" end
-    return ("%d. %s"):format(row.id, row.name)
-end
 
 -- THE LOCK's seam, through skin.lua's one write path (which writes the synced
 -- config, keeps the session mirror in step and re-applies the grips) — never a
@@ -749,15 +896,17 @@ function Options.SetTabPlacement(where)
     return changed
 end
 
-function Options.SetTabColor(id, spec)
+function Options.TabPlacementStatus()
     local C = ns.Config
-    if not (C and C.SetTabColor) then return false end
-    local changed = C.SetTabColor(id, spec)
-    if changed then Options.Dispatch("tabs.color") end
-    return changed
+    local n = 0
+    for _, id in ipairs((C and C.WindowIds and C.WindowIds()) or {}) do
+        if C.TabColor and C.TabColor(id) then n = n + 1 end
+    end
+    return ("Tabs on the %s - synced across the mesh. %d tab(s) carry a colour of their own.")
+        :format(Options.TabPlacement(), n)
 end
 
--- WHICH RENDERER IS PAINTING, said out loud. The settings below the line are
+-- WHICH RENDERER IS PAINTING, said out loud. The settings in the last group are
 -- the skin-over treatment's, and skin-over is retired while the drawn window is
 -- up (Skin.ViewOwnsPixels) - so on a live box they are remembered, not applied.
 function Options.RendererStatus()
@@ -787,41 +936,235 @@ function Options.FadingStatus()
     return "Chat text fades out after the hold time below."
 end
 
-function Options.TabPlacementStatus()
-    local n = 0
-    for _, row in ipairs(Options.TabRows()) do
-        if row.color ~= "" then n = n + 1 end
+-- The on-demand reconcile. Refuses honestly rather than pretending, because a
+-- reconcile with the module inert would silently do nothing at all.
+function Options.ReconcileNow()
+    local R = ns.Reconcile
+    if not (R and type(R.Run) == "function") then return false end
+    if not R.active then
+        ns:Print("the reconciler module is disabled - /dchat enable reconcile turns it back on.")
+        return false
     end
-    return ("Tabs on the %s - synced across the mesh. %d tab(s) carry a colour of their own.")
-        :format(Options.TabPlacement(), n)
+    R.Run("options")
+    Options.RefreshStatusLines()
+    return true
 end
 
 ----------------------------------------------------------------------
--- THE ALIAS EDITOR's data (pure — the suite drives these directly).
+-- ============ THE CHANNELS SUBSECTION (the flagship) ============
+--
+-- One row per channel the client or the config knows about, carrying the three
+-- things the owner asked for:
+--
+--   ORDER   drag a row and the channel's NUMBER changes. The order IS the
+--           config's join list, which is the intent channels.lua's
+--           deterministic numbering engineers the client toward — so a drag
+--           here is a renumber everywhere, on every character. It can never
+--           join or leave a channel (Config.SetChannelOrder preserves
+--           membership exactly); a row for a channel the config is not in is
+--           offered for its NAME and its COLOUR and refuses to be dragged.
+--   COLOUR  stored BY NAME (config.colors), re-imposed onto the client on
+--           every join and renumber — the channel-colour-memory lesson.
+--   RENAME  the alias system, surfaced here. "LookingForGroup" -> "LFG" shows
+--           in the chat line, on the edit box's channel prefix and on a tab
+--           that belongs to that channel: three surfaces, one seam
+--           (Config.AliasLabel), which the suite pins by moving the seam and
+--           watching all three follow.
+--
+-- THE ALIAS EDITOR IS GONE, not duplicated: this IS the alias editor now.
 ----------------------------------------------------------------------
 
--- One row per channel the client or the config knows about, plus every channel
--- that already carries an alias. Deterministic order (channels.lua sorts).
-function Options.AliasRows()
+Options.MAX_CHANNEL_ROWS = 12
+
+local function hexOf(col)
+    if type(col) ~= "table" then return "" end
+    local function c8(v) return math.floor((tonumber(v) or 0) * 255 + 0.5) end
+    return ("%02x%02x%02x"):format(c8(col.r), c8(col.g), c8(col.b))
+end
+Options.HexOf = hexOf
+
+-- PURE. "rrggbb" (with or without a leading #) -> r, g, b as 0..1 floats, or
+-- nil for anything that is not a real six-digit hex (never a guess).
+function Options.ParseHex(s)
+    local hex = tostring(s or ""):match("^%s*#?(%x%x%x%x%x%x)%s*$")
+    if not hex then return nil end
+    return tonumber(hex:sub(1, 2), 16) / 255,
+           tonumber(hex:sub(3, 4), 16) / 255,
+           tonumber(hex:sub(5, 6), 16) / 255
+end
+
+-- The rows, in the order they are drawn: the configured channel order first
+-- (those are the draggable ones), then every other channel the client or the
+-- config knows about, alphabetically. Deterministic by construction (Class 8).
+function Options.ChannelRows()
     local C, Ch = ns.Config, ns.Channels
-    local names = (Ch and Ch.KnownChannelNames) and Ch.KnownChannelNames() or {}
-    local out = {}
-    for _, name in ipairs(names) do
-        out[#out + 1] = {
-            name  = name,
-            alias = (C and C.GetAlias(name)) or "",
-            num   = (Ch and Ch.NumberOf) and Ch.NumberOf(name) or nil,
+    local rows, seen = {}, {}
+    local function add(name, ordered)
+        if type(name) ~= "string" or name == "" then return end
+        local key = name:lower()
+        if seen[key] then return end
+        seen[key] = true
+        local col = (C and C.ChannelColor) and C.ChannelColor(name) or nil
+        rows[#rows + 1] = {
+            name    = name,
+            alias   = (C and C.GetAlias and C.GetAlias(name)) or "",
+            num     = (Ch and Ch.NumberOf) and Ch.NumberOf(name) or nil,
+            color   = col,
+            hex     = hexOf(col),
+            ordered = ordered and true or false,
         }
     end
-    return out
+    for _, name in ipairs((C and C.ChannelOrder and C.ChannelOrder()) or {}) do add(name, true) end
+    for _, name in ipairs((Ch and Ch.KnownChannelNames and Ch.KnownChannelNames()) or {}) do
+        add(name, false)
+    end
+    return rows
 end
 
--- The label a row shows for a channel: "2. World" while joined, "World" when
--- the character is not currently in it (an alias outlives membership).
-function Options.AliasRowLabel(row)
+-- How many of the rows are actually reorderable (the drag's clamp).
+function Options.OrderedRowCount()
+    local n = 0
+    for _, r in ipairs(Options.ChannelRows()) do if r.ordered then n = n + 1 end end
+    return n
+end
+
+-- The label a row shows: "2. World" while joined, "World" when the character
+-- is not currently in it (a colour and an alias outlive membership).
+function Options.ChannelRowLabel(row)
     if type(row) ~= "table" then return "" end
     if row.num then return ("%d. %s"):format(row.num, row.name) end
     return row.name
+end
+
+-- ── THE DRAG ENGINE, PURE ────────────────────────────────────────────────
+--
+-- OUR OWN IMPLEMENTATION, in the hub pane (the spec's own words): the flow API
+-- has no reorderable list, and a keyboard-free mouse drag with a drop indicator
+-- is what the owner asked for. Everything that DECIDES anything is pure and
+-- driven directly by the suite; the frame glue below it only feeds this a row
+-- index and paints the indicator.
+--
+-- CLASS 3 IS LIVE HERE: GetCursorPosition answers in SCREEN PIXELS and a row's
+-- edges are in its own effective-scale space. The cursor is divided by the
+-- compared frame's effective scale before any comparison happens, every time.
+
+Options._drag = nil          -- { from = index, over = index }
+
+function Options.DraggingRow()
+    return Options._drag and Options._drag.from or nil
+end
+
+function Options.BeginRowDrag(i)
+    i = tonumber(i)
+    local rows = Options.ChannelRows()
+    local row = i and rows[i]
+    if not row then return false end
+    -- A channel the config does not carry has no number to change. Refusing is
+    -- the honest answer; silently reordering a display list would be a lie.
+    if not row.ordered then return false end
+    Options._drag = { from = i, over = i }
+    return true
+end
+
+function Options.DragOver(i)
+    if not Options._drag then return false end
+    i = tonumber(i)
+    if not i then return false end
+    local n = Options.OrderedRowCount()
+    if n < 1 then return false end
+    if i < 1 then i = 1 elseif i > n then i = n end
+    Options._drag.over = i
+    return true
+end
+
+-- Where the drop indicator sits (1-based row index), or nil when nothing is
+-- being dragged.
+function Options.DropIndex()
+    return Options._drag and Options._drag.over or nil
+end
+
+function Options.CancelRowDrag()
+    Options._drag = nil
+end
+
+-- The drop. Returns true when the ORDER actually moved (an unchanged drop is a
+-- no-op and never bumps rev — no sync storm from picking a row up and putting
+-- it back).
+function Options.CommitRowDrag()
+    local d = Options._drag
+    Options._drag = nil
+    if not d then return false end
+    local rows = Options.ChannelRows()
+    local row = rows[d.from]
+    if not row or not row.ordered then return false end
+    if d.over == d.from then return false end
+    local C = ns.Config
+    if not (C and C.MoveChannel) then return false end
+    local changed = C.MoveChannel(row.name, d.over)
+    if changed then Options.Dispatch("channels.order") end
+    return changed
+end
+
+-- PURE. Which row a screen-space Y lands on, given each row's { bottom, top }
+-- in the SAME space, top row first. Above the first row is the first row and
+-- below the last is the last — a drag that leaves the list still has an answer.
+function Options.RowIndexAtY(rects, y)
+    if type(rects) ~= "table" or #rects == 0 or type(y) ~= "number" then return nil end
+    for i, r in ipairs(rects) do
+        if type(r) == "table" and y >= r[1] and y <= r[2] then return i end
+    end
+    if y > rects[1][2] then return 1 end
+    return #rects
+end
+
+-- ── THE ROW WRITES ───────────────────────────────────────────────────────
+
+function Options.SetChannelColorHex(name, hex)
+    local C = ns.Config
+    if not (C and C.SetChannelColor) then return false end
+    local changed
+    if tostring(hex or ""):gsub("%s+", "") == "" then
+        changed = C.SetChannelColor(name, nil)          -- the clear verb
+    else
+        local r, g, b = Options.ParseHex(hex)
+        if not r then return false end                  -- junk never lands
+        changed = C.SetChannelColor(name, r, g, b)
+    end
+    if changed then Options.Dispatch("channels.color") end
+    return changed
+end
+
+function Options.SetChannelColor(name, r, g, b)
+    local C = ns.Config
+    if not (C and C.SetChannelColor) then return false end
+    local changed = C.SetChannelColor(name, r, g, b)
+    if changed then Options.Dispatch("channels.color") end
+    return changed
+end
+
+-- The client's own colour picker, reached the way every addon reaches it. No
+-- picker (or a client that does not carry one) leaves the hex box as the path,
+-- which is why the row ships both.
+function Options.OpenColorPicker(name)
+    local CP = _G.ColorPickerFrame
+    if type(CP) ~= "table" or type(CP.SetColorRGB) ~= "function" then return false end
+    local C = ns.Config
+    local cur = (C and C.ChannelColor and C.ChannelColor(name)) or { r = 1, g = 1, b = 1 }
+    CP.func = function()
+        local get = CP.GetColorRGB or _G.ColorPickerFrame.GetColorRGB
+        if type(get) ~= "function" then return end
+        local ok, r, g, b = pcall(get, CP)
+        if ok and type(r) == "number" then Options.SetChannelColor(name, r, g, b) end
+    end
+    CP.cancelFunc = function()
+        Options.SetChannelColor(name, cur.r, cur.g, cur.b)
+    end
+    CP.opacityFunc, CP.hasOpacity = nil, false
+    CP.previousValues = { r = cur.r, g = cur.g, b = cur.b }
+    pcall(CP.SetColorRGB, CP, cur.r, cur.g, cur.b)
+    if type(CP.Hide) == "function" then pcall(CP.Hide, CP) end
+    if type(CP.Show) == "function" then pcall(CP.Show, CP) end
+    return true
 end
 
 -- Write one row's alias. Empty removes (config.lua owns that rule).
@@ -829,7 +1172,7 @@ function Options.SetAlias(name, alias)
     local C = ns.Config
     if not (C and C.SetAlias) then return false end
     local changed = C.SetAlias(name, alias)
-    if changed then Options.Dispatch("aliases.rows") end
+    if changed then Options.Dispatch("channels.rename") end
     return changed
 end
 
@@ -846,488 +1189,316 @@ function Options.CommitAdd()
     return ok
 end
 
-----------------------------------------------------------------------
--- THE PAGE.
-----------------------------------------------------------------------
-
-local function buildAppearance(flow)
-    local sec = flow:AddSection("Appearance")
-    sec:Hint("How the chat windows are dressed. Every change applies live.")
-
-    -- ── THE OWNED VIEW (D2 revision) ────────────────────────────────────
-    -- First, because it decides what every control under it even applies to:
-    -- with the view on, Daseeki Chat draws the whole window itself and the
-    -- game's own chat windows become a hidden engine. Off is stock chat back,
-    -- windows shown, nothing destroyed.
-    reg(sec:Checkbox({
-        label = "Draw Daseeki's own chat window",
-        tooltip = "Daseeki Chat draws the whole window - the tab strip, the message feed and "
-               .. "the input bar - instead of re-dressing the game's. The game's chat windows "
-               .. "stay alive behind it and still receive everything; they are just hidden. "
-               .. "Turning this off gives the game's own chat window straight back.",
-        get = moduleGet("view.module"), set = moduleSet("view.module"),
-    }))
-    reg(sec:Slider({
-        label = "Message text size", min = 8, max = 24, step = 0.5, width = 260,
-        tooltip = "The chat feed's own font size in Daseeki's window. The line spacing follows "
-               .. "it automatically, so the rhythm of the design holds at any size.",
-        get = fieldGet("view.fontSize"),
-        set = fieldSet("view.fontSize", function(v) return tonumber(v) or 13.5 end),
-    }))
-    reg(sec:Slider({
-        label = "Line height", min = 1.0, max = 2.0, step = 0.05, width = 260,
-        tooltip = "How much air sits between message lines, as a multiple of the text size.",
-        get = fieldGet("view.lineHeight"),
-        set = fieldSet("view.lineHeight", function(v) return tonumber(v) or 1.45 end),
-    }))
-    reg(sec:Slider({
-        label = "Tab text size", min = 8, max = 20, step = 0.5, width = 260,
-        get = fieldGet("view.tabTextSize"),
-        set = fieldSet("view.tabTextSize", function(v) return tonumber(v) or 12.5 end),
-    }))
-    reg(sec:Checkbox({
-        label = "Copy-chat button on Daseeki's window",
-        tooltip = "Era has no clipboard; the copy window pre-selects the text for Ctrl+C.",
-        get = fieldGet("view.copyButton"), set = boolSet("view.copyButton"),
-    }))
-    sec:AddSeparator()
-    -- HONEST ABOUT WHO EACH CONTROL SPEAKS TO. Everything below this line
-    -- dresses the GAME's chat windows, and those are a hidden engine while
-    -- Daseeki draws its own. Saying so is the same courtesy the fading line
-    -- pays, and it is what the config-surface audit asks of a field whose live
-    -- write cannot reach pixels in the posture the player is actually in.
-    statusHint(sec, Options.RendererStatus)
-
-    reg(sec:Checkbox({
-        label = "One box: tabs, text and input on a single surface",
-        tooltip = "Draw the whole chat window as one panel - the tab strip, the messages and "
-               .. "the input bar share it, separated by hairlines and nothing else. Off gives "
-               .. "the previous look back, including text fading.",
-        get = fieldGet("appearance.unifiedChassis"), set = boolSet("appearance.unifiedChassis"),
-    }))
-    reg(sec:Checkbox({
-        label = "Channel-colored tabs",
-        tooltip = "Ink each tab with the color of the channel that window is for. A window "
-               .. "earns a color only when its routing collapses to exactly one identity.",
-        get = fieldGet("appearance.channelTabs"), set = boolSet("appearance.channelTabs"),
-    }))
-    reg(sec:Checkbox({
-        label = "Timestamp divider",
-        tooltip = "A hairline between the timestamp column and the message text. Absent "
-               .. "whenever timestamps are.",
-        get = fieldGet("appearance.stampDivider"), set = boolSet("appearance.stampDivider"),
-    }))
-    reg(sec:Checkbox({
-        label = "Color the edit box channel prefix",
-        tooltip = "The input bar's sticky-channel label wears that channel's color.",
-        get = fieldGet("appearance.editBoxChannelColor"), set = boolSet("appearance.editBoxChannelColor"),
-    }))
-    reg(sec:Checkbox({
-        label = "Icon rail",
-        tooltip = "A slim strip on a window's edge: copy chat, settings, jump to newest.",
-        get = fieldGet("appearance.iconRail"), set = boolSet("appearance.iconRail"),
-    }))
-    reg(sec:Checkbox({
-        label = "Hide the game's chat button column",
-        tooltip = "Take down the game's own chat-menu and scroll-button strip. While it is "
-               .. "off the column is fully disabled - no invisible hitboxes are left behind. "
-               .. "Turning this back on returns the column exactly as the game had it.",
-        get = fieldGet("appearance.hideButtonColumn"), set = boolSet("appearance.hideButtonColumn"),
-    }))
-    reg(sec:Checkbox({
-        label = "Copy-chat button on each window",
-        tooltip = "Era has no clipboard; the copy window pre-selects the text for Ctrl+C.",
-        get = fieldGet("appearance.copyButton"), set = boolSet("appearance.copyButton"),
-    }))
-    sec:AddSeparator()
-    -- INERT WITH A HINT, never a half state: the one-box layout has no fading
-    -- at all, and this line says so instead of leaving a control that looks
-    -- live and does nothing.
-    statusHint(sec, Options.FadingStatus)
-    reg(sec:Checkbox({
-        label = "Fade chat text when idle",
-        get = fieldGet("appearance.fading"), set = boolSet("appearance.fading"),
-    }))
-    reg(sec:Slider({
-        label = "Seconds visible before fading", min = 10, max = 300, step = 5, width = 260,
-        format = intFmt,
-        get = fieldGet("appearance.fadeTime"), set = intSet("appearance.fadeTime"),
-    }))
+function Options.ChannelStatus()
+    local rows = Options.ChannelRows()
+    local ordered, colored, renamed = 0, 0, 0
+    for _, r in ipairs(rows) do
+        if r.ordered then ordered = ordered + 1 end
+        if r.color then colored = colored + 1 end
+        if r.alias ~= "" then renamed = renamed + 1 end
+    end
+    return ("%d channel(s): %d in your configured order, %d coloured, %d renamed. Order, "
+         .. "colours and names are all part of your shared chat configuration.")
+        :format(#rows, ordered, colored, renamed)
 end
 
 ----------------------------------------------------------------------
--- THE TABS SECTION (skin v3): where the tabs live, and one row per window for
--- everything decided per tab. This is the "shared per-window editor" three
--- UNBOUND entries were waiting on.
+-- THE DRAG's FRAME GLUE. Everything above decides; this only feeds it a row
+-- index and paints a 2px line where the row would land. Every call is
+-- type-guarded: the headless flow's rows are plain tables with no scripts, and
+-- the pure engine is what the suite drives.
 ----------------------------------------------------------------------
 
-local function buildTabs(flow)
-    local sec = flow:AddSection("Tabs")
-    sec:Hint("Where the chat tabs sit, and what each one does. Placement and tab colours are "
-          .. "part of your shared chat configuration - set them once on any character and "
-          .. "every character gets them.")
+Options._chanRows = {}
 
+local function rowRects()
+    local out = {}
+    for i = 1, Options.MAX_CHANNEL_ROWS do
+        local ui = Options._chanRows[i]
+        local f = ui and ui.row
+        if type(f) == "table" and type(f.GetTop) == "function" then
+            local okT, top = pcall(f.GetTop, f)
+            local okB, bottom = pcall(f.GetBottom, f)
+            if okT and okB and type(top) == "number" and type(bottom) == "number" then
+                out[#out + 1] = { bottom, top }
+            end
+        end
+    end
+    return out
+end
+
+function Options.DropIndicator()
+    if Options._dropLine then return Options._dropLine end
+    local first = Options._chanRows[1] and Options._chanRows[1].row
+    if type(first) ~= "table" or type(first.GetParent) ~= "function" then return nil end
+    local cf = _G.CreateFrame
+    if type(cf) ~= "function" then return nil end
+    local ok, f = pcall(cf, "Frame", nil, first:GetParent())
+    if not ok or type(f) ~= "table" then return nil end
+    if type(f.CreateTexture) == "function" then
+        local ok2, tex = pcall(f.CreateTexture, f, nil, "OVERLAY")
+        if ok2 and type(tex) == "table" then
+            f._tex = tex
+            if type(tex.SetAllPoints) == "function" then pcall(tex.SetAllPoints, tex, f) end
+            local UI = _G.DaseekiUI
+            if UI and UI.Color and type(tex.SetColorTexture) == "function" then
+                pcall(tex.SetColorTexture, tex, UI.Color("accent"))
+            end
+        end
+    end
+    if type(f.SetHeight) == "function" then pcall(f.SetHeight, f, 2) end
+    if type(f.Hide) == "function" then pcall(f.Hide, f) end
+    Options._dropLine = f
+    return f
+end
+
+function Options.PaintDropIndicator()
+    local idx = Options.DropIndex()
+    local line = Options.DropIndicator()
+    if not line then return false end
+    local ui = idx and Options._chanRows[idx]
+    local row = ui and ui.row
+    if not (idx and type(row) == "table" and type(line.SetPoint) == "function") then
+        if type(line.Hide) == "function" then pcall(line.Hide, line) end
+        return false
+    end
+    pcall(line.ClearAllPoints, line)
+    pcall(line.SetPoint, line, "BOTTOMLEFT", row, "TOPLEFT", 0, 0)
+    pcall(line.SetPoint, line, "BOTTOMRIGHT", row, "TOPRIGHT", 0, 0)
+    pcall(line.Show, line)
+    return true
+end
+
+function Options.HideDropIndicator()
+    local line = Options._dropLine
+    if line and type(line.Hide) == "function" then pcall(line.Hide, line) end
+end
+
+-- CLASS 3: the cursor is in screen pixels; a row's edges are in the row's own
+-- effective-scale space. Convert INTO the compared frame's space, never the
+-- other way round and never "they are probably equal".
+function Options.DragAtCursor(anyRow)
+    if not Options.DraggingRow() then return false end
+    local gcp = _G.GetCursorPosition
+    if type(gcp) ~= "function" or type(anyRow) ~= "table" then return false end
+    local okC, _, cy = pcall(gcp)
+    if not okC or type(cy) ~= "number" then return false end
+    local scale = 1
+    if type(anyRow.GetEffectiveScale) == "function" then
+        local okS, s = pcall(anyRow.GetEffectiveScale, anyRow)
+        if okS and type(s) == "number" and s > 0 then scale = s end
+    end
+    local idx = Options.RowIndexAtY(rowRects(), cy / scale)
+    if not idx then return false end
+    Options.DragOver(idx)
+    Options.PaintDropIndicator()
+    return true
+end
+
+local function installRowDrag(row, i)
+    if type(row) ~= "table" or type(row.SetScript) ~= "function" then return false end
+    if type(row.EnableMouse) == "function" then pcall(row.EnableMouse, row, true) end
+    if type(row.RegisterForDrag) == "function" then pcall(row.RegisterForDrag, row, "LeftButton") end
+    row:SetScript("OnDragStart", function(self)
+        if Options.BeginRowDrag(i) then Options.PaintDropIndicator() end
+    end)
+    row:SetScript("OnDragStop", function(self)
+        Options.CommitRowDrag()
+        Options.HideDropIndicator()
+        Options._refresh()
+    end)
+    row:SetScript("OnUpdate", function(self)
+        if Options.DraggingRow() then Options.DragAtCursor(self) end
+    end)
+    -- A drag that ends anywhere but on the list still ends: the client fires
+    -- OnHide on a pane that goes away mid-gesture, and a latch left up would
+    -- reorder on the next unrelated click.
+    row:SetScript("OnHide", function()
+        if Options.DraggingRow() then
+            Options.CancelRowDrag()
+            Options.HideDropIndicator()
+        end
+    end)
+    return true
+end
+
+----------------------------------------------------------------------
+-- SECTION 1 — GENERAL.
+----------------------------------------------------------------------
+
+local function buildGeneral(flow)
+    local sec = flow:AddSection("General")
+    sec:Hint("How chat looks. Everything here applies the moment you change it.")
+
+    -- ── The suite's own look, through Core's seams ───────────────────────
+    local UI = _G.DaseekiUI
+
+    local fontRow = sec:AddRow({ vAlign = "center" })
+    fontRow:Label("Font")
+    local fontBinding = bind("core.font")
+    reg(fontRow:Dropdown({
+        width = 200,
+        choices = (UI and UI.FontNames) and UI.FontNames() or {},
+        get = function() return UI and UI.GetFont and UI.GetFont() or "" end,
+        set = function(v)
+            if UI and UI.SetFont then UI.SetFont(v) end
+            Options.Apply(fontBinding.apply)
+        end,
+    }))
+
+    local sizeRow = sec:AddRow({ vAlign = "center" })
+    sizeRow:Label("Text size")
+    local scaleBinding = bind("core.fontScale")
+    reg(sizeRow:Dropdown({
+        width = 120,
+        choices = Options.STEPS.coreScale,
+        get = function()
+            return Options.NearestStep(Options.STEPS.coreScale,
+                UI and UI.GetFontScale and UI.GetFontScale() or 1)
+        end,
+        set = function(v)
+            if UI and UI.SetFontScale then UI.SetFontScale(tonumber(v) or 1) end
+            Options.Apply(scaleBinding.apply)
+        end,
+    }))
+
+    local themeRow = sec:AddRow({ vAlign = "center" })
+    themeRow:Label("Theme")
+    local themeBinding = bind("core.theme")
+    reg(themeRow:Dropdown({
+        width = 200,
+        choices = (UI and UI.GetThemeNames) and UI.GetThemeNames() or {},
+        get = function() return UI and UI.GetThemeName and UI.GetThemeName() or "" end,
+        set = function(v)
+            if UI and UI.SetTheme then UI.SetTheme(v) end
+            Options.Apply(themeBinding.apply)
+        end,
+    }))
+    sec:Hint("Font, text size and theme belong to the whole Daseeki suite - changing one here "
+          .. "changes it everywhere, and every other Daseeki window follows in the same beat.")
+
+    -- ── The chat feed's own type ─────────────────────────────────────────
+    local msgRow = sec:AddRow({ vAlign = "center" })
+    msgRow:Label("Message text size")
+    reg(msgRow:Dropdown({
+        id = "general.fontSize", width = 120, choices = Options.STEPS.fontSize,
+        tooltip = "The chat feed's own size in Daseeki's window. The line spacing follows it "
+               .. "automatically, so the rhythm of the design holds at any size.",
+        get = stepGet("general.fontSize", Options.STEPS.fontSize),
+        set = stepSet("general.fontSize", Options.STEPS.fontSize),
+    }))
+    local lhRow = sec:AddRow({ vAlign = "center" })
+    lhRow:Label("Line spacing")
+    reg(lhRow:Dropdown({
+        id = "general.lineHeight", width = 120, choices = Options.STEPS.lineHeight,
+        tooltip = "How much air sits between message lines, as a share of the text size.",
+        get = stepGet("general.lineHeight", Options.STEPS.lineHeight),
+        set = stepSet("general.lineHeight", Options.STEPS.lineHeight),
+    }))
+    local ttRow = sec:AddRow({ vAlign = "center" })
+    ttRow:Label("Tab text size")
+    reg(ttRow:Dropdown({
+        id = "general.tabTextSize", width = 120, choices = Options.STEPS.tabTextSize,
+        get = stepGet("general.tabTextSize", Options.STEPS.tabTextSize),
+        set = stepSet("general.tabTextSize", Options.STEPS.tabTextSize),
+    }))
+
+    -- ── Where the tabs live, and the lock ────────────────────────────────
     local placeRow = sec:AddRow({ vAlign = "center" })
-    placeRow:Label("Tab position")
-    reg(placeRow:SegmentedChoice({
-        compact = true,
-        choices = { { value = "left",  text = "Left" },
-                    { value = "top",   text = "Top" },
+    placeRow:Label("Tab style")
+    reg(placeRow:Dropdown({
+        width = 120,
+        choices = { { value = "top",   text = "Top" },
+                    { value = "left",  text = "Left" },
                     { value = "right", text = "Right" } },
         get = function() return Options.TabPlacement() end,
         set = function(v) Options.SetTabPlacement(v); Options._refresh() end,
     }))
     statusHint(sec, Options.TabPlacementStatus)
-    sec:Hint("Left and right put the tabs on a slim vertical rail, which reads better with "
-          .. "many tabs and leaves the full width for message text. Unread counts move with "
-          .. "them: a small pip beside a top tab, a right-aligned number in a rail row.")
+    sec:Hint("Left and right put the tabs on a slim vertical rail, which reads better with many "
+          .. "tabs and leaves the full width for message text.")
 
-    sec:AddSeparator()
-    sec:Hint("Per window - colour, unread count, timestamps, and keeping its lines:")
-
-    -- A fixed pool of rows (the flow builds its blocks once), re-pointed at the
-    -- current windows on every refresh — the alias editor's own idiom.
-    Options._tabRows = {}
-    for i = 1, MAX_TAB_ROWS do
-        local row = sec:AddRow({ vAlign = "center" })
-        local label = row:Label("")
-        local color = row:Dropdown({
-            width = 130,
-            choices = Options.TAB_COLOR_CHOICES,
-            get = function()
-                local r = Options.TabRows()[i]
-                return r and r.color or ""
-            end,
-            set = function(v)
-                local r = Options.TabRows()[i]
-                if r then Options.SetTabColor(r.id, tostring(v or "")) end
-                Options._refresh()
-            end,
-        })
-        reg(color)
-        local toggles = {}
-        for _, spec in ipairs(Options.WINDOW_TOGGLES) do
-            -- The row's three toggles write through WindowToggleSet, which
-            -- dispatches "tabs.<key>"; declaring the binding HERE is what makes
-            -- them count as used controls rather than orphan entries.
-            bind(spec.binding)
-            local box = row:Checkbox({
-                label = spec.label, tooltip = spec.tooltip,
-                get = function()
-                    local r = Options.TabRows()[i]
-                    return r and Options.WindowToggleGet(spec, r.id) or false
-                end,
-                set = function(v)
-                    local r = Options.TabRows()[i]
-                    if r then Options.WindowToggleSet(spec, r.id, v and true or false) end
-                end,
-            })
-            reg(box)
-            toggles[spec.key] = box
-        end
-        Options._tabRows[i] = { label = label, color = color, toggles = toggles }
-    end
-    sec:Hint("\"Automatic\" gives a tab the colour of the channel it is for, and the accent "
-          .. "colour when that window carries more than one. A window you have never opened "
-          .. "still keeps whatever you set here.")
-end
-
--- Re-point the pooled tab rows at the current windows (the section's refresh).
-function Options.RefreshTabRows()
-    local rows = Options.TabRows()
-    for i = 1, MAX_TAB_ROWS do
-        local ui = Options._tabRows and Options._tabRows[i]
-        if ui then
-            local r = rows[i]
-            local text = r and Options.TabRowLabel(r) or ""
-            if ui.label then
-                if type(ui.label.SetText) == "function" then ui.label:SetText(text)
-                elseif ui.label._text ~= nil then ui.label._text = text end
-            end
-            if ui.color and type(ui.color.Refresh) == "function" then ui.color.Refresh() end
-            for _, box in pairs(ui.toggles or {}) do
-                if type(box.Refresh) == "function" then box.Refresh() end
-            end
-        end
-    end
-    return #rows
-end
-
-local function buildTimestamps(flow)
-    local sec = flow:AddSection("Timestamps")
-    sec:Hint("Chat's own timestamps, stamped at the display layer.")
-
-    reg(sec:Checkbox({
-        label = "Show timestamps",
-        tooltip = "Turns the timestamp module on or off entirely.",
-        get = moduleGet("stamps.module"), set = moduleSet("stamps.module"),
-    }))
-    local fmtRow = sec:AddRow({ vAlign = "center" })
-    fmtRow:Label("Format")
-    reg(fmtRow:Dropdown({
-        width = 180,
-        choices = {
-            { value = "HH:MM",    text = "13:05" },
-            { value = "HH:MM:SS", text = "13:05:42" },
-            { value = "hh:MM",    text = "1:05 PM" },
-            { value = "hh:MM:SS", text = "1:05:42 PM" },
-        },
-        get = fieldGet("stamps.format"), set = fieldSet("stamps.format"),
-    }))
-    reg(sec:Checkbox({
-        label = "Square brackets around the time",
-        tooltip = "Off is the shipped look - a bare 17:16 in the timestamp column, with the "
-               .. "hairline doing the separating. On wraps it in [ ] the way older builds did.",
-        get = fieldGet("stamps.brackets"), set = boolSet("stamps.brackets"),
-    }))
-    reg(sec:Checkbox({
-        label = "Use server time",
-        tooltip = "Stamp the realm's clock instead of this computer's.",
-        get = fieldGet("stamps.serverTime"), set = boolSet("stamps.serverTime"),
-    }))
-
-    local nativeRow = sec:AddRow({ vAlign = "center" })
-    nativeRow:Label("If the game's own timestamps are on")
-    reg(nativeRow:SegmentedChoice({
-        compact = true,
-        choices = { { value = "defer", text = "Step aside" }, { value = "takeover", text = "Take over" } },
-        get = fieldGet("stamps.native"), set = fieldSet("stamps.native"),
-    }))
-    sec:Hint("Step aside leaves the game's timestamps alone and stamps nothing. Take over "
-          .. "turns the game's setting off and stamps in this addon's format instead.")
-
-    local colorRow = sec:AddRow({ vAlign = "center" })
-    colorRow:Label("Stamp color")
-    reg(colorRow:SegmentedChoice({
-        compact = true,
-        choices = { { value = "theme", text = "Theme" }, { value = "custom", text = "Custom" } },
-        get = fieldGet("stamps.colorMode"), set = fieldSet("stamps.colorMode"),
-    }))
-    local hexRow = sec:AddRow({ vAlign = "center" })
-    hexRow:Label("Custom color (RRGGBB)")
-    reg(hexRow:EditBox({
-        width = 120,
-        get = fieldGet("stamps.customColor"),
-        set = fieldSet("stamps.customColor", function(v)
-            -- Only a real six-digit hex lands; anything else leaves the stored
-            -- value alone (stamps.lua falls back on its own, but writing junk
-            -- into the store would make the field lie about itself).
-            local hex = tostring(v or ""):match("^%s*#?(%x%x%x%x%x%x)%s*$")
-            return hex or Options.Get("stamps", "customColor")
-        end),
-    }))
-end
-
-local function buildNames(flow)
-    local sec = flow:AddSection("Names")
-    sec:Hint("How other players' names are drawn in chat.")
-
-    reg(sec:Checkbox({
-        label = "Class-color player names",
-        get = moduleGet("names.module"), set = moduleSet("names.module"),
-    }))
-    local bRow = sec:AddRow({ vAlign = "center" })
-    bRow:Label("Brackets")
-    reg(bRow:SegmentedChoice({
-        compact = true,
-        choices = { { value = "square", text = "[Name]" },
-                    { value = "angle",  text = "<Name>" },
-                    { value = "none",   text = "Name" } },
-        get = fieldGet("names.brackets"), set = fieldSet("names.brackets"),
-    }))
-    reg(sec:Checkbox({
-        label = "Remember classes between sessions",
-        tooltip = "Keep a realm-scoped cache of who is what class, so a name is colored "
-               .. "the moment it appears instead of after the first sighting.",
-        get = fieldGet("names.persist"), set = boolSet("names.persist"),
-    }))
-end
-
-local function buildUrls(flow)
-    local sec = flow:AddSection("Links")
-    sec:Hint("Web addresses in chat become clickable; clicking one opens a box with the "
-          .. "address pre-selected (era has no clipboard).")
-
-    reg(sec:Checkbox({
-        label = "Detect web addresses",
-        get = moduleGet("urls.module"), set = moduleSet("urls.module"),
-    }))
-    reg(sec:Checkbox({
-        label = "Show addresses in [brackets]",
-        get = fieldGet("urls.brackets"), set = boolSet("urls.brackets"),
-    }))
-end
-
-local function buildHistory(flow)
-    local sec = flow:AddSection("History")
-    sec:Hint("Keep each window's recent lines across a logout or reload, restored above a "
-          .. "divider when you come back.")
-
-    reg(sec:Checkbox({
-        label = "Keep chat across sessions",
-        get = moduleGet("history.module"), set = moduleSet("history.module"),
-    }))
-    reg(sec:Slider({
-        label = "Lines kept per window", min = 10, max = 1000, step = 10, width = 260,
-        format = intFmt,
-        get = fieldGet("history.cap"), set = intSet("history.cap"),
-    }))
-    reg(sec:Slider({
-        label = "Do not restore lines older than (hours)", min = 1, max = 168, step = 1,
-        width = 260, format = intFmt,
-        get = fieldGet("history.maxAgeHours"), set = intSet("history.maxAgeHours"),
-    }))
-end
-
-local function buildBadges(flow)
-    local sec = flow:AddSection("Unread badges")
-    sec:Hint("A quiet counter on a tab that has unread lines; it clears when you look at it.")
-
-    reg(sec:Checkbox({
-        label = "Count unread lines on tabs",
-        get = moduleGet("badges.module"), set = moduleSet("badges.module"),
-    }))
-    sec:Hint("A pile containing a whisper wears the accent color instead of the muted one, "
-          .. "and a whisper always badges. Neither is a setting - they are how the counter "
-          .. "reads.")
-    statusHint(sec, Options.BadgeFilterStatus)
-    local fRow = sec:AddRow({ vAlign = "center" })
-    local filterBinding = bind("badges.filter")
-    fRow:Button({
-        text = "Clear group filter", width = 170, variant = "quiet",
-        onClick = function()
-            Options.Set("badges", "filter", nil, filterBinding.apply)
-            Options.RefreshStatusLines()
-        end,
-    })
-    sec:Hint("A group filter can be set from a macro or another tool; clearing it here puts "
-          .. "the counter back to badging every group.")
-end
-
-local function buildWindows(flow)
-    local sec = flow:AddSection("Windows")
-    sec:Hint("Moving, locking and the input bar.")
-
-    reg(sec:Checkbox({
-        label = "Keep the edit box visible",
-        tooltip = "The input bar rests at its position all the time, showing which channel "
-               .. "you are about to talk in. Off gives the game's own behavior back.",
-        get = fieldGet("windows.persistentEditBox"), set = boolSet("windows.persistentEditBox"),
-    }))
-    local posRow = sec:AddRow({ vAlign = "center" })
-    posRow:Label("Edit box position")
-    reg(posRow:SegmentedChoice({
-        compact = true,
-        choices = { { value = "BOTTOM", text = "Below" }, { value = "TOP", text = "Above" } },
-        get = fieldGet("windows.editBox"), set = fieldSet("windows.editBox"),
-    }))
-    reg(sec:Checkbox({
-        label = "ALT-drag moves a window",
-        get = fieldGet("windows.altDragMove"), set = boolSet("windows.altDragMove"),
-    }))
-    reg(sec:Checkbox({
-        label = "Let windows reach the screen edge",
-        tooltip = "Loosen the margin the game holds chat windows away from the edge with. "
-               .. "They stay on screen; they just stop being fenced off it.",
-        get = fieldGet("windows.unclampWindows"), set = boolSet("windows.unclampWindows"),
-    }))
-    reg(sec:Checkbox({
-        label = "Snap to edges when dragging",
-        tooltip = "Drop a window near a screen edge, a screen centre line or another chat "
-               .. "window's edge and it lands ON it, exactly. A hairline shows what it is "
-               .. "about to line up with while you drag.",
-        get = fieldGet("windows.snapToEdges"), set = boolSet("windows.snapToEdges"),
-    }))
-    -- THE LOCK (owner, 2026-08-11). One state, three surfaces: this box,
-    -- /dchat lock, /dchat unlock — all three through Skin.SetLocked, so they
-    -- cannot disagree, and the write rides the synced config like the position
-    -- it governs.
     statusHint(sec, Options.LockStatus)
     reg(sec:Checkbox({
         label = "Lock the chat box in place",
         tooltip = "Locked, the box will not move or resize and its corner grips are gone - a "
-               .. "stray drag cannot shift it. Unlocked, drag the tab strip (or ALT-drag "
-               .. "anywhere) to move it and drag any of the four corner grips to resize it. "
-               .. "Same as /dchat lock and /dchat unlock, and it travels with your shared chat "
-               .. "configuration.",
+               .. "stray drag cannot shift it. Same as /dchat lock and /dchat unlock, and it "
+               .. "travels with your shared chat configuration.",
         get = function() return Options.Locked() end,
         set = function(v) Options.SetLocked(v); Options._refresh() end,
     }))
 
+    -- ── CHANNELS (the flagship subsection) ───────────────────────────────
     sec:AddSeparator()
-    statusHint(sec, Options.ReconcileStatus)
-    local rRow = sec:AddRow({ vAlign = "center" })
-    rRow:Button({
-        text = "Reconcile now", width = 150,
-        onClick = function() Options.ReconcileNow() end,
-    })
-    sec:Hint("Reconciling re-applies the shared configuration to this character's windows, "
-          .. "tabs, routing and channels. It runs by itself at login and on every zone-in; "
-          .. "this is the same beat, on demand.")
-end
-
--- The on-demand reconcile. Refuses honestly rather than pretending, because a
--- reconcile with the module inert would silently do nothing at all.
-function Options.ReconcileNow()
-    local R = ns.Reconcile
-    if not (R and type(R.Run) == "function") then return false end
-    if not R.active then
-        ns:Print("the reconciler module is disabled - /dchat enable reconcile turns it back on.")
-        return false
-    end
-    R.Run("options")
-    Options.RefreshStatusLines()
-    return true
-end
-
-local function buildAliases(flow)
-    local sec = flow:AddSection("Channel names")
-    sec:Hint("Give a channel your own short name. \"[2. Trade - City]\" becomes \"[Trade]\" "
-          .. "in every chat line, on the input bar's channel label, and on a tab that "
-          .. "belongs to that channel. Only the display changes - the channel link still "
-          .. "works exactly as it did.")
+    sec:Hint("CHANNELS - drag a row by its label to change that channel's number, give it a "
+          .. "colour, or give it a shorter name. All three are shared across your characters.")
+    statusHint(sec, Options.ChannelStatus)
 
     reg(sec:Checkbox({
-        label = "Keep the channel number",
+        label = "Keep the channel number in renamed channels",
         tooltip = "On: \"[2. Trade]\". Off: \"[Trade]\".",
         get = function() return ns.Config and ns.Config.AliasKeepNumber() end,
         set = function(v)
             local C = ns.Config
             if C and C.SetAliasKeepNumber(v and true or false) then
-                Options.Dispatch("aliases.keepNumber")
+                Options.Dispatch("channels.keepNumber")
             end
         end,
     }))
-    sec:Hint("Names are matched however they are capitalized, and they are remembered by "
-          .. "NAME, never by number - channel numbers move between characters. Aliases are "
-          .. "account-wide and travel with the rest of your chat configuration.")
 
-    -- A fixed pool of rows: the flow builds its blocks once, so the rows are
-    -- created here and re-pointed at the current channel list on every refresh.
-    Options._aliasRows = {}
-    for i = 1, MAX_ALIAS_ROWS do
+    -- A fixed pool of rows (the flow builds its blocks once), re-pointed at the
+    -- current channel list on every refresh.
+    bind("channels.order"); bind("channels.color"); bind("channels.rename")
+    Options._chanRows = {}
+    for i = 1, Options.MAX_CHANNEL_ROWS do
         local row = sec:AddRow({ vAlign = "center" })
         local label = row:Label("")
-        local box = row:EditBox({
-            width = 160,
+        local swatch = row:Button({
+            text = "Colour", width = 80, variant = "quiet",
+            onClick = function()
+                local r = Options.ChannelRows()[i]
+                if r then Options.OpenColorPicker(r.name) end
+            end,
+        })
+        local hexBox = row:EditBox({
+            width = 90,
             get = function()
-                local r = Options.AliasRows()[i]
+                local r = Options.ChannelRows()[i]
+                return r and r.hex or ""
+            end,
+            set = function(v)
+                local r = Options.ChannelRows()[i]
+                if r then Options.SetChannelColorHex(r.name, v) end
+                Options._refresh()
+            end,
+        })
+        reg(hexBox)
+        local nameBox = row:EditBox({
+            width = 140,
+            get = function()
+                local r = Options.ChannelRows()[i]
                 return r and r.alias or ""
             end,
             set = function(v)
-                local r = Options.AliasRows()[i]
+                local r = Options.ChannelRows()[i]
                 if r then Options.SetAlias(r.name, v) end
                 Options._refresh()
             end,
         })
-        reg(box)
-        Options._aliasRows[i] = { label = label, box = box }
+        reg(nameBox)
+        Options._chanRows[i] = { row = row, label = label, swatch = swatch,
+                                 hexBox = hexBox, nameBox = nameBox }
+        installRowDrag(row, i)
     end
+    sec:Hint("The colour box takes six hex digits (\"ff8000\"); emptying it hands the channel "
+          .. "back to the game's own colour. A channel you are not in right now still keeps "
+          .. "its colour and its name - only its ORDER needs you to be in it.")
 
     sec:AddSeparator()
-    sec:Hint("Add a channel you are not in right now:")
+    sec:Hint("Rename a channel you are not in right now:")
     local addRow = sec:AddRow({ vAlign = "center" })
     addRow:Label("Channel")
+    bind("channels.add")
     reg(addRow:EditBox({
         width = 160,
         get = function() return Options._addName end,
@@ -1343,40 +1514,274 @@ local function buildAliases(flow)
         text = "Add", width = 80,
         onClick = function() Options.CommitAdd(); Options._refresh() end,
     })
-    sec:Hint("Clear a name's box and press Enter to remove its alias.")
+
+    -- ── THE DISPLAY GROUP (the old Timestamps / Names / Links sections) ──
+    sec:AddSeparator()
+    sec:Hint("DISPLAY - what a chat line is dressed with.")
+
+    reg(sec:Checkbox({
+        label = "Show timestamps",
+        get = moduleGet("stamps.module"), set = moduleSet("stamps.module"),
+    }))
+    local fmtRow = sec:AddRow({ vAlign = "center" })
+    fmtRow:Label("Time format")
+    reg(fmtRow:Dropdown({
+        width = 160,
+        choices = {
+            { value = "HH:MM",    text = "13:05" },
+            { value = "HH:MM:SS", text = "13:05:42" },
+            { value = "hh:MM",    text = "1:05 PM" },
+            { value = "hh:MM:SS", text = "1:05:42 PM" },
+        },
+        get = fieldGet("stamps.format"), set = fieldSet("stamps.format"),
+    }))
+    reg(sec:Checkbox({
+        label = "Square brackets around the time",
+        get = fieldGet("stamps.brackets"), set = boolSet("stamps.brackets"),
+    }))
+    reg(sec:Checkbox({
+        label = "Use server time",
+        tooltip = "Stamp the realm's clock instead of this computer's.",
+        get = fieldGet("stamps.serverTime"), set = boolSet("stamps.serverTime"),
+    }))
+    reg(sec:Checkbox({
+        label = "Timestamp divider",
+        tooltip = "A hairline between the timestamp column and the message text.",
+        get = fieldGet("appearance.stampDivider"), set = boolSet("appearance.stampDivider"),
+    }))
+    local nativeRow = sec:AddRow({ vAlign = "center" })
+    nativeRow:Label("If the game's own timestamps are on")
+    reg(nativeRow:Dropdown({
+        width = 140,
+        choices = { { value = "defer", text = "Step aside" }, { value = "takeover", text = "Take over" } },
+        get = fieldGet("stamps.native"), set = fieldSet("stamps.native"),
+    }))
+    local colorRow = sec:AddRow({ vAlign = "center" })
+    colorRow:Label("Stamp colour")
+    reg(colorRow:Dropdown({
+        width = 140,
+        choices = { { value = "theme", text = "Theme" }, { value = "custom", text = "Custom" } },
+        get = fieldGet("stamps.colorMode"), set = fieldSet("stamps.colorMode"),
+    }))
+    local hexRow = sec:AddRow({ vAlign = "center" })
+    hexRow:Label("Custom stamp colour (RRGGBB)")
+    reg(hexRow:EditBox({
+        width = 120,
+        get = fieldGet("stamps.customColor"),
+        set = fieldSet("stamps.customColor", function(v)
+            -- Only a real six-digit hex lands; anything else leaves the stored
+            -- value alone (stamps.lua falls back on its own, but writing junk
+            -- into the store would make the field lie about itself).
+            local hex = tostring(v or ""):match("^%s*#?(%x%x%x%x%x%x)%s*$")
+            return hex or Options.Get("stamps", "customColor")
+        end),
+    }))
+
+    reg(sec:Checkbox({
+        label = "Class-colour player names",
+        get = moduleGet("names.module"), set = moduleSet("names.module"),
+    }))
+    local brRow = sec:AddRow({ vAlign = "center" })
+    brRow:Label("Name brackets")
+    reg(brRow:Dropdown({
+        width = 120,
+        choices = { { value = "square", text = "[Name]" },
+                    { value = "angle",  text = "<Name>" },
+                    { value = "none",   text = "Name" } },
+        get = fieldGet("names.brackets"), set = fieldSet("names.brackets"),
+    }))
+    reg(sec:Checkbox({
+        label = "Remember classes between sessions",
+        tooltip = "Keep a realm-scoped cache of who is what class, so a name is coloured the "
+               .. "moment it appears instead of after the first sighting.",
+        get = fieldGet("names.persist"), set = boolSet("names.persist"),
+    }))
+
+    reg(sec:Checkbox({
+        label = "Detect web addresses",
+        tooltip = "Web addresses become clickable; clicking one opens a box with the address "
+               .. "pre-selected (era has no clipboard).",
+        get = moduleGet("urls.module"), set = moduleSet("urls.module"),
+    }))
+    reg(sec:Checkbox({
+        label = "Show addresses in [brackets]",
+        get = fieldGet("urls.brackets"), set = boolSet("urls.brackets"),
+    }))
+
+    reg(sec:Checkbox({
+        label = "Channel-coloured tabs",
+        tooltip = "Ink each tab with the colour of the channel that window is for. A window "
+               .. "earns a colour only when its routing collapses to exactly one identity.",
+        get = fieldGet("appearance.channelTabs"), set = boolSet("appearance.channelTabs"),
+    }))
+    reg(sec:Checkbox({
+        label = "Colour the edit box channel prefix",
+        get = fieldGet("appearance.editBoxChannelColor"), set = boolSet("appearance.editBoxChannelColor"),
+    }))
+    reg(sec:Checkbox({
+        label = "Copy-chat button",
+        tooltip = "Era has no clipboard; the copy window pre-selects the text for Ctrl+C.",
+        get = fieldGet("view.copyButton"), set = boolSet("view.copyButton"),
+    }))
+    reg(sec:Checkbox({
+        label = "Keep the edit box visible",
+        tooltip = "The input bar rests at its position all the time, showing which channel you "
+               .. "are about to talk in.",
+        get = fieldGet("windows.persistentEditBox"), set = boolSet("windows.persistentEditBox"),
+    }))
+    local ebRow = sec:AddRow({ vAlign = "center" })
+    ebRow:Label("Edit box position")
+    reg(ebRow:Dropdown({
+        width = 120,
+        choices = { { value = "BOTTOM", text = "Below" }, { value = "TOP", text = "Above" } },
+        get = fieldGet("windows.editBox"), set = fieldSet("windows.editBox"),
+    }))
+
+    -- ── THE GAME'S OWN WINDOWS (the box-off renderer) ────────────────────
+    -- Kept, and kept HONEST: with the drawn window on these are remembered
+    -- rather than applied, and the status line says so instead of leaving a
+    -- control that looks live and does nothing.
+    sec:AddSeparator()
+    sec:Hint("THE GAME'S OWN CHAT WINDOWS - used when Daseeki is not drawing its own.")
+    reg(sec:Checkbox({
+        label = "Draw Daseeki's own chat window",
+        tooltip = "Daseeki Chat draws the whole window - the tab strip, the message feed and "
+               .. "the input bar - instead of re-dressing the game's. The game's chat windows "
+               .. "stay alive behind it and still receive everything; they are just hidden. "
+               .. "Turning this off gives the game's own chat window straight back.",
+        get = moduleGet("view.module"), set = moduleSet("view.module"),
+    }))
+    statusHint(sec, Options.RendererStatus)
+    reg(sec:Checkbox({
+        label = "One box: tabs, text and input on a single surface",
+        get = fieldGet("appearance.unifiedChassis"), set = boolSet("appearance.unifiedChassis"),
+    }))
+    reg(sec:Checkbox({
+        label = "Icon rail",
+        tooltip = "A slim strip on a window's edge: copy chat, settings, jump to newest.",
+        get = fieldGet("appearance.iconRail"), set = boolSet("appearance.iconRail"),
+    }))
+    reg(sec:Checkbox({
+        label = "Hide the game's chat button column",
+        get = fieldGet("appearance.hideButtonColumn"), set = boolSet("appearance.hideButtonColumn"),
+    }))
+    reg(sec:Checkbox({
+        label = "Copy-chat button on each game window",
+        get = fieldGet("appearance.copyButton"), set = boolSet("appearance.copyButton"),
+    }))
+    reg(sec:Checkbox({
+        label = "ALT-drag moves a window",
+        get = fieldGet("windows.altDragMove"), set = boolSet("windows.altDragMove"),
+    }))
+    reg(sec:Checkbox({
+        label = "Let windows reach the screen edge",
+        get = fieldGet("windows.unclampWindows"), set = boolSet("windows.unclampWindows"),
+    }))
+    reg(sec:Checkbox({
+        label = "Snap to edges when dragging",
+        get = fieldGet("windows.snapToEdges"), set = boolSet("windows.snapToEdges"),
+    }))
+    statusHint(sec, Options.FadingStatus)
+    reg(sec:Checkbox({
+        label = "Fade chat text when idle",
+        get = fieldGet("appearance.fading"), set = boolSet("appearance.fading"),
+    }))
+    local fadeRow = sec:AddRow({ vAlign = "center" })
+    fadeRow:Label("Visible before fading")
+    reg(fadeRow:Dropdown({
+        id = "appearance.fadeTime", width = 140, choices = Options.STEPS.fadeTime,
+        get = stepGet("appearance.fadeTime", Options.STEPS.fadeTime),
+        set = stepSet("appearance.fadeTime", Options.STEPS.fadeTime),
+    }))
+
+    sec:AddSeparator()
+    statusHint(sec, Options.ReconcileStatus)
+    local rRow = sec:AddRow({ vAlign = "center" })
+    bind("windows.reconcileNow")
+    rRow:Button({
+        text = "Reconcile now", width = 150,
+        onClick = function() Options.ReconcileNow() end,
+    })
+    sec:Hint("Reconciling re-applies the shared configuration to this character's windows, "
+          .. "tabs, routing and channels. It runs by itself at login and on every zone-in; "
+          .. "this is the same beat, on demand.")
 end
 
--- Re-point the pooled alias rows at the current channel list. Called from the
--- section's refresh, which Core runs on every show.
-function Options.RefreshAliasRows()
-    local rows = Options.AliasRows()
-    for i = 1, MAX_ALIAS_ROWS do
-        local ui = Options._aliasRows and Options._aliasRows[i]
+-- Re-point the pooled channel rows at the current channel list (the section's
+-- refresh, which Core runs on every show).
+function Options.RefreshChannelRows()
+    local rows = Options.ChannelRows()
+    for i = 1, Options.MAX_CHANNEL_ROWS do
+        local ui = Options._chanRows and Options._chanRows[i]
         if ui then
             local r = rows[i]
-            local text = r and Options.AliasRowLabel(r) or ""
+            local text = r and Options.ChannelRowLabel(r) or ""
+            if r and r.ordered then text = ":: " .. text end
             if ui.label then
                 if type(ui.label.SetText) == "function" then ui.label:SetText(text)
                 elseif ui.label._text ~= nil then ui.label._text = text end
             end
-            if ui.box and type(ui.box.Refresh) == "function" then ui.box.Refresh() end
+            -- The swatch wears the colour it sets (in game; the headless flow's
+            -- button has no backdrop to wear).
+            local sw = ui.swatch
+            if sw and type(sw.SetBackdropColor) == "function" then
+                local col = r and r.color
+                if col then pcall(sw.SetBackdropColor, sw, col.r, col.g, col.b, 1) end
+            end
+            if ui.hexBox and type(ui.hexBox.Refresh) == "function" then ui.hexBox.Refresh() end
+            if ui.nameBox and type(ui.nameBox.Refresh) == "function" then ui.nameBox.Refresh() end
         end
     end
     return #rows
 end
 
+----------------------------------------------------------------------
+-- SECTION 3 — CHAT HISTORY.
+----------------------------------------------------------------------
+
+local function buildHistory(flow)
+    local sec = flow:AddSection("Chat History")
+    sec:Hint("Keep each window's recent lines across a logout or reload, restored when you "
+          .. "come back. The lines themselves stay on this character; these settings are "
+          .. "shared like the rest.")
+
+    reg(sec:Checkbox({
+        label = "Keep chat across sessions",
+        get = moduleGet("history.module"), set = moduleSet("history.module"),
+    }))
+    local capRow = sec:AddRow({ vAlign = "center" })
+    capRow:Label("Lines kept per tab")
+    reg(capRow:Dropdown({
+        id = "history.cap", width = 140, choices = Options.STEPS.historyCap,
+        get = stepGet("history.cap", Options.STEPS.historyCap),
+        set = stepSet("history.cap", Options.STEPS.historyCap),
+    }))
+    local ageRow = sec:AddRow({ vAlign = "center" })
+    ageRow:Label("Do not restore lines older than")
+    reg(ageRow:Dropdown({
+        id = "history.maxAgeHours", width = 140, choices = Options.STEPS.historyAge,
+        get = stepGet("history.maxAgeHours", Options.STEPS.historyAge),
+        set = stepSet("history.maxAgeHours", Options.STEPS.historyAge),
+    }))
+    reg(sec:Checkbox({
+        label = "Restore behind a session divider",
+        tooltip = "Restored lines sit above a \"-- session from ... --\" rule, so old chat can "
+               .. "never be misread as something that was just said. Off restores them bare "
+               .. "and gives you the extra row of scrollback.",
+        get = fieldGet("history.divider"), set = boolSet("history.divider"),
+    }))
+end
+
+----------------------------------------------------------------------
+-- THE PAGE: three sections, in the owner's own order.
+----------------------------------------------------------------------
+
 function Options.Build(flow)
-    refreshers = {}
+    Options._ResetRefreshers()
     Options._statusLines = {}
-    buildAppearance(flow)
-    buildTabs(flow)
-    buildTimestamps(flow)
-    buildNames(flow)
-    buildUrls(flow)
+    buildGeneral(flow)
+    if ns.OptionsTabs and ns.OptionsTabs.Build then ns.OptionsTabs.Build(flow) end
     buildHistory(flow)
-    buildBadges(flow)
-    buildWindows(flow)
-    buildAliases(flow)
 end
 
 ----------------------------------------------------------------------
@@ -1407,8 +1812,7 @@ function Options.Register()
                     ns:SafeCall(Options.Build, flow)
                 end,
                 refresh = function()
-                    ns:SafeCall(Options.RefreshAliasRows)
-                    ns:SafeCall(Options.RefreshTabRows)
+                    ns:SafeCall(Options.RefreshChannelRows)
                     ns:SafeCall(refreshAll)
                 end,
             },
@@ -1467,7 +1871,7 @@ ns.RegisterDebugCommand("options", "settings pane: registration, bindings, alias
     local bad = Options.CheckBindings()
     ns:Print(("  %d binding(s), %d problem(s)"):format(#Options.BINDINGS, #bad))
     for _, b in ipairs(bad) do ns:Print("    " .. b) end
-    ns:Print(("  %d alias row(s) offered"):format(#Options.AliasRows()))
+    ns:Print("  " .. Options.ChannelStatus())
     for _, u in ipairs(Options.UNBOUND) do
         if not u.bound then ns:Print("  no control: " .. u.field) end
     end
@@ -1525,6 +1929,13 @@ function Options.CheckBindings(bindings)
             -- against, so what IS checked is that the choice was written down.
             if type(b.why) ~= "string" or b.why == "" then
                 out[#out + 1] = id .. ": config binding without a documented seam"
+            end
+        elseif b.kind == "core" then
+            -- A Daseeki-Core setting this pane offers rather than copies. Same
+            -- rule as `config`: there is no branch shape to check, so what is
+            -- checked is that the choice to reach into Core was written down.
+            if type(b.why) ~= "string" or b.why == "" then
+                out[#out + 1] = id .. ": core binding without a documented seam"
             end
         elseif b.kind == "alias" or b.kind == "action" then
             -- Their own seams (config.lua / an existing verb); nothing to bind.
@@ -1598,9 +2009,10 @@ local function testBindings(fails)
           optional = true, apply = "skin.restyle" },
         { id = "bogus.runtime", kind = "runtime", apply = "skin.restyle" },
         { id = "bogus.config",  kind = "config",  apply = "skin.restyle" },
+        { id = "bogus.core",    kind = "core",    apply = "core.appearance" },
         { id = "bogus.kind",   kind = "wat",      apply = "skin.restyle" },
     })
-    ck(#caught == 7, "the bind-check catches every bad shape (caught " .. #caught .. " of 7)")
+    ck(#caught == 8, "the bind-check catches every bad shape (caught " .. #caught .. " of 8)")
 
     -- ── THE APPLY-ROUTE LEG, and ITS teeth. This is the gate that would have
     -- caught the owner's "the options dont seem to actually do anything": a
@@ -1645,10 +2057,17 @@ local function testBindings(fails)
     -- badges as a module the pane can turn off. An exact count, not a floor —
     -- a module that grows a switch nobody bound would otherwise pass silently.
     ck((kinds.module or 0) == 6, "each feature module's on/off is bound (got " .. tostring(kinds.module) .. ")")
-    ck((kinds.alias or 0) >= 3, "the alias editor is bound")
-    -- 3 since the lock landed: placement, per-tab colour and the LOCK, all of
-    -- which ride the synced config rather than a db branch.
-    ck((kinds.config or 0) == 3, "the three SYNCED controls are bound to config.lua's seams")
+    ck((kinds.alias or 0) >= 3, "the channel rename/add controls are bound")
+    -- The options rework: the SYNCED surface is most of the new pane (the whole
+    -- Tabs section writes config, not a db branch), so this is a floor rather
+    -- than the exact count it was when there were three.
+    ck((kinds.config or 0) >= 12,
+        "the synced controls are bound to config.lua's seams (got " .. tostring(kinds.config) .. ")")
+    -- 3, exactly: font, text size and theme. A FOURTH Core setting appearing
+    -- here without a documented reason is this pane quietly growing a second
+    -- copy of something Core owns, which is the thing the kind exists to stop.
+    ck((kinds.core or 0) == 3,
+        "the three CORE settings are offered, not copied (got " .. tostring(kinds.core) .. ")")
     ck((kinds.runtime or 0) == 0,
         "no runtime control is left: the session-scoped unlock became the SYNCED lock")
     ck((kinds.action or 0) == 1, "the reconcile verb is bound")
@@ -1762,13 +2181,46 @@ local function testRegistrationAndPane(fails)
     local pane = UI.__BuildPane("chat", "settings")
     ck(type(pane) == "table", "the page builds")
     if type(pane) ~= "table" then return end
-    ck(#pane.sections == 9, "every section is present (got " .. #pane.sections .. ")")
+    -- THE REWORK's SHAPE: three sections, exactly. The flat eight-section pane
+    -- (Appearance / Tabs / Timestamps / Names / Links / History / Unread badges
+    -- / Windows / Channel names) RETIRED here — its contents folded into
+    -- General's display group and the per-tab pages, and the count is pinned so
+    -- a section quietly coming back is a suite failure rather than a discovery.
+    ck(#pane.sections == 3, "three sections, exactly (got " .. #pane.sections .. ")")
     local titles = table.concat(pane.sections, ",")
-    for _, want in ipairs({ "Appearance", "Tabs", "Timestamps", "Names", "Links", "History",
-                            "Unread badges", "Windows", "Channel names" }) do
+    for _, want in ipairs({ "General", "Tabs", "Chat History" }) do
         ck(titles:find(want, 1, true) ~= nil, "section present: " .. want)
     end
-    ck(#pane.controls > 40, "the page really built its controls (got " .. #pane.controls .. ")")
+    for _, gone in ipairs({ "Appearance", "Timestamps", "Names", "Links",
+                            "Unread badges", "Windows", "Channel names" }) do
+        ck(titles:find(gone, 1, true) == nil, "the retired section is gone: " .. gone)
+    end
+    ck(#pane.controls > 60, "the page really built its controls (got " .. #pane.controls .. ")")
+
+    -- ── THE OWNER'S CONSTRAINT, PINNED: no sliders. ─────────────────────
+    -- "I dont want sliders, drop downs are fine". Every number in this pane is
+    -- a dropdown of steps, and this is the gate that keeps it that way when
+    -- somebody reaches for UI.MakeSlider again out of habit.
+    local sliders = 0
+    for _, w in ipairs(pane.controls) do
+        if w._kind == "slider" then sliders = sliders + 1 end
+    end
+    ck(sliders == 0, "NO SLIDER EXISTS IN THE PANE (found " .. sliders .. ")")
+    -- …and the dropdowns that replaced them really offer their steps.
+    for name, list in pairs(Options.STEPS) do
+        ck(#list >= 4, "the " .. name .. " step list is a real menu (" .. #list .. ")")
+        local seenValues = {}
+        for _, c in ipairs(list) do
+            ck(type(c.value) == "number", name .. ": every step is a number")
+            ck(type(c.text) == "string" and c.text ~= "", name .. ": every step reads")
+            ck(not seenValues[c.value], name .. ": no step is offered twice")
+            seenValues[c.value] = true
+        end
+    end
+    ck(Options.NearestStep(Options.STEPS.fontSize, 13.4) == 13.5,
+        "a stored number snaps to the nearest offered step")
+    ck(Options.NearestStep(Options.STEPS.fontSize, 1000) == 22,
+        "…and one past the end snaps to the end rather than answering nothing")
 
     -- EVERY built control that carries a get() answers something — a control
     -- reading a field nothing writes would answer nil here.
@@ -1835,6 +2287,16 @@ local function findControl(pane, kind, label)
     return nil
 end
 
+-- Every control the pane builds carries its BINDING ID in the opts table, so a
+-- test finds it by what it is FOR rather than by the label text somebody may
+-- reword. (Core's widget factories ignore the extra key.)
+local function findById(pane, id)
+    for _, w in ipairs(pane.controls or {}) do
+        if w._opts and w._opts.id == id then return w end
+    end
+    return nil
+end
+
 local function findChoice(pane, value)
     for _, w in ipairs(pane.controls or {}) do
         local choices = w._opts and w._opts.choices
@@ -1893,26 +2355,31 @@ local function testLiveApply(fails)
     local activeId = V.ActiveId()
     local smf = V.frames[activeId]
 
-    -- ── SLIDER: "Message text size" ─────────────────────────────────────
-    -- THE DEFECT: db.view.* had no apply route at all, so this wrote a number
-    -- and the feed kept the font it was created with until a /reload.
-    local slider = findControl(pane, "slider", "Message text size")
-    ck(slider ~= nil, "the message-size slider is on the pane")
-    if slider then
+    -- ── DROPDOWN: "Message text size" (the retired slider) ──────────────
+    -- THE DEFECT THIS SUITE WAS BORN FOR: db.view.* had no apply route at all,
+    -- so this wrote a number and the feed kept the font it was created with
+    -- until a /reload. The control is a DROPDOWN now (the owner's constraint);
+    -- the red control is unchanged — pick a size, look at the box.
+    local sizeCtl = findById(pane, "general.fontSize")
+    ck(sizeCtl ~= nil, "the message-size control is on the pane")
+    ck(sizeCtl == nil or sizeCtl._kind == "dropdown",
+        "…and it is a DROPDOWN, not a slider (got " .. tostring(sizeCtl and sizeCtl._kind) .. ")")
+    if sizeCtl then
         local wasSize = ns.db.view.fontSize
         local lines = smf:GetNumMessages()
         local _, before = smf:GetFont()
-        slider._opts.set(20)
-        ck(ns.db.view.fontSize == 20, "SLIDER: the write lands in the store (it always did)")
+        sizeCtl._opts.set(20)
+        ck(ns.db.view.fontSize == 20, "SIZE: the write lands in the store")
         local _, after = smf:GetFont()
-        ck(after == 20, "SLIDER: RED CONTROL — the drawn feed is wearing 20 IN THE SAME BEAT "
+        ck(after == 20, "SIZE: RED CONTROL — the drawn feed is wearing 20 IN THE SAME BEAT "
             .. "(was " .. tostring(before) .. ", now " .. tostring(after) .. ")")
         ck(smf:GetSpacing() == V.MessageSpacing(20),
-            "SLIDER: …and the line rhythm was recomputed from the new size")
+            "SIZE: …and the line rhythm was recomputed from the new size")
         ck(smf:GetNumMessages() == lines,
-            "SLIDER: …with the scrollback intact (a restyle, never a rebuild)")
-        slider._opts.set(wasSize or 13.5)
-        ck(select(2, smf:GetFont()) == (wasSize or 13.5), "SLIDER: …and back again, live")
+            "SIZE: …with the scrollback intact (a restyle, never a rebuild)")
+        ck(sizeCtl.Refresh() == 20, "SIZE: …and the dropdown reads its own answer back")
+        sizeCtl._opts.set(wasSize or 13.5)
+        ck(select(2, smf:GetFont()) == (wasSize or 13.5), "SIZE: …and back again, live")
     end
 
     -- ── SEGMENTED CHOICE: where the tabs live ───────────────────────────
@@ -1958,7 +2425,7 @@ local function testLiveApply(fails)
     end
 
     -- ── TOGGLE: the copy button on the drawn window ─────────────────────
-    local copyBox = findControl(pane, "checkbox", "Copy-chat button on Daseeki's window")
+    local copyBox = findControl(pane, "checkbox", "Copy-chat button")
     ck(copyBox ~= nil, "the copy-button toggle is on the pane")
     if copyBox then
         local was = ns.db.view.copyButton
@@ -1974,20 +2441,20 @@ local function testLiveApply(fails)
     do
         local id = V.ids[1]
         local before = V.tabs[id].label._textColor
-        Options.SetTabColor(id, "chat:GUILD")
+        ns.OptionsTabs.SetColor(id, "chat:GUILD")
         local after = V.tabs[id].label._textColor
         local gr, gg = _G.ChatTypeInfo.GUILD.r, _G.ChatTypeInfo.GUILD.g
         ck(after and math.abs(after[1] - gr) < 1e-6 and math.abs(after[2] - gg) < 1e-6,
             "COLOUR: RED CONTROL — the tab is wearing the chosen colour in the same beat")
         ck(before == nil or after[1] ~= before[1] or after[2] ~= before[2] or true,
             "COLOUR: (the ink really was re-applied)")
-        Options.SetTabColor(id, "")
+        ns.OptionsTabs.SetColor(id, "")
     end
 
     -- ── MODULE SWITCH: the unread counter, off and on ───────────────────
     -- A module toggle is its own control kind: the lifecycle does the work and
     -- the seam re-settles what it left. Off must take the pips down.
-    local badgeModule = findControl(pane, "checkbox", "Count unread lines on tabs")
+    local badgeModule = findControl(pane, "checkbox", "Count unread lines on tabs (all tabs)")
     ck(badgeModule ~= nil, "the badge module switch is on the pane")
     if badgeModule then
         local was = ns.ModuleEnabled("badges")
@@ -2008,10 +2475,10 @@ local function testLiveApply(fails)
         if HT then HT.advance(0) end
         local w = B.widgets[frame]
         ck(w and w.holder and w.holder._shown == true, "PIP: an unread window shows its pip")
-        Options.WindowToggleSet(Options.WINDOW_TOGGLES[1], other, false)
+        ns.OptionsTabs.ToggleSet(ns.OptionsTabs.TOGGLES[1], other, false)
         ck(w and w.holder and w.holder._shown == false,
             "PIP: RED CONTROL — turning the badge off takes the pip down in the same beat")
-        Options.WindowToggleSet(Options.WINDOW_TOGGLES[1], other, true)
+        ns.OptionsTabs.ToggleSet(ns.OptionsTabs.TOGGLES[1], other, true)
         B.Clear(frame)
     end
 
@@ -2075,37 +2542,110 @@ local function testLiveApply(fails)
     Sim.ResetCalls()
 end
 
--- THE ALIAS EDITOR: the rows it offers, and the writes it makes.
-local function testAliasEditor(fails)
+-- THE CHANNELS SUBSECTION: the rows it offers, the drag that reorders them,
+-- the colour swatch and the rename (which IS the old alias editor, absorbed).
+local function testChannelRows(fails)
     local function ck(c, m) if not c then fails[#fails + 1] = m end end
     local C = ns.Config
     local cfg = C.Get()
     local savedAliases, savedKeep = cfg.aliases, cfg.aliasKeepNumber
+    local savedJoin, savedColors = cfg.join, cfg.colors
     local savedRev, savedAt = cfg.rev, cfg.at
     cfg.aliases, cfg.aliasKeepNumber = {}, false
+    cfg.join, cfg.colors = { { 1, "General" }, { 2, "Trade" }, { 3, "World" } }, {}
     cfg.rev, cfg.at = 1, C.Now()
 
-    -- An alias for a channel the character is not in must still be editable —
+    -- ── The rows ─────────────────────────────────────────────────────────
+    -- A renamed channel the character is not in must still be offered a row —
     -- otherwise a setting disappears the moment you leave the channel.
     C.SetAlias("Trade - City", "Trade")
-    local rows = Options.AliasRows()
-    local found
-    for _, r in ipairs(rows) do if r.name:lower() == "trade - city" then found = r end end
-    ck(found ~= nil, "an aliased channel is offered a row even when not joined")
-    ck(found and found.alias == "Trade", "…carrying its current alias")
-    ck(found and found.num == nil, "…and no number, because we are not in it")
-    ck(Options.AliasRowLabel(found) == "trade - city",
+    local rows = Options.ChannelRows()
+    local found, ordered = nil, {}
+    for _, r in ipairs(rows) do
+        if r.name:lower() == "trade - city" then found = r end
+        if r.ordered then ordered[#ordered + 1] = r.name end
+    end
+    ck(found ~= nil, "a renamed channel is offered a row even when not joined")
+    ck(found and found.alias == "Trade", "…carrying its current name")
+    ck(found and found.ordered == false, "…and marked as NOT reorderable (we are not in it)")
+    ck(Options.ChannelRowLabel(found) == "trade - city",
         "the row label falls back to the stored name when there is no number")
-    ck(Options.AliasRowLabel({ name = "World", num = 2 }) == "2. World",
+    ck(Options.ChannelRowLabel({ name = "World", num = 2 }) == "2. World",
         "a joined channel's row shows its live number")
+    ck(table.concat(ordered, ",") == "General,Trade,World",
+        "the configured order leads the list, in order (got " .. table.concat(ordered, ",") .. ")")
+    ck(Options.OrderedRowCount() == 3, "…and the drag knows how many rows it may touch")
 
-    -- The editor's write path goes through config.lua's seam (empty removes).
-    ck(Options.SetAlias("Trade - City", "Bazaar") == true, "the editor writes an alias")
+    -- ── THE DRAG, driven the way a mouse drives it ───────────────────────
+    ck(Options.DraggingRow() == nil, "nothing is being dragged to start with")
+    ck(Options.BeginRowDrag(3) == true, "picking up the third row starts a drag")
+    ck(Options.DraggingRow() == 3, "…and the engine says which row is in hand")
+    ck(Options.DropIndex() == 3, "…with the drop indicator under it")
+    Options.DragOver(1)
+    ck(Options.DropIndex() == 1, "moving over the first row moves the indicator")
+    Options.DragOver(-5)
+    ck(Options.DropIndex() == 1, "…and dragging off the top clamps rather than answering junk")
+    Options.DragOver(99)
+    ck(Options.DropIndex() == 3, "…and off the bottom clamps to the last reorderable row")
+    Options.DragOver(1)
+    ck(Options.CommitRowDrag() == true, "RED CONTROL — the drop writes the new order")
+    ck(table.concat(C.ChannelOrder(), ",") == "World,General,Trade",
+        "RED CONTROL — …and the channel really moved (" .. table.concat(C.ChannelOrder(), ",") .. ")")
+    local join = C.JoinList()
+    ck(join[1][1] == 1 and join[1][2] == "World" and join[3][1] == 3,
+        "RED CONTROL — the NUMBERING ENGINE's intent is what changed (1..N, World first)")
+    ck(C.Snapshot() and C.Snapshot().cfg.join[1][2] == "World",
+        "RED CONTROL — …and the new order rides the sync snapshot")
+    ck(Options.DraggingRow() == nil, "the drop ends the drag")
+
+    -- An unchanged drop is a no-op (picking a row up and putting it back must
+    -- not bump rev — that is a sync storm with a mouse attached).
+    local revBefore = C.Rev()
+    Options.BeginRowDrag(1)
+    ck(Options.CommitRowDrag() == false, "a drop where it started changes nothing")
+    ck(C.Rev() == revBefore, "…and never bumps the config")
+
+    -- A row for a channel the config is not in refuses the gesture outright.
+    local notJoined
+    for i, r in ipairs(Options.ChannelRows()) do if not r.ordered then notJoined = i break end end
+    ck(notJoined ~= nil, "there is an un-ordered row to try")
+    if notJoined then
+        ck(Options.BeginRowDrag(notJoined) == false,
+            "a channel the config is not in cannot be reordered (there is no number to change)")
+        ck(Options.DraggingRow() == nil, "…and no drag is left half-started")
+    end
+    Options.CancelRowDrag()
+
+    -- The pure geometry the mouse feeds (Class 3 converts into this space).
+    local rects = { { 80, 100 }, { 60, 80 }, { 40, 60 } }
+    ck(Options.RowIndexAtY(rects, 90) == 1, "the top row is hit by a Y inside it")
+    ck(Options.RowIndexAtY(rects, 50) == 3, "…and the bottom row by one inside it")
+    ck(Options.RowIndexAtY(rects, 500) == 1, "above the list is the first row")
+    ck(Options.RowIndexAtY(rects, 0) == 3, "…and below it is the last")
+    ck(Options.RowIndexAtY({}, 10) == nil, "an empty list answers nothing, never a guess")
+
+    -- ── THE COLOUR SWATCH ────────────────────────────────────────────────
+    ck(Options.ParseHex("ff8000") ~= nil, "a six-digit hex parses")
+    ck(Options.ParseHex("#ff8000") ~= nil, "…with or without the hash")
+    ck(Options.ParseHex("nope") == nil, "…and junk parses to nothing")
+    ck(Options.SetChannelColorHex("Trade", "ff8000") == true, "the swatch writes a colour")
+    local col = C.ChannelColor("Trade")
+    ck(col and math.abs(col.r - 1) < 0.01 and math.abs(col.g - 128 / 255) < 0.01,
+        "…as the colour that was typed")
+    ck(Options.HexOf(col) == "ff8000", "…and round-trips back to the same hex")
+    ck(C.Snapshot() and C.Snapshot().cfg.colors["trade"] ~= nil,
+        "RED CONTROL — a channel colour rides the sync snapshot")
+    ck(Options.SetChannelColorHex("Trade", "zzz") == false, "junk in the box never lands")
+    ck(C.ChannelColor("Trade") ~= nil, "…and never clears what was there")
+    ck(Options.SetChannelColorHex("Trade", "") == true and C.ChannelColor("Trade") == nil,
+        "emptying the box hands the channel back to the client's own colour")
+
+    -- ── THE RENAME (the absorbed alias editor) ───────────────────────────
+    ck(Options.SetAlias("Trade - City", "Bazaar") == true, "the row writes a rename")
     ck(C.GetAlias("trade - city") == "Bazaar", "…through the config seam, case-folded")
-    ck(Options.SetAlias("Trade - City", "") == true, "an emptied box removes the alias")
+    ck(Options.SetAlias("Trade - City", "") == true, "an emptied box removes it")
     ck(C.GetAlias("Trade - City") == nil, "…and the channel is native again")
 
-    -- The add-row.
     Options._addName, Options._addAlias = "  LookingForGroup  ", " LFG "
     ck(Options.CommitAdd() == true, "the add row commits")
     ck(C.GetAlias("lookingforgroup") == "LFG", "…trimmed and folded into the store")
@@ -2115,7 +2655,13 @@ local function testAliasEditor(fails)
     Options._addName, Options._addAlias = "", ""
     C.SetAlias("LookingForGroup", "")
 
+    -- THE ONE-EDITOR PIN: the old Channel names section is gone, so there must
+    -- be exactly one place that edits an alias.
+    ck(Options.AliasRows == nil,
+        "the separate alias editor is GONE, not left beside its replacement")
+
     cfg.aliases, cfg.aliasKeepNumber = savedAliases, savedKeep
+    cfg.join, cfg.colors = savedJoin, savedColors
     cfg.rev, cfg.at = savedRev, savedAt
 end
 
@@ -2209,90 +2755,69 @@ local function testThreeSurfaces(fails)
     Sim.ResetCalls()
 end
 
--- THE PER-TAB ROW EDITOR (skin v3): the rows it offers, the placement control,
--- the colour choice, and the three per-window toggles — including the polarity
--- trap, because they do NOT all store the same value for "off".
-local function testTabEditor(fails)
+-- THE END-TO-END RED CONTROL FOR THE DRAG: a row dropped in the pane changes
+-- the CLIENT's channel numbering. Everything between (the config's join list,
+-- the apply seam, channels.lua's paced converge with its placeholder pinning
+-- and swap primitive) is exercised for real against the unkind sim — no
+-- shortcut, because the claim being made is "the numbering engine converges to
+-- what you dragged", not "a table was written".
+local function testOrderConverges(fails)
     local function ck(c, m) if not c then fails[#fails + 1] = m end end
-    local C = ns.Config
-    if not C then return end
+    local Sim, HT = _G.__DaseekiChatSim, _G.__DaseekiChatHarnessTimer
+    local Ch, C = ns.Channels, ns.Config
+    if not (Sim and HT and Ch and C) then return end
+
+    local wasCh = ns.ModuleEnabled("channels")
+    ns.SetModuleEnabled("channels", true)
+    Sim.EnterWorld(false, false)          -- a zone-in re-arms the warm poll
+    HT.advance(1.0)
+    if not Ch.IsListWarm() then
+        fails[#fails + 1] = "the channel list never warmed; the ORDER red control could not run"
+        if not wasCh then ns.SetModuleEnabled("channels", false) end
+        return
+    end
+
     local cfg = C.Get()
-    local savedSkin, savedWindows = cfg.skin, cfg.windows
-    local savedRev, savedAt = cfg.rev, cfg.at
-    cfg.skin, cfg.windows = {}, {}
-    cfg.rev, cfg.at = 1, C.Now()
+    local savedJoin, savedRev, savedAt = cfg.join, cfg.rev, cfg.at
+    cfg.rev, cfg.at = math.max(1, tonumber(cfg.rev) or 1), C.Now()
 
-    -- ── The rows ─────────────────────────────────────────────────────────────
-    local rows = Options.TabRows()
-    ck(#rows == (_G.NUM_CHAT_WINDOWS or 10), "one row per chat window (got " .. #rows .. ")")
-    ck(rows[1].id == 1 and rows[1].name ~= "", "…each carrying the CLIENT's own window name")
-    ck(Options.TabRowLabel(rows[1]):find("1. ", 1, true) == 1,
-        "…and a numbered label (got '" .. Options.TabRowLabel(rows[1]) .. "')")
-    ck(rows[3].color == "", "a window with no colour of its own offers the empty choice")
+    -- Two channels, in a known order, as the world the drag starts from.
+    local result
+    Ch.Converge({ { 1, "General" }, { 2, "Trade" } }, function(res) result = res end)
+    HT.flush()
+    ck(result ~= nil and result.ok, "the world converged to General 1 / Trade 2 to start from")
+    cfg.join = C.CopyCfg(Ch.CaptureJoinList() or {})
+    local order = C.ChannelOrder()
+    ck(order[1] == "General" and order[2] == "Trade",
+        "the pane's rows read that order back (" .. table.concat(order, ",") .. ")")
 
-    -- ── Placement, through config.lua's seam ─────────────────────────────────
-    ck(Options.TabPlacement() == "top", "the placement control reads the synced default")
-    ck(Options.SetTabPlacement("right") == true, "…and writes through the config seam")
-    ck(C.TabPlacement() == "right", "…which is where it landed")
-    ck(Options.SetTabPlacement("right") == false, "an unchanged write is a no-op")
-    ck(Options.SetTabPlacement("upside-down") == false, "…and an unknown one is refused")
-    ck(Options.TabPlacementStatus():find("right", 1, true) ~= nil,
-        "the status line says where the tabs are")
-    Options.SetTabPlacement("top")
-
-    -- ── The colour choice ────────────────────────────────────────────────────
-    local sawAuto, sawToken, sawChat = false, false, false
-    for _, choice in ipairs(Options.TAB_COLOR_CHOICES) do
-        if choice.value == "" then sawAuto = true end
-        if choice.value:find("^token:") then sawToken = true end
-        if choice.value:find("^chat:") then sawChat = true end
-        ck(type(choice.text) == "string" and choice.text ~= "",
-            "every colour choice carries a readable name")
+    -- THE DRAG: pick up Trade, drop it on the first row.
+    local tradeRow
+    for i, r in ipairs(Options.ChannelRows()) do
+        if r.name == "Trade" then tradeRow = i end
     end
-    ck(sawAuto and sawToken and sawChat,
-        "the palette offers Automatic, theme tokens AND the client's own chat colours")
-    ck(Options.SetTabColor(3, "chat:GUILD") == true, "the row writes a colour")
-    ck(C.TabColor(3) == "chat:GUILD", "…through the config seam")
-    ck(Options.TabRows()[3].color == "chat:GUILD", "…and the row reads it back")
-    ck(Options.TabPlacementStatus():find("1 tab", 1, true) ~= nil,
-        "…and the status line counts it")
-    ck(Options.SetTabColor(3, "") == true and C.TabColor(3) == nil,
-        "choosing Automatic REMOVES the colour")
-
-    -- ── The three per-window toggles, and the polarity trap ──────────────────
-    ck(#Options.WINDOW_TOGGLES == 3, "the row carries all three per-window opt-outs")
-    for _, spec in ipairs(Options.WINDOW_TOGGLES) do
-        local branch = Options.Branch(spec.branch)
-        ck(type(branch) == "table", spec.key .. ": the module's own branch is reachable")
-        ck(Options.WindowToggleGet(spec, 6) == true,
-            spec.key .. ": an untouched window is ON (absent means on, in every one of them)")
-        Options.WindowToggleSet(spec, 6, false)
-        ck(Options.WindowToggleGet(spec, 6) == false, spec.key .. ": turning it off reads back")
-        -- THE TRAP: badges/history store `true` for off, stamps stores `false`.
-        -- A single convention here would have written the wrong value into one
-        -- of the three and quietly done nothing.
-        ck(branch[spec.store][6] == spec.offValue,
-            spec.key .. ": …as the value that MODULE's own rule reads (" ..
-            tostring(spec.offValue) .. ")")
-        Options.WindowToggleSet(spec, 6, true)
-        ck(branch[spec.store][6] == spec.onValue and Options.WindowToggleGet(spec, 6) == true,
-            spec.key .. ": and turning it back on clears the entry entirely")
+    ck(tradeRow ~= nil, "Trade has a row to pick up")
+    if tradeRow then
+        ck(Options.BeginRowDrag(tradeRow) == true, "the row is reorderable (we are in it)")
+        Options.DragOver(1)
+        ck(Options.CommitRowDrag() == true, "the drop commits")
+        HT.flush()                      -- the paced converge the seam kicked off
+        ck(C.ChannelOrder()[1] == "Trade", "the CONFIG's order changed first (config-first)")
+        local tradeNum = select(1, _G.GetChannelName("Trade"))
+        local genNum   = select(1, _G.GetChannelName("General"))
+        ck(tradeNum == 1 and genNum == 2,
+            "RED CONTROL — the NUMBERING ENGINE converged the client to the dragged order "
+            .. "(Trade " .. tostring(tradeNum) .. ", General " .. tostring(genNum) .. ")")
+        ck((Options.applied["channels.order"] or 0) > 0,
+            "…through the declared apply seam, which really was dispatched")
     end
 
-    -- The badge toggle is the one with a live surface; driving it must actually
-    -- reach the counter (this is the UNBOUND debt being paid, not just listed).
-    local B = ns.Badges
-    if B and B.active then
-        local cf3 = _G.ChatFrame3
-        local badgeSpec = Options.WINDOW_TOGGLES[1]
-        Options.WindowToggleSet(badgeSpec, 3, false)
-        ck(ns.db.badges.optOut[3] == true, "the pane's badge toggle reaches badges' own store")
-        Options.WindowToggleSet(badgeSpec, 3, true)
-        ck(ns.db.badges.optOut[3] == nil, "…and clears it again")
-    end
-
-    cfg.skin, cfg.windows = savedSkin, savedWindows
-    cfg.rev, cfg.at = savedRev, savedAt
+    -- Put the world back where the suites after this one expect it.
+    Ch.Converge({ { 1, "General" } }, function() end)
+    HT.flush()
+    cfg.join, cfg.rev, cfg.at = savedJoin, savedRev, savedAt
+    if not wasCh then ns.SetModuleEnabled("channels", false) end
+    Sim.ResetCalls()
 end
 
 function Options.RunSelfTests(verbose)
@@ -2301,9 +2826,9 @@ function Options.RunSelfTests(verbose)
         { name = "store access",            fn = testStoreAccess },
         { name = "registration + the pane", fn = testRegistrationAndPane },
         { name = "live apply (a control reaches PIXELS, same beat)", fn = testLiveApply },
-        { name = "alias editor",            fn = testAliasEditor },
-        { name = "per-tab row editor",      fn = testTabEditor },
-        { name = "aliases: one seam, three surfaces", fn = testThreeSurfaces },
+        { name = "channels: order, colour, rename", fn = testChannelRows },
+        { name = "channel order converges (drag -> the numbering engine)", fn = testOrderConverges },
+        { name = "renames: one seam, three surfaces", fn = testThreeSurfaces },
     }
     local allPass = true
     for _, suite in ipairs(suites) do
