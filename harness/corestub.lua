@@ -250,16 +250,172 @@ _G.DaseekiSuite = Suite
 
 function Suite:RegisterAddon(def)
     if type(def) ~= "table" or not def.id then return nil end
+    -- Core's own synthesis: a def with no sections gets ONE implicit legacy
+    -- section built from its addon-level build/options/refresh, so a legacy
+    -- caller still has a page the hub can select.
+    if not def.sections or #def.sections == 0 then
+        def.sections = { { id = "_main", title = def.title or def.id,
+                           build = def.build, options = def.options,
+                           refresh = def.refresh, legacy = true } }
+    else
+        local defaultLegacy = not def.flow
+        for i, s in ipairs(def.sections) do
+            s.id = s.id or ("s" .. i)
+            if s.legacy == nil then s.legacy = defaultLegacy end
+        end
+    end
     if not self.sections[def.id] then self.regOrder[#self.regOrder + 1] = def.id end
     self.sections[def.id] = def
     return def
 end
 function Suite:RegisterCorePage(def) return self:RegisterAddon(def) end
-function Suite:Open(id) self._opened = id end
-function Suite:ShowAddon(id, sectionId) self._shown = { id, sectionId } end
+
+----------------------------------------------------------------------
+-- THE HUB WINDOW, AS CORE ACTUALLY BEHAVES
+-- (Daseeki-Core @919e544 — hub.lua ShowAddonPass/EnsureHub + core.lua
+-- Open/Toggle/GetAddonSection, read not guessed).
+--
+-- ════════════════════════════════════════════════════════════════════════
+-- THE KINDNESS THAT SHIPPED A DEFECT (owner UAT, 2026-08-12: "right clicking
+-- the tab and clicking 'Open Settings' doesnt seem to work")
+-- ════════════════════════════════════════════════════════════════════════
+-- This stub used to be two recorders:
+--     function Suite:Open(id) self._opened = id end
+--     function Suite:ShowAddon(id, sectionId) self._shown = { id, sectionId } end
+-- No window, no registry check, and — fatally — SYMMETRICAL: either call read
+-- as "the settings opened". Real Core is not symmetrical at all:
+--
+--   * Core:ShowAddon SELECTS a page and NOTHING ELSE. It calls EnsureHub
+--     (which CREATES the window HIDDEN), hides every built pane, records the
+--     selection and shows the section's PANE. It never calls window:Show().
+--     On any session where the player has not already opened the Daseeki
+--     window, ShowAddon is completely invisible.
+--   * Core:Open is the ONLY call that shows the window:
+--         function Core:Open(id, sectionId)
+--             self:EnsureHub()
+--             if id then self:ShowAddon(id, sectionId) end
+--             self.window:Show()
+--         end
+--     …and it shows the window even when the id is unknown, because
+--     ShowAddon's refusal is silent — the player lands on the hub's default
+--     page rather than on nothing.
+--   * An UNREGISTERED addon id selects nothing: ShowAddonPass returns false
+--     before it touches the selection record.
+--   * An unknown SECTION id falls back to the addon's FIRST section
+--     (Core:GetAddonSection), and a nil section id falls back to the section
+--     that addon was last shown on.
+--   * EnsureHub picks a default selection the first time it builds the window
+--     (last addon, else the first suite entry ALPHABETICALLY by title).
+--
+-- All of that is modeled below. Class 9's Begin/EndShow latch is deliberately
+-- NOT: it is Core's own contract, pinned in Core's own repo, and nothing in
+-- this addon re-enters the hub from a build/refresh.
+----------------------------------------------------------------------
+
+-- Core's GetSuiteOrder: alphabetical by DISPLAY TITLE, ties broken on id.
+local function suiteOrder()
+    local out = {}
+    for i, id in ipairs(Suite.regOrder) do out[i] = id end
+    local function key(id)
+        local def = Suite.sections[id]
+        return string.lower(tostring((def and def.title) or id or ""))
+    end
+    table.sort(out, function(a, b)
+        local ka, kb = key(a), key(b)
+        if ka == kb then return a < b end
+        return ka < kb
+    end)
+    return out
+end
+
+function Suite:GetAddonSections(addonId)
+    local a = self.sections[addonId]
+    return a and a.sections or {}
+end
+
+function Suite:GetAddonSection(addonId, sectionId)
+    local secs = self:GetAddonSections(addonId)
+    if sectionId then
+        for _, s in ipairs(secs) do if s.id == sectionId then return s end end
+    end
+    return secs[1]
+end
+
+-- Builds the window HIDDEN and picks a default selection, exactly as Core's
+-- EnsureHub does. Re-entrant-safe the same way Core's is: self.window is set
+-- before the default ShowAddon runs.
+function Suite:EnsureHub()
+    if self.window then return self.window end
+    self.window = { shown = false }
+    self._lastSectionByAddon = self._lastSectionByAddon or {}
+    local startId = self._lastAddon
+    if not (startId and self.sections[startId]) then startId = suiteOrder()[1] end
+    if startId then self:ShowAddon(startId) end
+    return self.window
+end
+
+function Suite:ShowAddon(addonId, sectionId)
+    self:EnsureHub()
+    local addon = self.sections[addonId]
+    if not addon then return false end                  -- a page that is not there
+    sectionId = sectionId or self._lastSectionByAddon[addonId]
+    local section = self:GetAddonSection(addonId, sectionId)
+    if not section then return false end
+    self._currentAddon, self._currentSection = addonId, section.id
+    self._lastAddon = addonId
+    self._lastSectionByAddon[addonId] = section.id
+    self._shows = (self._shows or 0) + 1
+    -- AND THAT IS ALL. The window's own shown state is untouched, because
+    -- Core's ShowAddonPass never calls window:Show().
+    return true
+end
+function Suite:ShowSection(id) return self:ShowAddon(id) end
+
+function Suite:Open(addonId, sectionId)
+    self:EnsureHub()
+    if addonId then self:ShowAddon(addonId, sectionId) end
+    self.window.shown = true            -- unconditional, as Core's Open is
+    self._opens = (self._opens or 0) + 1
+end
+
+function Suite:Toggle(addonId, sectionId)
+    self:EnsureHub()
+    if self.window.shown then self.window.shown = false return end
+    if addonId then self:ShowAddon(addonId, sectionId) end
+    self.window.shown = true
+end
 
 function UI.__RegisteredAddon(id) return Suite.sections[id] end
-function UI.__ClearRegistry() Suite.sections, Suite.regOrder = {}, {} end
+
+-- What a PLAYER can see of the hub right now: is the window up, and which page
+-- is it on. A test asserting "Open Settings worked" has to ask both.
+function UI.__HubShown() return (Suite.window and Suite.window.shown) and true or false end
+function UI.__HubBuilt() return Suite.window ~= nil end
+function UI.__HubPage()  return Suite._currentAddon, Suite._currentSection end
+function UI.__HubClose() if Suite.window then Suite.window.shown = false end end
+
+-- HARNESS ONLY: model a session in which an addon never registered its page
+-- (the state the inertness gate already pins as reachable — a module the
+-- player turned off never reaches the hub at all). Returns the def so the
+-- caller can put it back.
+function UI.__RemoveAddon(id)
+    local def = Suite.sections[id]
+    if not def then return nil end
+    Suite.sections[id] = nil
+    for i, v in ipairs(Suite.regOrder) do
+        if v == id then table.remove(Suite.regOrder, i) break end
+    end
+    if Suite._currentAddon == id then Suite._currentAddon, Suite._currentSection = nil, nil end
+    if Suite._lastAddon == id then Suite._lastAddon = nil end
+    return def
+end
+
+function UI.__ClearRegistry()
+    Suite.sections, Suite.regOrder = {}, {}
+    Suite.window = nil
+    Suite._currentAddon, Suite._currentSection, Suite._lastAddon = nil, nil, nil
+    Suite._lastSectionByAddon = {}
+end
 
 -- ── CORE'S OWN LAYOUT CONSTANTS (daseekiui.lua, read not guessed) ──────────
 local ITEM_GAP = 8            -- horizontal gap between row items

@@ -55,6 +55,12 @@ away or press Escape. Every entry does exactly what its equivalent in the
 settings page does — the same one path into your shared configuration, so the
 menu and the page can never disagree.
 
+- **"Open settings" now actually opens the settings window.** It was asking the
+  Daseeki window to turn to Chat's page without ever asking it to open, so
+  unless you already had the window up, clicking it did nothing at all. It now
+  opens the window on Chat's page every time; if you have the settings module
+  turned off it says so in one line instead of going quiet.
+
 ### The resize corners you can actually see
 
 The four corner grips were there the whole time and were, in practice,
