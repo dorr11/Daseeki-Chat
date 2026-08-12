@@ -163,10 +163,13 @@ ns.View = View
 --       outright is what keeps anything drawn at the feed's own top edge out of the tab band.
 --
 -- NOT IN THE MOCKUP AT ALL, and named here so the table stays a complete account of what is drawn:
---   the RESIZE GRIP (12 units, chassis bottom-right, alpha 0 until the pointer is on the box,
---   --line-soft resting / --accent on hover). The mockup is a still image and carries no gestures;
---   the grip is furniture the OWNED frame adds to answer the owner's "how do i unlock it to move and
---   resize?" — with the same answer movement gives, which is that there is nothing to unlock.
+--   the RESIZE GRIPS (12 units, one per CORNER, --line-soft resting / --accent under the pointer,
+--   VISIBLE the whole time the box is unlocked and absent while it is locked). The mockup is a still
+--   image and carries no gestures; the grips are furniture the OWNED frame adds.
+--   AMENDED 2026-08-11 (the owner, after the first build): one hover-only grip in the bottom-right
+--   was the answer to "how do i unlock it to move and resize?" and it failed — he had to ask again,
+--   and then asked for a lock as well. An affordance nobody can see is not an affordance, so all
+--   four corners are up whenever the box can actually be resized.
 --
 -- RETIRED WITH SKIN-OVER (rows that no longer need to exist): "the box strips
 -- the client's stock tab art", "the box takes the tab's alpha back from
@@ -577,6 +580,28 @@ end
 -- window and starts being a decoration, so the drop lands here instead.
 View.MIN_FEED_LINES = 3
 
+-- WHAT THE TAB RUN ITSELF COSTS, on the axis it runs along, and whether that
+-- axis is the vertical one. Second return: true for a rail.
+--
+-- WHY THE FLOOR HAS TO KNOW (the second form of the owner's "tabs drawn over
+-- the message text"): a rail of five rows is 4 + 5*26 units tall whatever the
+-- feed wants, and a box shorter than that runs its last tabs off the rail,
+-- across the entry bar and out of the chassis. A top strip of five tabs has the
+-- same problem sideways. The run is a HARD floor on its own axis, and saying so
+-- here is what keeps the layout from having to invent an overflow behaviour.
+function View.TabRunExtent(ids)
+    ids = ids or View.ids
+    if not ids or #ids == 0 then ids = View.OwnedIds() end
+    if View.TabsOnRail() then
+        return 2 * RAIL_PAD_Y + #ids * TAB_ROW_H, true
+    end
+    local w = 2 * STRIP_PAD_X
+    for i, id in ipairs(ids) do
+        w = w + View.TabWidth(id) + ((i > 1) and TAB_GAP or 0)
+    end
+    return w, false
+end
+
 function View.MinChassisSize()
     local size = View.MessageFontSize(nil)
     local lineBox = size * FACE_NATURAL_LINE + View.MessageSpacing(size)
@@ -585,6 +610,15 @@ function View.MinChassisSize()
     -- Wide enough for the entry bar's own insets and a couple of tabs; the rail
     -- adds its own 112 through Furniture above.
     local w = extraW + 2 * MSG_PAD_X + 2 * TAB_MIN_W + TAB_GAP + 2 * STRIP_PAD_X
+    -- …and never below what the RUN itself needs on its own axis.
+    local run, vertical = View.TabRunExtent()
+    if vertical then
+        local need = 2 * CHASSIS_EDGE + EB_HEIGHT + SEAM_W + run
+        if need > h then h = need end
+    else
+        local need = 2 * CHASSIS_EDGE + run
+        if need > w then w = need end
+    end
     return math.floor(w + 0.5), math.floor(h + 0.5)
 end
 
@@ -623,10 +657,20 @@ function View.MessageInsets()
     local place = View.TabPlacement()
     if place == "top" then
         top = CHASSIS_EDGE + STRIP_H + MSG_PAD_TOP
-    elseif place == "left" then
-        left = CHASSIS_EDGE + TABRAIL_W + SEAM_W + MSG_PAD_X
-    elseif place == "right" then
-        right = CHASSIS_EDGE + TABRAIL_W + SEAM_W + MSG_PAD_X
+    else
+        -- ON A RAIL there is no strip band between the feed and the chassis'
+        -- top corners, so the feed's own top inset is all that keeps message
+        -- text out from under the two TOP corner grips. The mockup's 10 is not
+        -- enough for a 12-unit grip, and text under a click target is a worse
+        -- deviation than three units of extra air — so the inset is the larger
+        -- of the two. (On a top strip the band already provides the clearance,
+        -- and the grip lands on a tab's 14-unit padding, never on its label.)
+        top = CHASSIS_EDGE + math.max(MSG_PAD_TOP, GRIP_SIZE + 1)
+        if place == "left" then
+            left = CHASSIS_EDGE + TABRAIL_W + SEAM_W + MSG_PAD_X
+        else
+            right = CHASSIS_EDGE + TABRAIL_W + SEAM_W + MSG_PAD_X
+        end
     end
     return left, right, top, bottom
 end
@@ -806,6 +850,13 @@ local function ensureTab(id)
         pcall(label.SetFont, label, UI.FontFile(), View.TabTextSize(), "")
     end
     call(label, "SetJustifyH", "CENTER")
+    -- A tab label is ONE line, always. The rail path gives the label an
+    -- explicit width (so a long channel name stops before the unread count
+    -- rather than running under it), and a FontString with a width WRAPS by
+    -- default — a two-line label in a 26-unit row is a worse answer than an
+    -- ellipsis, so word wrap is off from creation and the client truncates.
+    call(label, "SetWordWrap", false)
+    call(label, "SetMaxLines", 1)
     call(label, "SetPoint", "CENTER", btn, "CENTER", 0, 0)
     -- THE CLIENT'S OWN SHAPE, published deliberately: a chat tab carries its
     -- label as `tab.Text`, and badges.lua anchors the unread chip off THAT —
@@ -1403,79 +1454,161 @@ end
 -- have changed an answer.
 ----------------------------------------------------------------------
 
--- `x` is the run's CURRENT left edge; the return value is the NEXT one.
+-- ONE TAB RUN, PARAMETERIZED BY AXIS (the 2026-08-11 cleanup).
 --
--- THE DEFECT THIS SIGNATURE USED TO CARRY (owner's live look, 2026-08-11 —
--- "Loot FoDMs", three labels drawn on top of each other): this function used to
--- `return w + TAB_GAP` — the tab's OWN WIDTH plus the gap, not the position
--- past its right edge. Tab 1 landed correctly at the strip's padding, tab 2
--- landed at (width of tab 1) + gap — right by accident, because the run's
--- origin happened to be small — and every tab after that landed at the width of
--- its PREDECESSOR, i.e. all of them in the same 40-to-80-unit band. The rail
--- path next door accumulated correctly (`return y + TAB_ROW_H`), which is why
--- only the top strip piled up. Nothing in the suite could see it: the sim had
--- no anchor resolver, so no test could ask where a tab ENDED UP, and the
--- default world has exactly ONE owned window, so even an eyeball assertion
--- would have passed. Phase 13 now measures the run.
-local function anchorTop(t, id, x)
-    local w = View.TabWidth(id)
+-- THE TWO DEFECTS THE PARALLEL VERSIONS CARRIED, both from the same cause —
+-- the same arithmetic written twice and drifting:
+--   1. the top version used to `return w + TAB_GAP` (the tab's own WIDTH, not
+--      the position past its right edge), so every tab after the second landed
+--      at its PREDECESSOR's width — the owner's "Loot FoDMs", three labels on
+--      one x. The rail version next door accumulated correctly, which is why
+--      only the top strip piled up;
+--   2. neither version placed the SURFACE it ran on, so a run laid out with the
+--      new placement could land on a strip still wearing the old one — the
+--      owner's mixed state, "Chaos still on the top strip while Focus/DM/Loot
+--      draw down the left over the message text".
+-- Both are structurally impossible now: there is one run, and LayoutTabs places
+-- the strip before it runs (a run and the surface it runs on are ONE fact).
+--
+-- `run` is the axis position of the run's current edge; the return value is the
+-- next one. Axis-specific facts are named once each; everything else is shared.
+local function anchorTab(t, id, run, rail, side)
     local btn = t.button
-    call(btn, "SetSize", w, TAB_H)
+    local w = rail and (TABRAIL_W - 2 * RAIL_PAD_X) or View.TabWidth(id)
+    local h = rail and TAB_ROW_H or TAB_H
+    call(btn, "SetSize", w, h)
     call(btn, "ClearAllPoints")
-    call(btn, "SetPoint", "BOTTOMLEFT", View.strip, "BOTTOMLEFT", x, 0)
-    -- The active fill runs to the strip's BOTTOM edge (that is the fusion).
+    if rail then
+        call(btn, "SetPoint", "TOPLEFT", View.strip, "TOPLEFT", RAIL_PAD_X, -run)
+    else
+        call(btn, "SetPoint", "BOTTOMLEFT", View.strip, "BOTTOMLEFT", run, 0)
+    end
+    -- The active fill covers the button on both axes. On a top strip that runs
+    -- it to the strip's BOTTOM edge, which is the fusion with the feed.
     call(t.fill, "ClearAllPoints")
     call(t.fill, "SetPoint", "TOPLEFT", btn, "TOPLEFT", 0, 0)
     call(t.fill, "SetPoint", "BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
     call(t.hover, "ClearAllPoints")
     call(t.hover, "SetPoint", "TOPLEFT", btn, "TOPLEFT", 0, 0)
     call(t.hover, "SetPoint", "BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
+    if rail then
+        -- `.stab.active::before`: a 2-unit bar on the rail's INNER side, inset 5.
+        call(t.underline, "Hide")
+        call(t.edgebar, "ClearAllPoints")
+        call(t.edgebar, "SetSize", EDGEBAR_W, TAB_ROW_H - 2 * EDGEBAR_INSET)
+        if side == "left" then
+            call(t.edgebar, "SetPoint", "TOPRIGHT", btn, "TOPRIGHT", 0, -EDGEBAR_INSET)
+        else
+            call(t.edgebar, "SetPoint", "TOPLEFT", btn, "TOPLEFT", 0, -EDGEBAR_INSET)
+        end
+        -- `.stab` is a row: the label sits at the row's left padding and the
+        -- unread count right-aligns opposite it (badges.lua's rail branch).
+        call(t.label, "SetJustifyH", "LEFT")
+        call(t.label, "ClearAllPoints")
+        call(t.label, "SetPoint", "LEFT", btn, "LEFT", RAIL_TAB_PAD_X, 0)
+        -- THE RAIL'S OWN PIP RULE: the count is right-aligned in the row, so
+        -- the LABEL has to stop before it or the two draw over each other on a
+        -- long channel name. A rail row is a fixed width; the label's is what
+        -- gives.
+        local room = w - RAIL_TAB_PAD_X - RAIL_TAB_PAD_X - View.PipFootprint(id)
+        if room < 8 then room = 8 end
+        call(t.label, "SetWidth", room)
+        return run + TAB_ROW_H
+    end
+    call(t.edgebar, "Hide")
     call(t.underline, "ClearAllPoints")
     call(t.underline, "SetSize", w - 2 * UL_INSET, UL_HEIGHT)
     call(t.underline, "SetPoint", "BOTTOMLEFT", btn, "BOTTOMLEFT", UL_INSET, UL_Y)
-    call(t.edgebar, "Hide")
-    -- The label goes back to the centre (a rail pass moves it to the left edge)
-    -- — and it shifts LEFT by half the pip's footprint when a pip is showing,
-    -- because the mockup's `.tab` is a row of [label][gap][chip] centred as ONE
-    -- thing inside the tab's padding. TabWidth reserved that footprint; this is
-    -- the half that spends it, so the pair reads centred instead of the label
-    -- sitting on the middle with the chip hanging off to the right.
+    -- The label is centred — and it shifts LEFT by half the pip's footprint when
+    -- a pip is showing, because the mockup's `.tab` is a row of
+    -- [label][gap][chip] centred as ONE thing inside the tab's padding.
+    -- TabWidth reserved that footprint; this is the half that spends it.
     local pipExtra = View.PipFootprint(id)
+    call(t.label, "SetWidth", 0)          -- back to the string's own measurement
     call(t.label, "SetJustifyH", "CENTER")
     call(t.label, "ClearAllPoints")
     call(t.label, "SetPoint", "CENTER", btn, "CENTER", -pipExtra / 2, 0)
-    return x + w + TAB_GAP
+    return run + w + TAB_GAP
 end
 
-local function anchorRail(t, id, y, side)
-    local btn = t.button
-    call(btn, "SetSize", TABRAIL_W - 2 * RAIL_PAD_X, TAB_ROW_H)
-    call(btn, "ClearAllPoints")
-    call(btn, "SetPoint", "TOPLEFT", View.strip, "TOPLEFT", RAIL_PAD_X, -y)
-    call(t.fill, "ClearAllPoints")
-    call(t.fill, "SetPoint", "TOPLEFT", btn, "TOPLEFT", 0, 0)
-    call(t.fill, "SetPoint", "BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
-    call(t.hover, "ClearAllPoints")
-    call(t.hover, "SetPoint", "TOPLEFT", btn, "TOPLEFT", 0, 0)
-    call(t.hover, "SetPoint", "BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
-    -- `.stab.active::before`: a 2-unit bar on the rail's INNER side, inset 5.
-    call(t.edgebar, "ClearAllPoints")
-    call(t.edgebar, "SetSize", EDGEBAR_W, TAB_ROW_H - 2 * EDGEBAR_INSET)
-    if side == "left" then
-        call(t.edgebar, "SetPoint", "TOPRIGHT", btn, "TOPRIGHT", 0, -EDGEBAR_INSET)
+-- THE SURFACE THE RUN RUNS ON. Extracted from Reflow so that LayoutTabs — the
+-- cheap beat that a colour change, a settle pass or a tab selection triggers —
+-- can never lay a run out against a stale surface. Idempotent and pure
+-- arithmetic over the chassis' LIVE size, so calling it twice in a pass costs
+-- nothing and calling it too seldom is no longer possible.
+function View.LayoutStrip()
+    local f = View.chassis
+    if not (f and View.strip) then return false end
+    local w = widgetNum(f, "GetWidth")
+    local h = widgetNum(f, "GetHeight")
+    if not w or not h or w <= 0 or h <= 0 then return false end
+    local place = View.TabPlacement()
+    local rail = (place == "left" or place == "right")
+    local innerH = h - 2 * CHASSIS_EDGE - EB_HEIGHT - SEAM_W
+    call(View.strip, "ClearAllPoints")
+    if rail then
+        call(View.strip, "SetSize", TABRAIL_W, innerH)
+        if place == "left" then
+            call(View.strip, "SetPoint", "TOPLEFT", f, "TOPLEFT", CHASSIS_EDGE, -CHASSIS_EDGE)
+        else
+            call(View.strip, "SetPoint", "TOPRIGHT", f, "TOPRIGHT", -CHASSIS_EDGE, -CHASSIS_EDGE)
+        end
+        call(View.railSeam, "ClearAllPoints")
+        call(View.railSeam, "SetSize", SEAM_W, innerH)
+        if place == "left" then
+            call(View.railSeam, "SetPoint", "TOPLEFT", View.strip, "TOPRIGHT", 0, 0)
+        else
+            call(View.railSeam, "SetPoint", "TOPRIGHT", View.strip, "TOPLEFT", 0, 0)
+        end
+        call(View.railSeam, "Show")
     else
-        call(t.edgebar, "SetPoint", "TOPLEFT", btn, "TOPLEFT", 0, -EDGEBAR_INSET)
+        call(View.strip, "SetSize", w - 2 * CHASSIS_EDGE, STRIP_H)
+        call(View.strip, "SetPoint", "TOPLEFT", f, "TOPLEFT", CHASSIS_EDGE, -CHASSIS_EDGE)
+        call(View.railSeam, "Hide")
     end
-    call(t.underline, "Hide")
-    call(t.label, "SetJustifyH", "LEFT")
-    call(t.label, "ClearAllPoints")
-    call(t.label, "SetPoint", "LEFT", btn, "LEFT", RAIL_TAB_PAD_X, 0)
-    return y + TAB_ROW_H
+    call(View.stripFill, "ClearAllPoints")
+    call(View.stripFill, "SetPoint", "TOPLEFT", View.strip, "TOPLEFT", 0, 0)
+    call(View.stripFill, "SetPoint", "BOTTOMRIGHT", View.strip, "BOTTOMRIGHT", 0, 0)
+    call(View.stripFill, "Show")
+    -- DRAW ORDER, STATED (not inherited from creation order): the band is an
+    -- opaque surface ABOVE the feed, because a ScrollingMessageFrame lays its
+    -- lines out from the bottom up and the topmost one lands wherever the
+    -- arithmetic leaves it.
+    call(View.strip, "SetFrameLevel", (widgetNum(f, "GetFrameLevel") or 1) + 5)
+    call(View.strip, "Show")
+    return true
 end
 
 function View.LayoutTabs()
     if not View.strip then return false end
     local place = View.TabPlacement()
+    -- ── THE MIGRATION ESCALATION, and it is the whole fix for the owner's
+    -- mixed strip/rail screenshot. ───────────────────────────────────────
+    --
+    -- A CHEAP BEAT CAN BE THE FIRST THING TO NOTICE THE ANSWER MOVED. The
+    -- placement lives in the SYNCED config and resolves at READ time, so a peer
+    -- account's newer choice changes it with no local write and therefore no
+    -- apply seam to hang a migration off — and the next ordinary beat (a colour
+    -- event, a settle pass, a tab click) would re-run the TAB RUN alone.
+    --
+    -- Running the run alone is not enough, and that is precisely what shipped:
+    -- the tabs migrated to the rail while the FEED still spanned the full width
+    -- and the box still had its old floor, so the new rail was drawn straight
+    -- over the message text. The strip, the feed's insets and the box's own
+    -- minimum are ONE fact; a placement that moved since the last full pass
+    -- escalates to the full one rather than doing a third of it.
+    --
+    -- The latch is armed BEFORE the call it guards and released after it,
+    -- pcall-protected so an error cannot wedge it (Class 9's shape).
+    if View._laidPlacement ~= place and not View._migrating then
+        View._migrating = true
+        local ok = pcall(View.Layout)
+        View._migrating = nil
+        if ok then return true end
+    end
+    -- THE SURFACE BEFORE THE RUN, ALWAYS: the run below is arithmetic in the
+    -- strip's own frame, so the strip has to BE this placement's strip first.
+    View.LayoutStrip()
     local rail = View.TabsOnRail()
     local run = rail and RAIL_PAD_Y or STRIP_PAD_X
     for _, id in ipairs(View.ids) do
@@ -1502,11 +1635,7 @@ function View.LayoutTabs()
                 call(t.edgebar, "Hide")
             end
             call(t.button, "Show")
-            if rail then
-                run = anchorRail(t, id, run, place)
-            else
-                run = anchorTop(t, id, run)
-            end
+            run = anchorTab(t, id, run, rail, place)
         end
     end
     -- Any tab whose window went away stops being drawn (never destroyed — a
@@ -1558,35 +1687,8 @@ function View.Reflow()
     local h = widgetNum(f, "GetHeight")
     if not w or not h or w <= 0 or h <= 0 then return false end
 
-    local place = View.TabPlacement()
-    local rail = View.TabsOnRail()
-    -- The strip / rail.
-    call(View.strip, "ClearAllPoints")
-    if rail then
-        call(View.strip, "SetSize", TABRAIL_W, h - 2 * CHASSIS_EDGE - EB_HEIGHT - SEAM_W)
-        if place == "left" then
-            call(View.strip, "SetPoint", "TOPLEFT", f, "TOPLEFT", CHASSIS_EDGE, -CHASSIS_EDGE)
-        else
-            call(View.strip, "SetPoint", "TOPRIGHT", f, "TOPRIGHT", -CHASSIS_EDGE, -CHASSIS_EDGE)
-        end
-        call(View.railSeam, "ClearAllPoints")
-        call(View.railSeam, "SetSize", SEAM_W, h - 2 * CHASSIS_EDGE - EB_HEIGHT - SEAM_W)
-        if place == "left" then
-            call(View.railSeam, "SetPoint", "TOPLEFT", View.strip, "TOPRIGHT", 0, 0)
-        else
-            call(View.railSeam, "SetPoint", "TOPRIGHT", View.strip, "TOPLEFT", 0, 0)
-        end
-        call(View.railSeam, "Show")
-    else
-        call(View.strip, "SetSize", w - 2 * CHASSIS_EDGE, STRIP_H)
-        call(View.strip, "SetPoint", "TOPLEFT", f, "TOPLEFT", CHASSIS_EDGE, -CHASSIS_EDGE)
-        call(View.railSeam, "Hide")
-    end
-    call(View.stripFill, "ClearAllPoints")
-    call(View.stripFill, "SetPoint", "TOPLEFT", View.strip, "TOPLEFT", 0, 0)
-    call(View.stripFill, "SetPoint", "BOTTOMRIGHT", View.strip, "BOTTOMRIGHT", 0, 0)
-    call(View.stripFill, "Show")
-    call(View.strip, "Show")
+    -- The strip / rail: ONE implementation, shared with LayoutTabs.
+    View.LayoutStrip()
 
     -- The message + entry surface (one --panel2 fill, the mockup's own shape).
     local ml, mr, mt, mb = View.MessageInsets()
@@ -1627,15 +1729,13 @@ function View.Reflow()
             call(smf, id == View.activeId and "Show" or "Hide")
         end
     end
-    -- DRAW ORDER, STATED. The strip band sits ABOVE the feed: a
-    -- ScrollingMessageFrame lays its lines out from the bottom up and the
-    -- topmost one is drawn wherever the arithmetic leaves it, so the band has
-    -- to be an opaque surface that wins, not an empty frame that happens to
-    -- have been created first. Creation order is not a contract; this is.
-    call(View.strip, "SetFrameLevel", feedLevel + 4)
+    -- THE PLACEMENT THIS PASS LAID OUT. LayoutTabs compares against it and
+    -- escalates when they disagree, so no cheap beat can leave the strip, the
+    -- feed and the floor speaking about different placements.
+    View._laidPlacement = View.TabPlacement()
     View.LayoutTabs()
     View.EnsureCopyButton()
-    View.LayoutGrip()
+    View.LayoutGrips()
     call(f, "Show")
     return true
 end
@@ -1754,9 +1854,28 @@ function View.CommitPosition()
     return true
 end
 
+-- THE LOCK (owner, 2026-08-11: "i need a way to lock / unlock the positioning
+-- and also when unlocked i should be able to click and drag a corner to
+-- re-size it").
+--
+-- ONE STATE, READ IN ONE PLACE, and it is the SYNCED config's (config.lua's
+-- Config.Locked — beside the position it governs, so lock follows the mesh the
+-- way the position already does). LOCKED means the box is a rock: no strip
+-- drag, no ALT-drag, no resize, no snap guides, no grips. UNLOCKED is exactly
+-- what shipped, plus four visible corner grips.
+function View.Locked()
+    local C = ns.Config
+    if C and type(C.Locked) == "function" then
+        local ok, v = pcall(C.Locked)
+        if ok then return v and true or false end
+    end
+    return false
+end
+
 -- ALT-drag anywhere on the chassis, plain drag on the strip. Both are ours.
 function View.DragAllowed(source)
     if not View.active then return false end
+    if View.Locked() then return false end
     if source == "strip" then return true end
     local alt = _G.IsAltKeyDown
     if type(alt) ~= "function" then return false end
@@ -1802,20 +1921,22 @@ function View.SnapSet()
 end
 
 ----------------------------------------------------------------------
--- RESIZE (the owner's second ask, 2026-08-11: "how do i unlock it to move and
--- resize?").
+-- RESIZE — FOUR CORNERS, and the LOCK that governs them (owner, 2026-08-11:
+-- "when unlocked i should be able to click and drag a corner to re-size it").
 --
--- NO UNLOCK RITUAL — the same answer movement already gives. There is no lock
--- state, no edit mode and no toggle to remember: the box is always movable and
--- always resizable, and the only thing that appears or disappears is the
--- affordance. A ~12-unit grip lives in the chassis' bottom-right corner,
--- invisible until the pointer is on the box, palette-coloured, accent on hover.
+-- WHAT CHANGED AND WHY. The first build shipped ONE grip, in the bottom-right,
+-- invisible until the pointer was on the box — and the owner had to ask how to
+-- resize, which is the whole verdict on hover-only affordances. So: four grips,
+-- one per corner, VISIBLE the entire time the box is unlocked (subtle:
+-- --line-soft resting, --accent under the pointer), and gone entirely while it
+-- is locked. Discoverability is not a hint, it is a thing you can see.
 --
--- WHY BOTTOM-RIGHT AND NOT AN EDGE-HUNT: the box's canonical anchor is its
--- BOTTOM-LEFT corner (npos), so a bottom-right grip moves the two edges the
--- position does not speak about... except the bottom, which it does — so the
--- drop re-establishes the corner as well as the size, and BOTH ride the one
--- commit below. One gesture, one commit, one capture.
+-- THE ARITHMETIC IS ONE FUNCTION, NOT FOUR. A corner drag holds the OPPOSITE
+-- corner fixed; the four cases differ only in which corner that is, so the
+-- generalization is a table lookup and two sign choices (View.ResizeAnchored).
+-- The bottom-right grip is not duplicated, it is the corner = "BOTTOMRIGHT"
+-- case of the same code — and it is still the one the canonical BOTTOMLEFT
+-- position anchor makes cheapest, which is why it stays the default.
 --
 -- WHAT IT COSTS THE REST OF THE FILE: nothing. The chassis' inner regions are
 -- anchored, not arithmetic, and the two that are sized (the strip and the
@@ -1823,79 +1944,184 @@ end
 -- whole drag reflows without a single OnUpdate.
 ----------------------------------------------------------------------
 
-local GRIP_QUIET_ALPHA = 0.0     -- invisible until the pointer is on the box
+local GRIP_RESTING_ALPHA = 0.55   -- always visible while unlocked (the ask)
+local GRIP_HOVER_ALPHA   = 1.0
 
-function View.EnsureGrip()
-    if View.grip then return View.grip end
+View.GRIP_CORNERS = { "BOTTOMRIGHT", "BOTTOMLEFT", "TOPLEFT", "TOPRIGHT" }
+
+-- The corner that STAYS PUT while `corner` is dragged.
+local OPPOSITE_CORNER = {
+    BOTTOMRIGHT = "TOPLEFT",  TOPLEFT     = "BOTTOMRIGHT",
+    BOTTOMLEFT  = "TOPRIGHT", TOPRIGHT    = "BOTTOMLEFT",
+}
+View.OPPOSITE_CORNER = OPPOSITE_CORNER
+
+-- Where a named corner of the live chassis is, in UIParent units. nil when the
+-- frame cannot answer (never a hopeful zero — Class 4).
+function View.CornerPoint(corner)
+    local f = View.chassis
+    local l = widgetNum(f, "GetLeft")
+    local b = widgetNum(f, "GetBottom")
+    local w = widgetNum(f, "GetWidth")
+    local h = widgetNum(f, "GetHeight")
+    if l == nil or b == nil or w == nil or h == nil then return nil end
+    corner = tostring(corner or "BOTTOMRIGHT"):upper()
+    local x = corner:find("RIGHT") and (l + w) or l
+    local y = corner:find("TOP") and (b + h) or b
+    return x, y
+end
+
+View.grips = {}
+
+local function ensureGrip(corner)
+    if View.grips[corner] then return View.grips[corner] end
     local cf = _G.CreateFrame
     if type(cf) ~= "function" or not View.chassis then return nil end
-    local ok, btn = pcall(cf, "Button", "DaseekiChatViewGrip", View.chassis)
+    local ok, btn = pcall(cf, "Button", "DaseekiChatViewGrip" .. corner, View.chassis)
     if not ok or type(btn) ~= "table" then return nil end
     call(btn, "SetSize", GRIP_SIZE, GRIP_SIZE)
     call(btn, "EnableMouse", true)
-    call(btn, "SetAlpha", GRIP_QUIET_ALPHA)
-    -- Two hairlines meeting in the corner: the quietest thing that still reads
-    -- as "this corner is a handle". ASCII-free by construction (no glyph).
-    local function bar(w, h, px, py)
+    call(btn, "SetAlpha", GRIP_RESTING_ALPHA)
+    -- Two hairlines meeting in THIS corner: the quietest thing that still reads
+    -- as "this corner is a handle". No glyph, so no tofu risk.
+    local bars = {}
+    local function bar(w, h)
         local t = call(btn, "CreateTexture", nil, "OVERLAY")
         paint(t, "lineSoft", 1)
         call(t, "SetSize", w, h)
-        call(t, "SetPoint", "BOTTOMRIGHT", btn, "BOTTOMRIGHT", px, py)
+        call(t, "SetPoint", corner, btn, corner, 0, 0)
+        bars[#bars + 1] = t
         return t
     end
-    View._gripBars = { bar(GRIP_SIZE, 1, 0, 0), bar(1, GRIP_SIZE, 0, 0) }
+    bar(GRIP_SIZE, 1)
+    bar(1, GRIP_SIZE)
     local function ink(name)
-        for _, t in ipairs(View._gripBars or {}) do paint(t, name, 1) end
+        for _, t in ipairs(bars) do paint(t, name, 1) end
     end
-    btn:SetScript("OnEnter", function(self) call(self, "SetAlpha", 1) ink("accent") end)
+    btn._bars = bars
+    btn:SetScript("OnEnter", function(self)
+        call(self, "SetAlpha", GRIP_HOVER_ALPHA) ink("accent")
+    end)
     btn:SetScript("OnLeave", function(self)
         ink("lineSoft")
-        call(self, "SetAlpha", View._gripVisible and 0.5 or GRIP_QUIET_ALPHA)
+        call(self, "SetAlpha", GRIP_RESTING_ALPHA)
     end)
-    btn:SetScript("OnMouseDown", function() View.OnResizeStart() end)
+    btn:SetScript("OnMouseDown", function() View.OnResizeStart(corner) end)
     btn:SetScript("OnMouseUp",   function() View.OnResizeStop() end)
-    View.grip = btn
+    View.grips[corner] = btn
     return btn
 end
 
-function View.LayoutGrip()
-    local g = View.EnsureGrip()
-    if not g then return false end
-    call(g, "ClearAllPoints")
-    call(g, "SetPoint", "BOTTOMRIGHT", View.chassis, "BOTTOMRIGHT",
-        -CHASSIS_EDGE, CHASSIS_EDGE)
-    call(g, "SetFrameLevel", (widgetNum(View.chassis, "GetFrameLevel") or 1) + 8)
-    call(g, "Show")
-    return true
+-- Back-compatible single-grip accessor: the bottom-right corner is still the
+-- default one everything that only knows about "the grip" means.
+function View.EnsureGrip(corner)
+    local g = ensureGrip(tostring(corner or "BOTTOMRIGHT"):upper())
+    View.grip = View.grips.BOTTOMRIGHT or View.grip
+    return g
 end
 
+function View.EnsureGrips()
+    for _, corner in ipairs(View.GRIP_CORNERS) do View.EnsureGrip(corner) end
+    return View.grips
+end
+
+function View.LayoutGrips()
+    if not View.chassis then return false end
+    View.EnsureGrips()
+    local level = (widgetNum(View.chassis, "GetFrameLevel") or 1) + 8
+    for _, corner in ipairs(View.GRIP_CORNERS) do
+        local g = View.grips[corner]
+        if g then
+            local dx = corner:find("RIGHT") and -CHASSIS_EDGE or CHASSIS_EDGE
+            local dy = corner:find("TOP") and -CHASSIS_EDGE or CHASSIS_EDGE
+            call(g, "ClearAllPoints")
+            call(g, "SetPoint", corner, View.chassis, corner, dx, dy)
+            call(g, "SetFrameLevel", level)
+        end
+    end
+    return View.ApplyLock()
+end
+
+-- The lock's own pixel act: grips exist while unlocked and are gone while
+-- locked. Called by the layout, by the slash verbs and by the options pane —
+-- one seam, three callers.
+function View.ApplyLock()
+    local locked = View.Locked()
+    for _, corner in ipairs(View.GRIP_CORNERS) do
+        local g = View.grips[corner]
+        if g then
+            call(g, locked and "Hide" or "Show")
+            call(g, "SetAlpha", locked and 0 or GRIP_RESTING_ALPHA)
+        end
+    end
+    return not locked
+end
+
+-- Kept for the pointer-on-the-box beat: the grips are ALWAYS up while unlocked
+-- now, and hovering the box just brings them a little further forward.
 function View.SetGripVisible(on)
     View._gripVisible = on and true or false
-    local g = View.grip
-    if not g then return false end
-    call(g, "SetAlpha", on and 0.5 or GRIP_QUIET_ALPHA)
+    if View.Locked() then return View.ApplyLock() end
+    for _, corner in ipairs(View.GRIP_CORNERS) do
+        local g = View.grips[corner]
+        if g then call(g, "SetAlpha", on and 0.85 or GRIP_RESTING_ALPHA) end
+    end
     return true
 end
 
-function View.OnResizeStart()
+function View.OnResizeStart(corner)
     if not View.active then return false end
+    if View.Locked() then return false end            -- a locked box is a rock
     local f = View.chassis
     if not f then return false end
+    corner = tostring(corner or "BOTTOMRIGHT"):upper()
+    if not OPPOSITE_CORNER[corner] then corner = "BOTTOMRIGHT" end
+    -- THE FIXED CORNER, CAPTURED BEFORE THE FIRST CLIENT CALL. Everything the
+    -- drop does — clamping, snapping, the commit — re-establishes this point,
+    -- so the opposite corner cannot walk while the box is being resized.
+    local ax, ay = View.CornerPoint(OPPOSITE_CORNER[corner])
+    if ax == nil then return false end
     call(f, "SetResizable", true)
-    local ok = pcall(f.StartSizing, f, "BOTTOMRIGHT")
+    local ok = pcall(f.StartSizing, f, corner)
     if not ok then return false end
     View._sizing = true
+    View._sizeCorner = corner
+    View._sizeAnchor = { ax, ay }
     local S = ns.Skin
     if S and type(S.BeginSnapGuides) == "function" then pcall(S.BeginSnapGuides, f) end
+    return true
+end
+
+-- Place AND size so the corner OPPOSITE the dragged one stays exactly where it
+-- was when the gesture started. One arithmetic for all four grips: the fixed
+-- corner supplies the two coordinates the size is measured away from.
+function View.ResizeAnchored(w, h, corner, anchor)
+    local f = View.chassis
+    local P = _G.UIParent
+    if not (f and type(P) == "table") then return false end
+    corner = tostring(corner or "BOTTOMRIGHT"):upper()
+    local fixed = OPPOSITE_CORNER[corner] or "TOPLEFT"
+    w, h = View.ClampChassisSize(w, h)
+    local ax, ay = anchor and anchor[1], anchor and anchor[2]
+    if ax == nil or ay == nil then
+        ax, ay = View.CornerPoint(fixed)
+        if ax == nil then return false end
+    end
+    local left   = fixed:find("RIGHT") and (ax - w) or ax
+    local bottom = fixed:find("TOP") and (ay - h) or ay
+    call(f, "SetSize", w, h)
+    call(f, "ClearAllPoints")
+    call(f, "SetPoint", "BOTTOMLEFT", P, "BOTTOMLEFT", left, bottom)
+    View.Reflow()
     return true
 end
 
 -- SNAP ON THE RESIZE EDGES, and it is CHEAP because skin's snap layer was built
 -- frame-agnostic and PURE: SnapLines answers every boundary in screen pixels
 -- and SnapDelta is arithmetic over two edges. The only thing that differs from
--- a move is WHICH edges are asked — a BOTTOMRIGHT grip moves the right and the
--- bottom, so those two are the only ones offered a line. No fork of the
--- arithmetic, no second threshold, no second set of guides.
+-- a move is WHICH edges are asked — and now that is a function of the corner
+-- being dragged rather than a hardcoded pair. No fork of the arithmetic, no
+-- second threshold, no second set of guides.
 function View.SnapResize()
     local S = ns.Skin
     local f = View.chassis
@@ -1913,35 +2139,25 @@ function View.SnapResize()
     if l == nil or b == nil or fs == nil or fs <= 0 then return false end
     local okL, vx, hy = pcall(S.SnapLines, f)
     if not okL or not vx then return false end
-    local right, bottom = (l + w) * fs, b * fs
-    local dx = select(1, S.SnapDelta(right, right, vx, S.SNAP_THRESHOLD))
-    local dy = select(1, S.SnapDelta(bottom, bottom, hy, S.SNAP_THRESHOLD))
+    local corner = View._sizeCorner or "BOTTOMRIGHT"
+    local movingRight  = corner:find("RIGHT") ~= nil
+    local movingTop    = corner:find("TOP") ~= nil
+    local edgeX = (movingRight and (l + w) or l) * fs
+    local edgeY = (movingTop and (b + h) or b) * fs
+    local dx = select(1, S.SnapDelta(edgeX, edgeX, vx, S.SNAP_THRESHOLD))
+    local dy = select(1, S.SnapDelta(edgeY, edgeY, hy, S.SNAP_THRESHOLD))
     if not dx and not dy then return false end
-    local nw = w + (dx or 0) / fs
-    local nb = b + (dy or 0) / fs
-    local nh = h + (b - nb)
-    View.ResizeTo(nw, nh, l, nb)
+    -- A moved edge grows the box when it moves AWAY from the fixed corner.
+    local nw = w + (movingRight and 1 or -1) * (dx or 0) / fs
+    local nh = h + (movingTop and 1 or -1) * (dy or 0) / fs
+    View.ResizeAnchored(nw, nh, corner, View._sizeAnchor)
     return true
 end
 
--- Place AND size the chassis in one act, clamped. The corner is written as the
--- canonical BOTTOMLEFT point so the position path downstream means exactly what
--- it always meant.
-function View.ResizeTo(w, h, left, bottom)
-    local f = View.chassis
-    local P = _G.UIParent
-    if not (f and type(P) == "table") then return false end
-    w, h = View.ClampChassisSize(w, h)
-    local l = tonumber(left) or widgetNum(f, "GetLeft")
-    local b = tonumber(bottom) or widgetNum(f, "GetBottom")
-    call(f, "SetSize", w, h)
-    if l ~= nil and b ~= nil then
-        call(f, "ClearAllPoints")
-        call(f, "SetPoint", "BOTTOMLEFT", P, "BOTTOMLEFT", l, b)
-    end
-    View.Reflow()
-    return true
-end
+-- (View.ResizeTo retired 2026-08-11: it placed the box from an explicit
+-- BOTTOMLEFT, which is the BOTTOMRIGHT grip's case of View.ResizeAnchored
+-- above. Two functions for one act is how the two tab-run versions drifted, so
+-- the general one is the only one.)
 
 -- THE DROP. One commit for both facts the gesture changed: the engine host
 -- window learns the new size AND the new corner, the client's own save verb
@@ -1986,11 +2202,12 @@ function View.OnResizeStop()
     -- CLAMP AT THE DROP, not through SetResizeBounds: the client applies bounds
     -- inside its own sizing loop, and this box is sized by paths we drive too.
     -- A floor that only lives in the client's loop is a floor that sometimes
-    -- does not run.
-    local l = widgetNum(f, "GetLeft")
-    local b = widgetNum(f, "GetBottom")
-    View.ResizeTo(widgetNum(f, "GetWidth"), widgetNum(f, "GetHeight"), l, b)
+    -- does not run. The clamp is applied AROUND THE FIXED CORNER, so a drop
+    -- that lands on the minimum keeps the corner the player was not dragging.
+    View.ResizeAnchored(widgetNum(f, "GetWidth"), widgetNum(f, "GetHeight"),
+        View._sizeCorner, View._sizeAnchor)
     View.SnapResize()
+    View._sizeCorner, View._sizeAnchor = nil, nil
     local S = ns.Skin
     if S and type(S.EndSnapGuides) == "function" then pcall(S.EndSnapGuides) end
     View.resizes = View.resizes + 1
@@ -2065,6 +2282,66 @@ function View.Refresh()
     if not View.active then return false end
     View.HideEngine()
     View.Layout()
+    return true
+end
+
+----------------------------------------------------------------------
+-- ============ THE LIVE-APPLY SEAMS (2026-08-11) ============
+--
+-- WHY THEY EXIST (owner: "the options dont seem to actually do anything. when
+-- i move any of the sliders or click the different options nothing changes").
+-- The settings pane's writes always landed in the store; what was missing was
+-- the second half — nothing re-read the store, so the answer only reached
+-- pixels at the next /reload. These are this module's PUBLIC re-apply beats,
+-- one per KIND of change, and options.lua's binding table names which one each
+-- control dispatches (a binding that names none fails the bind-check).
+--
+-- Every one of them is idempotent, guarded (an inactive view has nothing to
+-- re-apply and says so rather than erroring), and preserves the message
+-- buffers: a type-size change RESTYLES the surfaces, it does not rebuild them.
+----------------------------------------------------------------------
+
+-- Typography: the feed's own font and the rhythm computed from it, re-applied
+-- to every surface IN PLACE, then the layout (the size floor moves with the
+-- type size, so the box may have to grow).
+function View.ApplyLook()
+    if not View.active then return false end
+    for _, id in ipairs(View.ids) do View.ApplyFont(id) end
+    View.Layout()
+    return true
+end
+
+-- Where the tabs live: strip <-> rail migration. ONE path, and it is the same
+-- one login uses — the run and the surface it runs on are decided together, the
+-- feed re-insets for the rail's width, and the chassis re-clamps because the
+-- furniture changed size.
+function View.ApplyPlacement()
+    if not View.active then return false end
+    View.ids = View.OwnedIds()
+    View.Layout()
+    return true
+end
+
+-- Labels, ink, per-tab colour, tab type size, unread pips.
+function View.ApplyTabs()
+    if not View.active then return false end
+    View.LayoutTabs()
+    return true
+end
+
+-- The furniture that is not the layout: the copy button and the grips (whose
+-- visibility is the lock's).
+function View.ApplyFurniture()
+    if not View.active then return false end
+    View.EnsureCopyButton()
+    View.LayoutGrips()
+    return true
+end
+
+-- The hosted entry bar, re-anchored (the edit-box position/persistence gates).
+function View.ApplyEditBox()
+    if not View.active then return false end
+    View.LayoutEditBox()
     return true
 end
 
@@ -2214,8 +2491,14 @@ ns.RegisterDebugCommand("view", "the owned view: chassis, tabs, mirror, engine",
         local ch = widgetNum(View.chassis, "GetHeight") or 0
         local mnW, mnH = View.MinChassisSize()
         local mxW, mxH = View.MaxChassisSize()
-        ns:Print(("  size: %.0fx%.0f (min %.0fx%.0f, max %.0fx%.0f), grip %d, %d settle pass(es)")
-            :format(cw, ch, mnW, mnH, mxW, mxH, GRIP_SIZE, View.settles))
+        local nGrips = 0
+        for _ in pairs(View.grips or {}) do nGrips = nGrips + 1 end
+        ns:Print(("  size: %.0fx%.0f (min %.0fx%.0f, max %.0fx%.0f), %d settle pass(es)")
+            :format(cw, ch, mnW, mnH, mxW, mxH, View.settles))
+        ns:Print(("  lock: %s | %d corner grip(s) of %d units, %s")
+            :format(View.Locked() and "LOCKED (no drag, no resize)" or "unlocked",
+                    nGrips, GRIP_SIZE,
+                    View.Locked() and "hidden" or "shown while unlocked"))
         local held, sats = 0, 0
         for frame, rec in pairs(View._engineHidden) do
             held = held + 1
@@ -2880,6 +3163,123 @@ local function testLive(fails, verbose)
     ck(ns.Reconcile.PositionVerdict():find("resize") ~= nil
        or ns.Reconcile.lastSizeChange ~= nil,
         "phase 16: …and a size change is on the verdict ledger")
+
+    -- ── Phase 17: THE LOCK, and the FOUR CORNERS. ───────────────────────
+    -- The owner asked for both in one breath ("i need a way to lock / unlock
+    -- the positioning and also when unlocked i should be able to click and drag
+    -- a corner to re-size it"), and they are one feature: the lock decides
+    -- whether the gestures exist, and the grips are what the unlocked state
+    -- looks like.
+    local Cfg = ns.Config
+    ck(Cfg.Locked() == false, "phase 17: the shipped default is UNLOCKED (nothing was taken away)")
+    ck(#View.GRIP_CORNERS == 4, "phase 17: there are four corner grips, not one")
+    View.LayoutGrips()
+    local gripsUp = 0
+    for _, corner in ipairs(View.GRIP_CORNERS) do
+        local g = View.grips[corner]
+        if g and g._shown and (g:GetAlpha() or 0) > 0 then gripsUp = gripsUp + 1 end
+    end
+    ck(gripsUp == 4, "phase 17: RED CONTROL — all four are VISIBLE while unlocked "
+        .. "(the hover-only grip is what the owner could not find)")
+
+    -- Each grip sits in its own corner of the chassis.
+    do
+        local cl, cb, cw2, ch3 = rect(View.chassis)
+        local placed = true
+        for _, corner in ipairs(View.GRIP_CORNERS) do
+            local gl, gb, gw, gh = rect(View.grips[corner])
+            if gl == nil then placed = false
+            else
+                local wantX = corner:find("RIGHT") and (cl + cw2 - 1 - gw) or (cl + 1)
+                local wantY = corner:find("TOP") and (cb + ch3 - 1 - gh) or (cb + 1)
+                if math.abs(gl - wantX) > 1e-6 or math.abs(gb - wantY) > 1e-6 then placed = false end
+            end
+        end
+        ck(placed, "phase 17: …each in its OWN corner, inside the 1px border")
+    end
+
+    -- FOUR-CORNER RESIZE: the opposite corner is pinned, per corner.
+    for _, corner in ipairs(View.GRIP_CORNERS) do
+        local fixed = View.OPPOSITE_CORNER[corner]
+        local fx, fy = View.CornerPoint(fixed)
+        ck(View.OnResizeStart(corner) == true, "phase 17 [" .. corner .. "]: the grip starts a resize")
+        local l0, b0 = View.chassis:GetLeft(), View.chassis:GetBottom()
+        local w0, h0 = View.chassis:GetWidth(), View.chassis:GetHeight()
+        -- Drag the grabbed corner 60 units further out along both axes.
+        local tx = corner:find("RIGHT") and (l0 + w0 + 60) or (l0 - 60)
+        local ty = corner:find("TOP") and (b0 + h0 + 60) or (b0 - 60)
+        Sim.SizeTo(View.chassis, tx, ty)
+        View.OnResizeStop()
+        local nx, ny = View.CornerPoint(fixed)
+        ck(nx ~= nil and math.abs(nx - fx) < 1e-6 and math.abs(ny - fy) < 1e-6,
+            "phase 17 [" .. corner .. "]: RED CONTROL — the OPPOSITE corner did not move")
+        ck(View.chassis:GetWidth() > 0 and View.chassis:GetHeight() > 0,
+            "phase 17 [" .. corner .. "]: …and the box still has a real size")
+        local rl, rb2 = rect(View.strip)
+        local fl3, fb3, fw3, fh3 = rect(View.frames[View.activeId])
+        ck(fb3 ~= nil and rb2 ~= nil and fb3 + fh3 <= rb2 + 1e-6,
+            "phase 17 [" .. corner .. "]: …and the feed still clears the strip")
+    end
+
+    -- LOCKED: every gesture is inert, nothing is captured, the grips are gone.
+    local posBefore = { View.chassis:GetLeft(), View.chassis:GetBottom() }
+    local sizeBefore = { View.chassis:GetWidth(), View.chassis:GetHeight() }
+    local ndimBefore = ns.Config.CaptureNormalizedDim(View.HostId())
+    local movesBefore, resizesBefore = View.moves, View.resizes
+    local commitsBefore = ns.Skin.moveCommits
+    ns.Skin.SetLocked(true)
+    ck(View.Locked() == true, "phase 17: the view reads the lock from the SYNCED config")
+    local anyGrip = false
+    for _, corner in ipairs(View.GRIP_CORNERS) do
+        local g = View.grips[corner]
+        if g and g._shown and (g:GetAlpha() or 0) > 0 then anyGrip = true end
+    end
+    ck(not anyGrip, "phase 17: LOCKED — every corner grip is gone")
+    ck(View.DragAllowed("strip") == false, "phase 17: LOCKED — a strip drag is refused")
+    ck(View.OnDragStart(View.chassis, "strip") == false, "phase 17: …and starts nothing")
+    Sim.altDown = true
+    ck(View.DragAllowed("frame") == false, "phase 17: LOCKED — an ALT-drag is refused too")
+    Sim.altDown = false
+    ck(View.OnResizeStart("BOTTOMRIGHT") == false, "phase 17: LOCKED — a resize is refused")
+    ck(View._sizing == nil, "phase 17: …and no sizing is in flight")
+    ck(View.chassis:GetLeft() == posBefore[1] and View.chassis:GetBottom() == posBefore[2],
+        "phase 17: RED CONTROL — the box did not move a unit")
+    ck(View.chassis:GetWidth() == sizeBefore[1] and View.chassis:GetHeight() == sizeBefore[2],
+        "phase 17: …nor change size")
+    ck(View.moves == movesBefore and View.resizes == resizesBefore,
+        "phase 17: …and neither gesture was counted")
+    ck(ns.Skin.moveCommits == commitsBefore,
+        "phase 17: RED CONTROL — NO capture was emitted (nothing to sync, because nothing happened)")
+    ck(ns.Config.NearDim(ns.Config.CaptureNormalizedDim(View.HostId()), ndimBefore),
+        "phase 17: …and ndim is exactly what it was")
+
+    -- THE LOCK RIDES THE MESH (the aliases lesson: an unlisted field is
+    -- account-local forever).
+    do
+        ns.Config.Bump()
+        local snapL = ns.Config.Snapshot()
+        ck(snapL and snapL.cfg and type(snapL.cfg.skin) == "table" and snapL.cfg.skin.locked == true,
+            "phase 17: RED CONTROL — the lock rides the WIRE payload beside tabPlacement")
+        local cands = ns.Config.Candidates()
+        local inCand = false
+        for _, cand in ipairs(cands) do
+            if type(cand.cfg) == "table" and type(cand.cfg.skin) == "table"
+               and cand.cfg.skin.locked == true then inCand = true end
+        end
+        ck(inCand, "phase 17: …and the LWW candidate carries it (site 2 of 3)")
+    end
+
+    -- UNLOCK restores both gestures.
+    ns.Skin.SetLocked(false)
+    ck(View.DragAllowed("strip") == true, "phase 17: unlocking gives the drag back")
+    local backUp = 0
+    for _, corner in ipairs(View.GRIP_CORNERS) do
+        local g = View.grips[corner]
+        if g and g._shown and (g:GetAlpha() or 0) > 0 then backUp = backUp + 1 end
+    end
+    ck(backUp == 4, "phase 17: …and all four grips with it")
+    ck(View.OnResizeStart("TOPLEFT") == true, "phase 17: …and a resize starts again")
+    View.OnResizeStop()
 
     -- Put the world back the way phase 13 found it.
     for id = 3, 5 do

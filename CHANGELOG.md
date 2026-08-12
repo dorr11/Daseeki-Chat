@@ -99,9 +99,10 @@ laid out, and one thing missing. All four are fixed.
   of the message feed and clipping the top line. The whole family is now put
   away, held down against every beat the game re-asserts them on, and restored
   exactly as it was found when the window is switched off.
-- **You can resize it.** Hover the box and a small handle appears in its
-  bottom-right corner; drag it. There is nothing to unlock — the same answer
-  moving has always had. It will not shrink below a usable box (the tab strip,
+- **You can resize it.** (Superseded below: this shipped as one handle in the
+  bottom-right that only appeared on hover, which was too easy to miss — there
+  are four, always visible while unlocked, and a lock to turn them off.) It
+  will not shrink below a usable box (the tab strip,
   three lines of chat and the typing bar) or grow past your screen, the tab
   strip, feed, typing bar and side rail all reflow as you drag, and the drop
   snaps to screen edges and centre lines just like a move does. **The size is
@@ -111,12 +112,86 @@ laid out, and one thing missing. All four are fixed.
   restores the position. `/dchat debug reconcile` now reports a resize in the
   same one-line verdict it reports a move in.
 
-**Moving and resizing, in one paragraph:** drag the tab strip — anywhere on it,
-including past the last tab — to move the box, or hold ALT and drag anywhere on
-it. Drop it near a screen edge, a screen centre line or another edge and it
-snaps flush. To resize, hover the box, then drag the handle in the bottom-right
-corner. Both gestures save immediately and sync to your other characters. There
-is no lock, no unlock and no edit mode.
+### The settings actually change things now
+
+Every control in the settings pane wrote its setting correctly and always had —
+what was missing was the other half: **nothing re-read it**, so most of the pane
+only took effect after a `/reload`. Moving the message-size slider changed a
+number in your configuration and left the window exactly as it was. That is
+fixed at the mechanism, not control by control:
+
+- **Every setting now names the thing it re-draws**, and the addon refuses to
+  ship a control that names nothing. Move a slider and the chat text restyles
+  under your cursor — with your scrollback intact, because it is a restyle and
+  not a rebuild. Tick a box and the button, pip or bar appears or disappears in
+  the same instant. Pick a tab colour and the tab is wearing it before you let
+  go of the menu.
+- **A handful of settings genuinely have nothing standing to re-draw** — how
+  many lines are kept for next session is read when the session ends, and
+  whether a web address is drawn in brackets is decided as each new line
+  arrives. Those now say so in writing instead of looking broken, and the tests
+  drive the *next* line to prove they really take effect.
+- **Settings you change here sync exactly like changes you make in-game.**
+  Choosing a tab position or a tab colour in the pane bumps your shared chat
+  configuration and travels to your other characters the same way dragging the
+  box does.
+
+### Tabs on the left or right no longer break the window
+
+Setting the tab position to Left (or Right) left the window in a mixed state:
+one tab still on the top strip while the rest were drawn down the side **over
+the message text**, with an unread counter floating loose and the feed never
+making room for the side rail.
+
+- **The tab strip and the tabs on it are now decided together, always.** The old
+  code could re-run the *row of tabs* on an ordinary beat — a colour change, a
+  tab click — while the *strip they sit on* was still in its old shape, so the
+  new side rail was drawn straight over the message area. Moving the tabs now
+  moves the strip, re-insets the message feed for the rail's width, and
+  re-checks the box's minimum size, as one act. This also covers the case where
+  *another character* changed the tab position: your box migrates correctly the
+  next time anything touches it.
+- **The box can no longer be too small for its own tabs.** A side rail of five
+  tabs needs a certain height whatever the message feed wants; below that the
+  last tabs used to run off the rail and across the typing bar. The minimum size
+  now accounts for the tabs themselves, on whichever edge they are on.
+- **The unread counters ride the side rail properly**, right-aligned in their
+  row with the tab's name trimmed to leave them room, instead of colliding.
+- Behind this: the tab layout was two near-identical copies of the same
+  arithmetic (one for the top strip, one for the side rail) that had already
+  drifted apart once. It is one routine now, and the tests are a **matrix** —
+  every tab position, with and without unread counters, with one to five tabs,
+  at the smallest, default and largest sizes, and switching between every pair
+  of positions in both directions — asserting that no tab overlaps another, no
+  tab is left on the wrong surface, and the message feed, tab strip and typing
+  bar never overlap. That matrix found the remaining faults; hand-picked cases
+  had missed them.
+
+### Lock and unlock, and four resize corners
+
+- **`/dchat lock` and `/dchat unlock`**, plus a *Lock the chat box in place*
+  checkbox under **Windows**. Locked, the box is a rock: dragging does nothing
+  (ALT-drag included), resizing does nothing, no snap guides appear and the
+  corner handles are gone, so a stray drag can never shift your chat again.
+  `/dchat` tells you which state you are in along with the command list.
+- **The lock travels with your configuration**, beside the position and size it
+  governs — lock it once on any character and every character's box is locked.
+  It ships **unlocked**, so nothing you have now changes until you say so.
+- **All four corners resize now, and you can see them.** The old single handle
+  in the bottom-right only appeared while the pointer was on the box, which is
+  why it had to be asked about; there are now four, one per corner, quietly
+  visible the whole time the box is unlocked and brighter under the pointer.
+  Drag any of them and the **opposite corner stays exactly where it is**. All
+  the old rules still apply — the minimum and maximum sizes, the reflow while
+  you drag, the snap on the drop, and the size still syncs to your other
+  characters.
+
+**Moving and resizing, in one paragraph:** while the box is unlocked, drag the
+tab strip — anywhere on it, including past the last tab — to move it, or hold
+ALT and drag anywhere on it. Drop it near a screen edge, a screen centre line or
+another edge and it snaps flush. To resize, drag any of the four corner handles;
+the opposite corner stays put. Both gestures save immediately and sync to your
+other characters. `/dchat lock` freezes all of it; `/dchat unlock` gives it back.
 
 Foundation, and the work the drawn window is built on top of:
 

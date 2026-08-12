@@ -715,23 +715,34 @@ function Sim.DragTo(frame, left, bottom)
     return l, b
 end
 
--- Drag the BOTTOMRIGHT sizing grip so the frame's right edge lands at `right`
--- and its bottom edge at `bottom` (both in the frame's own units). Only works
--- while the frame is actually sizing (StartSizing), and — UNKIND, on purpose —
--- NOTHING is clamped here: the sim will happily size a frame to two units or
--- past the screen, so a min/max that lives only in SetResizeBounds is a min/max
--- that never ran. The TOP and LEFT edges are held, which is what a BOTTOMRIGHT
--- grip means. Returns the landed width, height.
-function Sim.SizeTo(frame, right, bottom)
+-- Drag the sizing grip so the GRABBED CORNER lands at (x, y) in the frame's own
+-- units. The corner is whichever one StartSizing was given, and the OPPOSITE
+-- corner is held — which is what a corner grip means on the live client.
+--
+-- WHY IT IS NO LONGER BOTTOMRIGHT-ONLY (2026-08-11): the sim modeled exactly
+-- one grip because the addon shipped exactly one, so "the opposite corner stays
+-- put" was not a question any test could ask. The owner asked for four corners;
+-- an unaskable question is a kind client, so the model grew the other three.
+--
+-- UNKIND, on purpose: NOTHING is clamped here. The sim will happily size a
+-- frame to two units or past the screen, so a min/max that lives only in
+-- SetResizeBounds is a min/max that never ran. Returns the landed width, height.
+function Sim.SizeTo(frame, x, y)
     if type(frame) ~= "table" or not frame._sizing then return nil end
     local l, b, w, h = Sim.ResolveRect(frame)
     if l == nil then l, b, w, h = frame._left, frame._bottom, frame._w or 0, frame._h or 0 end
     if l == nil then return nil end
-    local top = b + (h or 0)
-    local nw = (tonumber(right) or l) - l
-    local nh = top - (tonumber(bottom) or b)
-    frame._bottom = top - nh
-    frame._left   = l
+    w, h = w or 0, h or 0
+    local corner = tostring(frame._sizing):upper()
+    local right, top = l + w, b + h
+    local nx = tonumber(x) or (corner:find("RIGHT") and right or l)
+    local ny = tonumber(y) or (corner:find("TOP") and top or b)
+    local nl, nb, nw, nh
+    if corner:find("RIGHT") then nl, nw = l, nx - l
+    else nl, nw = nx, right - nx end
+    if corner:find("TOP") then nb, nh = b, ny - b
+    else nb, nh = ny, top - ny end
+    frame._left, frame._bottom = nl, nb
     frame:SetSize(nw, nh)
     return nw, nh
 end
