@@ -8,6 +8,63 @@ character — including a brand-new one — reconciles to automatically at login
 
 This entry accumulates until 1.0.0 ships.
 
+### The settings menu, made readable
+
+The settings page worked and looked terrible. Everything below is what you asked
+for after the first proper look at it.
+
+- **Every control has a label again.** The dropdowns in General rendered naked —
+  a font picker, a size picker and a theme picker with values in them and no
+  caption anywhere. So did the four selector buttons in the Tabs section, which
+  showed as four empty boxes. Three separate causes, all fixed: a caption with
+  no width of its own was being thrown away before it was ever drawn, a caption
+  was being written to the wrong object entirely, and the buttons were being
+  relabelled through a call that quietly paints nothing. There is now exactly
+  one way to put text on a control in this addon, and the test suite fails if
+  any control on the page ends up without a caption a player can read.
+- **The channel list tells you which channel you are editing.** Each row now
+  carries its number and its name, inked in that channel's own colour — so the
+  name doubles as a live preview of what the colour does — beside its drag
+  handle, its colour swatch and its name box. And there is one row per channel:
+  the seven empty rows that sat below the real ones are gone.
+- **Renaming happens on the channel's own row.** The orphaned "Rename a channel
+  you are not in right now" field at the bottom is deleted. The name box on each
+  row shows the channel's current name (greyed when it is the game's own), and
+  typing the game's name back is how you undo a rename. Names you set for
+  channels you are not currently in still work exactly as they did, and appear
+  as a quiet "not joined" row.
+- **A form you can read.** The page is built from bordered, titled boxes with
+  two columns inside them instead of one long vertical column of controls, and
+  the explanatory paragraph that sat under nearly every single control is gone —
+  one short line per box, and the detail moved into tooltips.
+- **Fewer options on screen.** Nothing was taken away, but everything you set
+  once and never touch again — the timestamp fine print, the game's-own-window
+  settings, the per-tab notification toggles — is folded into an **Advanced**
+  section per group, closed by default, that opens with one press.
+- **"Which messages come here" looks like the game's own version.** Five titled
+  boxes — Player Messages, Combat, PvP, Creature Messages, Other — each with two
+  columns of checkboxes inside, in our colours.
+
+### Right-click a tab
+
+Right-clicking any tab in the chat window opens a small menu in the Daseeki look
+(ours, not the game's dropdown): lock or unlock the box, open the settings, add
+a tab, rename this tab, remove this tab (it asks twice, and refuses on your main
+tab) and move the tab strip to the top, left or right. It closes when you click
+away or press Escape. Every entry does exactly what its equivalent in the
+settings page does — the same one path into your shared configuration, so the
+menu and the page can never disagree.
+
+### The resize corners you can actually see
+
+The four corner grips were there the whole time and were, in practice,
+invisible: each was a pair of single-pixel lines in a colour a shade away from
+the panel they were drawn on, lying directly against the window's own border.
+They are now proper corner brackets — thicker, in the accent colour, held off
+the border so they read as handles rather than as part of the frame — with a
+larger click target, and they flash once when you unlock the box so you know
+they are there. They are still gone entirely while the box is locked.
+
 ### Daseeki draws its own chat window
 
 **This is the headline.** Chat no longer re-dresses the game's chat window — it

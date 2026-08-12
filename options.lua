@@ -749,6 +749,446 @@ end
 Options._stepGet, Options._stepSet = stepGet, stepSet
 
 ----------------------------------------------------------------------
+-- ============ THE FORM LANGUAGE (owner UAT, 2026-08-12) ============
+--
+-- THE FOUR THINGS THE OWNER SAID, and the one mechanism each of them needs:
+--
+--  "there are no labels on the drop downs"   -> Form.LabelCell / Form.SetCaption
+--  "all options are vertical in a single
+--   column making it hard to read"           -> Form.Group + Form.Pair
+--  "there are just way too many options"     -> Form.Advanced (the fold)
+--  "'which messages come here' should be
+--   formatted like the [client's config]"    -> Form.Group + Form.Checks
+--
+-- ── WHY LABELS WERE MISSING, exactly ──────────────────────────────────────
+-- Core's UI.MakeLabel returns a FRAME carrying no `uiWidth` and never sized.
+-- Core's row arranger then computes `ww = w.uiWidth or w:GetWidth()` — nil or
+-- zero — and calls `w:SetWidth(ww)`. A zero-width frame inside the pane's
+-- clipping ScrollChild is culled together with its FontString. Core's own file
+-- names this defect class three separate times (the checkbox self-size fix,
+-- the segmented self-size fix, the stackBlocks safety net) and the ROW-ITEM net
+-- it added patches HEIGHT only — so the width hole is still open, and every
+-- `row:Label("Font")` in the old pane fell straight through it.
+--
+-- We do not fix Core in this round. We stop handing it an unsized label:
+-- Form.LabelCell gives every caption a real width of its own, which is both the
+-- fix and the thing that makes the label column LINE UP — one mechanism, two
+-- wins. The corestub now runs Core's own arranger, so a caption that would be
+-- culled in game is culled in the harness.
+--
+-- ── WHY RE-CAPTIONING SILENTLY DID NOTHING ────────────────────────────────
+-- Two more shapes, both of them "the call succeeded and the pixel did not
+-- move":
+--   * a Core Label is a FRAME. It has no SetText. options.lua's channel-row
+--     refresh called `ui.label:SetText(name)` behind a type guard, the guard
+--     was false in game, and the channel names were never written at all.
+--   * a Core Button HAS SetText — but MakeButton never calls SetFontString, so
+--     the text goes to a fontstring that does not exist. options_tabs.lua's
+--     sub-tab nav tried that first, "succeeded", and never reached the
+--     `elseif btn._label` branch. Four empty boxes, forever.
+-- Form.SetCaption is the ONE re-caption path in this addon: it writes the
+-- FontString the kit actually draws (`widget._label`), never the frame, never
+-- the dead Button method, and it REFUSES (returns false) on a widget that has
+-- no drawn caption to write — so "I relabelled it" can never again mean "I
+-- called something that returned".
+--
+-- ── LAYOUT IS PURE ────────────────────────────────────────────────────────
+-- Everything that DECIDES a column or a height below is a pure function of
+-- numbers, driven directly by the suite at the hub's real width range (876 at
+-- the narrowest window the hub can be dragged to, 880 at any larger one — see
+-- Daseeki-Core hub.lua). The frame glue only places what the pure half decided.
+----------------------------------------------------------------------
+
+local Form = {}
+Options.Form = Form
+
+Form.LABEL_W       = 150   -- the label column; every control in a group lines up
+Form.ITEM_GAP      = 8     -- Core's own ITEM_GAP (daseekiui.lua)
+Form.ROW_GAP       = 10    -- Core's own rowGap token
+Form.ROW_H         = 26    -- a control row's height budget (24 + a unit of air)
+Form.CHECK_H       = 24    -- one checklist row
+Form.HINT_H        = 22    -- one wrapped hint line
+Form.CARD_PAD      = 10    -- MakeEditorCard's inner padding, per side
+Form.CARD_TITLE_H  = 22    -- …and its title band
+Form.CARD_SLACK    = 8     -- one row of headroom, so a font step never clips
+Form.MIN_CONTENT_W = 876   -- the hub's narrowest content width (hub.lua MIN_W)
+Form.MAX_CONTENT_W = 880   -- …and its widest (theme.lua contentMaxW)
+
+-- PURE. The width a full-width group box gives the rows inside it.
+function Form.GroupInner(contentW)
+    return (tonumber(contentW) or Form.MIN_CONTENT_W) - 2 * Form.CARD_PAD
+end
+
+-- PURE. The laid width of one [label][control] cell.
+function Form.CellWidth(controlW, labelW)
+    return (tonumber(labelW) or Form.LABEL_W) + Form.ITEM_GAP + (tonumber(controlW) or 0)
+end
+
+-- PURE. Do two cells fit side by side in `avail`? The gap BETWEEN the columns
+-- is a full row gap, not an item gap, so the two columns read as two columns.
+Form.COL_GAP = 24
+function Form.FitsTwoUp(wA, wB, avail)
+    if not (wA and wB and avail) then return false end
+    return (wA + Form.COL_GAP + wB) <= avail
+end
+
+-- THE SECOND COLUMN STARTS AT THE SAME X ON EVERY ROW, or it is not a column.
+-- Core's row arranger simply lays items left to right at their own widths, so a
+-- row holding a 200-unit dropdown and a row holding a 120-unit one would put
+-- their second captions 80 units apart — a ragged edge that reads as a mistake.
+-- The FIRST COLUMN is therefore a fixed track, and the second caption absorbs
+-- the difference into its own width. One number, and the columns line up.
+Form.COL1_W = 380       -- caption track + the widest control the pane offers
+
+-- PURE. How wide the second column's caption must be so that column two always
+-- begins at COL1_W + COL_GAP, whatever the first column's control is.
+function Form.SecondLabelW(aControlW, aLabelW, bLabelW)
+    local used = Form.CellWidth(aControlW, aLabelW) + Form.ITEM_GAP
+    local want = Form.COL1_W + Form.COL_GAP
+    return (bLabelW or Form.LABEL_W) + math.max(0, want - used)
+end
+
+-- PURE. The x offset each cell of a planned row starts at. Returns the offsets
+-- and the total laid width, so "no overlap" and "no overflow" are both
+-- answerable from one call.
+function Form.RowOffsets(widths, avail)
+    local out, x = {}, 0
+    for i, w in ipairs(widths or {}) do
+        out[i] = x
+        x = x + w + Form.COL_GAP
+    end
+    return out, math.max(0, x - Form.COL_GAP)
+end
+
+-- PURE. The whole two-column plan: given every cell's laid width and the width
+-- available, which cells share a row. Never puts two cells on a row they do not
+-- both fit on, never drops a cell, never repeats one.
+function Form.PlanRows(widths, avail)
+    local rows, i = {}, 1
+    widths = widths or {}
+    avail = tonumber(avail) or Form.MIN_CONTENT_W
+    while i <= #widths do
+        local a, b = widths[i], widths[i + 1]
+        if b and Form.FitsTwoUp(a, b, avail) then
+            rows[#rows + 1] = { i, i + 1 }
+            i = i + 2
+        else
+            rows[#rows + 1] = { i }
+            i = i + 1
+        end
+    end
+    return rows
+end
+
+-- PURE. How tall a group box has to be to hold `units` of content without its
+-- inner pane needing to scroll (MakeEditorCard's inner pane is noBar: content
+-- taller than the card is content nobody can reach, which is the very defect
+-- class this round exists to close).
+function Form.BoxHeight(units, hasTitle)
+    local h = Form.CARD_PAD * 2 + (tonumber(units) or 0) + Form.CARD_SLACK
+    if hasTitle ~= false then h = h + Form.CARD_TITLE_H end
+    return h
+end
+
+-- PURE. The height a checklist of n items costs at `cols` columns.
+function Form.ChecklistHeight(n, cols)
+    cols = math.max(1, tonumber(cols) or 2)
+    return math.ceil(math.max(0, tonumber(n) or 0) / cols) * Form.CHECK_H + Form.ROW_GAP
+end
+
+-- PURE. Core's own checklist rule (AddChecklist COLLAPSE_W = 460): two columns
+-- while the pane is wide enough, one when it is not. Stated here so the height
+-- budget above and the kit's own placement can never disagree.
+Form.CHECKLIST_COLLAPSE_W = 460
+function Form.ChecklistColumns(avail)
+    return ((tonumber(avail) or 0) >= Form.CHECKLIST_COLLAPSE_W) and 2 or 1
+end
+
+----------------------------------------------------------------------
+-- THE GLUE. Every function below only PLACES what the pure half decided.
+----------------------------------------------------------------------
+
+local function widgetCall(w, method, ...)
+    if type(w) ~= "table" then return nil end
+    local fn = w[method]
+    if type(fn) ~= "function" then return nil end
+    local ok, a = pcall(fn, w, ...)
+    if not ok then return nil end
+    return a == nil and true or a
+end
+
+-- Give a Core Label frame the width Core forgot to give it. THE fix for the
+-- blank-caption class, and the reason the label column lines up.
+function Form.SizeLabel(w, width)
+    if type(w) ~= "table" then return nil end
+    width = tonumber(width) or Form.LABEL_W
+    w.uiWidth = width
+    widgetCall(w, "SetWidth", width)
+    local fs = w._label
+    if fs then
+        widgetCall(fs, "SetWidth", width)
+        widgetCall(fs, "SetJustifyH", "LEFT")
+        widgetCall(fs, "SetWordWrap", false)
+    end
+    return w
+end
+
+-- An inline caption on the SAME ROW as its control (the owner's ask), sized so
+-- the kit really draws it.
+function Form.LabelCell(row, text, width)
+    if type(row) ~= "table" or type(row.Label) ~= "function" then return nil end
+    local w = row:Label(text or "")
+    return Form.SizeLabel(w, width)
+end
+
+-- THE ONE RE-CAPTION PATH. Returns true only when a caption a player can read
+-- was really written.
+function Form.SetCaption(widget, text)
+    if type(widget) ~= "table" then return false end
+    text = tostring(text or "")
+    local fs = widget._label
+    if not (fs and type(fs.SetText) == "function") then return false end
+    pcall(fs.SetText, fs, text)
+    -- Keep the recorded opts in step so a headless test finds the control by
+    -- what it now SAYS. (In game these keys do not exist; the write is a no-op
+    -- on a table nothing reads.)
+    local o = widget._opts
+    if type(o) == "table" then
+        if o.text ~= nil then o.text = text end
+        if o.label ~= nil then o.label = text end
+    end
+    return true
+end
+
+-- Tint a caption (the channel row's name IS the colour preview).
+function Form.TintCaption(widget, r, g, b)
+    local fs = type(widget) == "table" and widget._label or nil
+    if not (fs and type(fs.SetTextColor) == "function") then return false end
+    if r == nil then
+        local UI = _G.DaseekiUI
+        if UI and UI.Color then r, g, b = UI.Color("text") else r, g, b = 1, 1, 1 end
+    end
+    pcall(fs.SetTextColor, fs, r, g, b, 1)
+    return true
+end
+
+-- Show or hide a whole pooled row (the ghost-row fix: a row with no channel
+-- behind it is not drawn at all).
+function Form.ShowRow(items, on)
+    for _, w in ipairs(items or {}) do
+        if type(w) == "table" then widgetCall(w, on and "Show" or "Hide") end
+    end
+    return on and true or false
+end
+
+----------------------------------------------------------------------
+-- GROUP BOXES. A bordered, titled card that hosts its own flow — Core's own
+-- MakeEditorCard, which is exactly the client-config aesthetic the owner sent
+-- as the reference (a titled border with rows inside it).
+--
+-- ITS HEIGHT IS A BUDGET, NOT A GUESS. Every helper below bumps `g.units` by
+-- the height it just spent, so the card's height is the arithmetic sum of what
+-- is inside it — and the suite pins that the card really covers its own
+-- content, because MakeEditorCard's inner pane carries no scrollbar and
+-- content taller than the card is content nobody can reach.
+----------------------------------------------------------------------
+
+Form.groups = {}
+
+function Form.Group(flow, title, opts)
+    opts = opts or {}
+    local g = { title = title, units = 0, open = true, spent = {}, advanced = false }
+    local row = (type(flow.AddRow) == "function") and flow:AddRow() or flow
+    local card = (type(row.EditorCard) == "function")
+        and row:EditorCard({ title = title, height = Form.BoxHeight(0, title ~= nil) })
+        or nil
+    g.card = card
+    -- No card factory (a Core too old to carry one): the group degrades to the
+    -- flow it was asked to build in, so every control still exists and is still
+    -- wired. Quietly worse-looking beats quietly missing.
+    g.flow = (card and card.flow) or flow
+    Form.groups[#Form.groups + 1] = g
+    return g
+end
+
+local function spend(g, units, what)
+    if type(g) ~= "table" then return end
+    g.units = g.units + units
+    g.spent[#g.spent + 1] = { units, what }
+end
+Form._spend = spend
+
+function Form.CloseGroup(g)
+    if type(g) ~= "table" then return nil end
+    g.height = Form.BoxHeight(g.units, g.title ~= nil)
+    Form.ApplyGroup(g)
+    return g.height
+end
+
+-- Push the group's current height and open/closed state onto the card. Core's
+-- row arranger reads `uiHeight` on every layout, so this is all a fold needs.
+function Form.ApplyGroup(g)
+    local card = g and g.card
+    if not card then return false end
+    local h = g.open and (g.height or Form.BoxHeight(g.units, g.title ~= nil)) or 0
+    card.uiHeight = h
+    widgetCall(card, "SetHeight", math.max(h, 1))
+    widgetCall(card, g.open and "Show" or "Hide")
+    if g.open then widgetCall(card, "Relayout") end
+    return true
+end
+
+-- A COLLAPSED group: the fold the owner asked for ("fold rarely-touched
+-- toggles into a collapsed Advanced group per section"). The whole group is ONE
+-- block, so collapsing it collapses everything inside it in one beat — no
+-- per-control show/hide, no OnUpdate, nothing to get out of step.
+function Form.Advanced(flow, title)
+    local header = flow:AddRow()
+    local g
+    local btn = header:Button({
+        text = "\226\150\184  " .. tostring(title or "Advanced"),   -- "▸ Title"
+        width = 320, variant = "quiet",
+        onClick = function() Form.ToggleAdvanced(g) end,
+    })
+    g = Form.Group(flow, nil, {})
+    g.advanced, g.open, g.toggle, g.name = true, false, btn, tostring(title or "Advanced")
+    return g
+end
+
+function Form.AdvancedLabel(g)
+    return (g.open and "\226\150\190  " or "\226\150\184  ") .. tostring(g.name or "Advanced")
+end
+
+function Form.ToggleAdvanced(g)
+    if type(g) ~= "table" then return false end
+    g.open = not g.open
+    Form.SetCaption(g.toggle, Form.AdvancedLabel(g))
+    Form.ApplyGroup(g)
+    Options._relayout()
+    return g.open
+end
+
+-- Ask the hub to re-run its layout after a fold changed a block's height.
+-- Reached through the pane the flow was built on, and silent when there is none
+-- (the headless flow has no geometry to re-run).
+Options._pane = nil
+function Options._relayout()
+    local p = Options._pane
+    if type(p) == "table" and type(p.Layout) == "function" then pcall(p.Layout, p) end
+    return true
+end
+
+----------------------------------------------------------------------
+-- THE CELL HELPERS. Each one adds exactly one row to a group and pays for it.
+----------------------------------------------------------------------
+
+-- One [caption][control] row. `make(row)` builds the control on the row it is
+-- handed, so the caller keeps the widget it needs.
+function Form.Field(g, caption, make, labelW)
+    local row = g.flow:AddRow({ vAlign = "center" })
+    Form.LabelCell(row, caption, labelW)
+    local w = make and make(row) or nil
+    spend(g, Form.ROW_H + Form.ROW_GAP, caption)
+    return w, row
+end
+
+-- TWO cells on one row, when the pure planner says they fit at the hub's
+-- NARROWEST content width. They always share the row or always do not — the
+-- decision is made once, from a number, not from live geometry.
+function Form.Pair(g, a, b)
+    local inner = Form.GroupInner(Form.MIN_CONTENT_W)
+    local wB = b and Form.CellWidth(b.width or 140, b.labelW) or nil
+    if b and Form.FitsTwoUp(Form.COL1_W, wB, inner) then
+        local row = g.flow:AddRow({ vAlign = "center" })
+        Form.LabelCell(row, a.caption, a.labelW)
+        local wa = a.make and a.make(row) or nil
+        -- The second column's caption absorbs the first column's slack into its
+        -- own width, so column two starts at the same x on every row and
+        -- NOTHING has to be anchored by hand.
+        Form.LabelCell(row, b.caption, Form.SecondLabelW(a.width or 140, a.labelW, b.labelW))
+        local wb = b.make and b.make(row) or nil
+        spend(g, Form.ROW_H + Form.ROW_GAP, (a.caption or "") .. " | " .. (b.caption or ""))
+        return wa, wb, row
+    end
+    local wa = Form.Field(g, a.caption, a.make, a.labelW)
+    local wb = b and Form.Field(g, b.caption, b.make, b.labelW) or nil
+    return wa, wb
+end
+
+-- One checkbox on its own row (its caption is its own — Core's MakeCheckbox
+-- draws the label inline and self-sizes, so it is never culled).
+function Form.Check(g, opts)
+    local w = g.flow:Checkbox(opts)
+    spend(g, Form.CHECK_H + Form.ROW_GAP, opts and opts.label)
+    return w
+end
+
+-- A two-column checkbox grid — Core's own AddChecklist, which is the "TWO-
+-- COLUMN placement where the hub page width allows" the brief asked for: it
+-- lays two columns and collapses to one on a narrow pane, by itself.
+function Form.Checks(g, items)
+    local grid
+    if type(g.flow.AddChecklist) == "function" then
+        grid = g.flow:AddChecklist(items)
+    else
+        grid = { _boxes = {} }
+        for _, it in ipairs(items or {}) do
+            grid._boxes[#grid._boxes + 1] = g.flow:Checkbox(it)
+        end
+    end
+    local cols = Form.ChecklistColumns(Form.GroupInner(Form.MIN_CONTENT_W))
+    spend(g, Form.ChecklistHeight(#(items or {}), cols), "checklist")
+    return grid
+end
+
+-- ONE short hint per GROUP — never one per control (the owner: the pane
+-- narrates). Anything longer than a line belongs in a tooltip.
+function Form.Note(g, text)
+    local h = g.flow:Hint(text)
+    spend(g, Form.HINT_H, "hint")
+    return h
+end
+
+-- A row the caller builds itself (the channel rows), paying its own height.
+function Form.Row(g, height)
+    local row = g.flow:AddRow({ vAlign = "center" })
+    spend(g, (tonumber(height) or Form.ROW_H) + Form.ROW_GAP, "row")
+    return row
+end
+
+function Form.Button(g, opts)
+    local row = g.flow:AddRow({ vAlign = "center" })
+    local b = row:Button(opts)
+    spend(g, Form.ROW_H + Form.ROW_GAP, opts and opts.text)
+    return b, row
+end
+
+-- Core's MakeEditBox sets `_fillWidth = true`, which means the FIRST edit box
+-- on a row swallows every remaining unit and the SECOND one is squeezed to
+-- Core's 40-unit floor. That is why the channel rows rendered as one enormous
+-- hex field beside a stub of a name field. Any edit box sharing a row states
+-- its own width instead.
+function Form.FixWidth(w, width)
+    if type(w) ~= "table" then return w end
+    w._fillWidth = false
+    w.uiWidth = tonumber(width) or 120
+    widgetCall(w, "SetWidth", w.uiWidth)
+    return w
+end
+
+-- Grey an edit box's own text (the "this is the game's name, not your name"
+-- state on a rename field that has never been filled in).
+function Form.GreyBox(w, on)
+    local box = type(w) == "table" and (w.editBox or w) or nil
+    if not (box and type(box.SetTextColor) == "function") then return false end
+    local UI = _G.DaseekiUI
+    local r, g2, b = 1, 1, 1
+    if UI and UI.Color then r, g2, b = UI.Color(on and "muted" or "text") end
+    pcall(box.SetTextColor, box, r, g2, b, 1)
+    return true
+end
+
+----------------------------------------------------------------------
 -- Refresher registry (the Bags idiom): every control that can go stale hands
 -- its Refresh back, and the section's refresh(pane) re-runs the lot.
 ----------------------------------------------------------------------
@@ -896,6 +1336,9 @@ function Options.SetTabPlacement(where)
     return changed
 end
 
+-- A debug line, not a pane line. It used to sit under the placement dropdown
+-- and narrate "0 tab(s) carry a colour of their own", which is exactly the
+-- noise the owner's "way too many options" was about.
 function Options.TabPlacementStatus()
     local C = ns.Config
     local n = 0
@@ -1176,11 +1619,38 @@ function Options.SetAlias(name, alias)
     return changed
 end
 
+-- What the inline rename box SHOWS for row i: the alias when there is one,
+-- otherwise the channel's real name, greyed — so the field always says what the
+-- channel is currently called instead of sitting there empty and nameless.
+function Options.RenameBoxText(i)
+    local r = Options.ChannelRows()[tonumber(i) or 0]
+    if not r then return "" end
+    if r.alias ~= "" then return r.alias end
+    return r.name
+end
+
+-- …and its commit. Typing the channel's own name back (or emptying the field)
+-- is the REMOVE verb, not "rename Trade to Trade": the greyed placeholder must
+-- never turn into a stored alias just because the player clicked into the box
+-- and back out of it again.
+function Options.SetAliasFromRow(name, typed)
+    local function fold(s) return (tostring(s or ""):gsub("%s+", "")):lower() end
+    if fold(typed) == "" or fold(typed) == fold(name) then
+        return Options.SetAlias(name, "")
+    end
+    return Options.SetAlias(name, typed)
+end
+
+-- THE API PATH for aliasing a channel this character has never seen. There is
+-- deliberately NO pane control for it any more (the owner: "the channel rename
+-- piece is terrible" — the orphan "Rename a channel you are not in right now:"
+-- field beneath the rows was the piece). An alias made here grows a row of its
+-- own the moment it exists, which is where it is then edited.
 Options._addName, Options._addAlias = "", ""
 
--- The add-row's commit: a name and an alias typed by hand, for a channel the
--- client does not currently list. Refuses a nameless add; an empty alias on a
--- named channel is still the remove verb, which is the honest reading.
+-- The add verb's commit: a name and an alias, for a channel the client does not
+-- currently list. Refuses a nameless add; an empty alias on a named channel is
+-- still the remove verb, which is the honest reading.
 function Options.CommitAdd()
     local name = Options._addName
     if type(name) ~= "string" or name:gsub("%s+", "") == "" then return false end
@@ -1323,136 +1793,50 @@ local function installRowDrag(row, i)
 end
 
 ----------------------------------------------------------------------
--- SECTION 1 — GENERAL.
+-- THE CHANNEL ROWS (owner UAT: "the channel color section doesnt show you
+-- what channel your editing", "the channel rename piece is terrible").
+--
+-- WHAT HE SAW, and why. Three defects on one surface:
+--   1. NO CHANNEL NAME. The row's label was a Core Label FRAME; the refresh
+--      wrote it with `ui.label:SetText(...)` behind a type guard that is FALSE
+--      on a frame, so the name was never written — and even if it had been, the
+--      label carried no width and the ScrollChild culled it. Two independent
+--      reasons for the same blank.
+--   2. TWELVE ROWS FOR FIVE CHANNELS. The pool is twelve; nothing hid the rows
+--      with no channel behind them, so seven ghosts sat there with an empty
+--      label, a Colour button and two empty fields each.
+--   3. AN ENORMOUS HEX FIELD BESIDE A STUB. Core's MakeEditBox is `_fillWidth`,
+--      so the FIRST edit box on a row swallows every remaining unit and the
+--      second is squeezed to Core's 40-unit floor.
+--
+-- WHAT REPLACES IT: one row per REAL channel, carrying
+--   [:: handle] [number + NAME, inked in that channel's own colour] [Colour]
+--   [hex] [rename] — the name doubling as the live colour preview, the rename
+-- inline where the channel is, and the orphan "Rename a channel you are not in
+-- right now:" field GONE. A channel the character is not in keeps its colour
+-- and its name and says "not joined" instead of pretending to be reorderable.
 ----------------------------------------------------------------------
 
-local function buildGeneral(flow)
-    local sec = flow:AddSection("General")
-    sec:Hint("How chat looks. Everything here applies the moment you change it.")
+Options.HANDLE_W = 22
+Options.NAME_W   = 230
 
-    -- ── The suite's own look, through Core's seams ───────────────────────
-    local UI = _G.DaseekiUI
+local function buildChannels(sec)
+    local chan = Form.Group(sec, "Channels")
+    Form.Note(chan, "Drag a row by its handle to change that channel's number. The name box "
+        .. "renames it everywhere; the colour box takes six hex digits, and emptying it hands "
+        .. "the channel back to the game.")
 
-    local fontRow = sec:AddRow({ vAlign = "center" })
-    fontRow:Label("Font")
-    local fontBinding = bind("core.font")
-    reg(fontRow:Dropdown({
-        width = 200,
-        choices = (UI and UI.FontNames) and UI.FontNames() or {},
-        get = function() return UI and UI.GetFont and UI.GetFont() or "" end,
-        set = function(v)
-            if UI and UI.SetFont then UI.SetFont(v) end
-            Options.Apply(fontBinding.apply)
-        end,
-    }))
-
-    local sizeRow = sec:AddRow({ vAlign = "center" })
-    sizeRow:Label("Text size")
-    local scaleBinding = bind("core.fontScale")
-    reg(sizeRow:Dropdown({
-        width = 120,
-        choices = Options.STEPS.coreScale,
-        get = function()
-            return Options.NearestStep(Options.STEPS.coreScale,
-                UI and UI.GetFontScale and UI.GetFontScale() or 1)
-        end,
-        set = function(v)
-            if UI and UI.SetFontScale then UI.SetFontScale(tonumber(v) or 1) end
-            Options.Apply(scaleBinding.apply)
-        end,
-    }))
-
-    local themeRow = sec:AddRow({ vAlign = "center" })
-    themeRow:Label("Theme")
-    local themeBinding = bind("core.theme")
-    reg(themeRow:Dropdown({
-        width = 200,
-        choices = (UI and UI.GetThemeNames) and UI.GetThemeNames() or {},
-        get = function() return UI and UI.GetThemeName and UI.GetThemeName() or "" end,
-        set = function(v)
-            if UI and UI.SetTheme then UI.SetTheme(v) end
-            Options.Apply(themeBinding.apply)
-        end,
-    }))
-    sec:Hint("Font, text size and theme belong to the whole Daseeki suite - changing one here "
-          .. "changes it everywhere, and every other Daseeki window follows in the same beat.")
-
-    -- ── The chat feed's own type ─────────────────────────────────────────
-    local msgRow = sec:AddRow({ vAlign = "center" })
-    msgRow:Label("Message text size")
-    reg(msgRow:Dropdown({
-        id = "general.fontSize", width = 120, choices = Options.STEPS.fontSize,
-        tooltip = "The chat feed's own size in Daseeki's window. The line spacing follows it "
-               .. "automatically, so the rhythm of the design holds at any size.",
-        get = stepGet("general.fontSize", Options.STEPS.fontSize),
-        set = stepSet("general.fontSize", Options.STEPS.fontSize),
-    }))
-    local lhRow = sec:AddRow({ vAlign = "center" })
-    lhRow:Label("Line spacing")
-    reg(lhRow:Dropdown({
-        id = "general.lineHeight", width = 120, choices = Options.STEPS.lineHeight,
-        tooltip = "How much air sits between message lines, as a share of the text size.",
-        get = stepGet("general.lineHeight", Options.STEPS.lineHeight),
-        set = stepSet("general.lineHeight", Options.STEPS.lineHeight),
-    }))
-    local ttRow = sec:AddRow({ vAlign = "center" })
-    ttRow:Label("Tab text size")
-    reg(ttRow:Dropdown({
-        id = "general.tabTextSize", width = 120, choices = Options.STEPS.tabTextSize,
-        get = stepGet("general.tabTextSize", Options.STEPS.tabTextSize),
-        set = stepSet("general.tabTextSize", Options.STEPS.tabTextSize),
-    }))
-
-    -- ── Where the tabs live, and the lock ────────────────────────────────
-    local placeRow = sec:AddRow({ vAlign = "center" })
-    placeRow:Label("Tab style")
-    reg(placeRow:Dropdown({
-        width = 120,
-        choices = { { value = "top",   text = "Top" },
-                    { value = "left",  text = "Left" },
-                    { value = "right", text = "Right" } },
-        get = function() return Options.TabPlacement() end,
-        set = function(v) Options.SetTabPlacement(v); Options._refresh() end,
-    }))
-    statusHint(sec, Options.TabPlacementStatus)
-    sec:Hint("Left and right put the tabs on a slim vertical rail, which reads better with many "
-          .. "tabs and leaves the full width for message text.")
-
-    statusHint(sec, Options.LockStatus)
-    reg(sec:Checkbox({
-        label = "Lock the chat box in place",
-        tooltip = "Locked, the box will not move or resize and its corner grips are gone - a "
-               .. "stray drag cannot shift it. Same as /dchat lock and /dchat unlock, and it "
-               .. "travels with your shared chat configuration.",
-        get = function() return Options.Locked() end,
-        set = function(v) Options.SetLocked(v); Options._refresh() end,
-    }))
-
-    -- ── CHANNELS (the flagship subsection) ───────────────────────────────
-    sec:AddSeparator()
-    sec:Hint("CHANNELS - drag a row by its label to change that channel's number, give it a "
-          .. "colour, or give it a shorter name. All three are shared across your characters.")
-    statusHint(sec, Options.ChannelStatus)
-
-    reg(sec:Checkbox({
-        label = "Keep the channel number in renamed channels",
-        tooltip = "On: \"[2. Trade]\". Off: \"[Trade]\".",
-        get = function() return ns.Config and ns.Config.AliasKeepNumber() end,
-        set = function(v)
-            local C = ns.Config
-            if C and C.SetAliasKeepNumber(v and true or false) then
-                Options.Dispatch("channels.keepNumber")
-            end
-        end,
-    }))
-
-    -- A fixed pool of rows (the flow builds its blocks once), re-pointed at the
-    -- current channel list on every refresh.
     bind("channels.order"); bind("channels.color"); bind("channels.rename")
     Options._chanRows = {}
     for i = 1, Options.MAX_CHANNEL_ROWS do
-        local row = sec:AddRow({ vAlign = "center" })
-        local label = row:Label("")
+        local row = Form.Row(chan)
+        -- Every caption below is BUILT with placeholder text, so the kit really
+        -- creates the FontString the refresh then writes through Form.SetCaption.
+        -- A control born captionless has nothing to re-caption (Core draws no
+        -- label it was not asked for at construction), which is exactly how the
+        -- sub-tab buttons ended up permanently blank.
+        local handle = Form.LabelCell(row, "::", Options.HANDLE_W)
+        local label  = Form.LabelCell(row, "channel", Options.NAME_W)
         local swatch = row:Button({
             text = "Colour", width = 80, variant = "quiet",
             onClick = function()
@@ -1460,7 +1844,7 @@ local function buildGeneral(flow)
                 if r then Options.OpenColorPicker(r.name) end
             end,
         })
-        local hexBox = row:EditBox({
+        local hexBox = Form.FixWidth(row:EditBox({
             width = 90,
             get = function()
                 local r = Options.ChannelRows()[i]
@@ -1471,266 +1855,370 @@ local function buildGeneral(flow)
                 if r then Options.SetChannelColorHex(r.name, v) end
                 Options._refresh()
             end,
-        })
+        }), 90)
         reg(hexBox)
-        local nameBox = row:EditBox({
-            width = 140,
-            get = function()
-                local r = Options.ChannelRows()[i]
-                return r and r.alias or ""
-            end,
+        local nameBox = Form.FixWidth(row:EditBox({
+            width = 150,
+            get = function() return Options.RenameBoxText(i) end,
             set = function(v)
                 local r = Options.ChannelRows()[i]
-                if r then Options.SetAlias(r.name, v) end
+                if r then Options.SetAliasFromRow(r.name, v) end
                 Options._refresh()
             end,
-        })
+        }), 150)
         reg(nameBox)
-        Options._chanRows[i] = { row = row, label = label, swatch = swatch,
-                                 hexBox = hexBox, nameBox = nameBox }
+        Options._chanRows[i] = { row = row, handle = handle, label = label,
+                                 swatch = swatch, hexBox = hexBox, nameBox = nameBox }
         installRowDrag(row, i)
     end
-    sec:Hint("The colour box takes six hex digits (\"ff8000\"); emptying it hands the channel "
-          .. "back to the game's own colour. A channel you are not in right now still keeps "
-          .. "its colour and its name - only its ORDER needs you to be in it.")
+    Options._chanGroup = chan
+    Form.CloseGroup(chan)
+    return chan
+end
 
-    sec:AddSeparator()
-    sec:Hint("Rename a channel you are not in right now:")
-    local addRow = sec:AddRow({ vAlign = "center" })
-    addRow:Label("Channel")
-    bind("channels.add")
-    reg(addRow:EditBox({
-        width = 160,
-        get = function() return Options._addName end,
-        set = function(v) Options._addName = tostring(v or "") end,
+----------------------------------------------------------------------
+-- SECTION 1 — GENERAL.
+----------------------------------------------------------------------
+
+local function buildGeneral(flow)
+    local sec = flow:AddSection("General")
+    local UI = _G.DaseekiUI
+
+    -- ══ GROUP: APPEARANCE ════════════════════════════════════════════════
+    -- Two columns, every control captioned on its own row, one hint for the
+    -- whole box. This is the layout the rest of the page is built in.
+    local look = Form.Group(sec, "Appearance")
+    Form.Note(look, "Font, text size and theme belong to the whole Daseeki suite - changing one "
+        .. "here changes it everywhere.")
+
+    local fontBinding  = bind("core.font")
+    local scaleBinding = bind("core.fontScale")
+    local themeBinding = bind("core.theme")
+
+    Form.Pair(look,
+        { caption = "Font", width = 200, make = function(row)
+            return reg(row:Dropdown({
+                width = 200,
+                choices = (UI and UI.FontNames) and UI.FontNames() or {},
+                get = function() return UI and UI.GetFont and UI.GetFont() or "" end,
+                set = function(v)
+                    if UI and UI.SetFont then UI.SetFont(v) end
+                    Options.Apply(fontBinding.apply)
+                end,
+            }))
+        end },
+        { caption = "Theme", width = 200, make = function(row)
+            return reg(row:Dropdown({
+                width = 200,
+                choices = (UI and UI.GetThemeNames) and UI.GetThemeNames() or {},
+                get = function() return UI and UI.GetThemeName and UI.GetThemeName() or "" end,
+                set = function(v)
+                    if UI and UI.SetTheme then UI.SetTheme(v) end
+                    Options.Apply(themeBinding.apply)
+                end,
+            }))
+        end })
+
+    Form.Pair(look,
+        { caption = "Text size", width = 120, make = function(row)
+            return reg(row:Dropdown({
+                width = 120, choices = Options.STEPS.coreScale,
+                get = function()
+                    return Options.NearestStep(Options.STEPS.coreScale,
+                        UI and UI.GetFontScale and UI.GetFontScale() or 1)
+                end,
+                set = function(v)
+                    if UI and UI.SetFontScale then UI.SetFontScale(tonumber(v) or 1) end
+                    Options.Apply(scaleBinding.apply)
+                end,
+            }))
+        end },
+        { caption = "Tab text", width = 120, make = function(row)
+            return reg(row:Dropdown({
+                id = "general.tabTextSize", width = 120, choices = Options.STEPS.tabTextSize,
+                get = stepGet("general.tabTextSize", Options.STEPS.tabTextSize),
+                set = stepSet("general.tabTextSize", Options.STEPS.tabTextSize),
+            }))
+        end })
+
+    Form.Pair(look,
+        { caption = "Message size", width = 120, make = function(row)
+            return reg(row:Dropdown({
+                id = "general.fontSize", width = 120, choices = Options.STEPS.fontSize,
+                tooltip = "The chat feed's own size in Daseeki's window.",
+                get = stepGet("general.fontSize", Options.STEPS.fontSize),
+                set = stepSet("general.fontSize", Options.STEPS.fontSize),
+            }))
+        end },
+        { caption = "Line spacing", width = 120, make = function(row)
+            return reg(row:Dropdown({
+                id = "general.lineHeight", width = 120, choices = Options.STEPS.lineHeight,
+                tooltip = "How much air sits between message lines, as a share of the text size.",
+                get = stepGet("general.lineHeight", Options.STEPS.lineHeight),
+                set = stepSet("general.lineHeight", Options.STEPS.lineHeight),
+            }))
+        end })
+
+    Form.Pair(look,
+        { caption = "Tab position", width = 120, make = function(row)
+            return reg(row:Dropdown({
+                width = 120,
+                choices = { { value = "top",   text = "Top" },
+                            { value = "left",  text = "Left" },
+                            { value = "right", text = "Right" } },
+                tooltip = "Left and right put the tabs on a slim vertical rail, which reads "
+                       .. "better with many tabs and leaves the full width for message text.",
+                get = function() return Options.TabPlacement() end,
+                set = function(v) Options.SetTabPlacement(v); Options._refresh() end,
+            }))
+        end },
+        { caption = "Edit box", width = 120, make = function(row)
+            return reg(row:Dropdown({
+                width = 120,
+                choices = { { value = "BOTTOM", text = "Below" }, { value = "TOP", text = "Above" } },
+                get = fieldGet("windows.editBox"), set = fieldSet("windows.editBox"),
+            }))
+        end })
+
+    reg(Form.Check(look, {
+        label = "Lock the chat box in place",
+        tooltip = "Locked, the box will not move or resize and its corner grips are gone - a "
+               .. "stray drag cannot shift it. Same as /dchat lock and /dchat unlock, and it "
+               .. "travels with your shared chat configuration.",
+        get = function() return Options.Locked() end,
+        set = function(v) Options.SetLocked(v); Options._refresh() end,
     }))
-    addRow:Label("Shows as")
-    reg(addRow:EditBox({
-        width = 140,
-        get = function() return Options._addAlias end,
-        set = function(v) Options._addAlias = tostring(v or "") end,
-    }))
-    addRow:Button({
-        text = "Add", width = 80,
-        onClick = function() Options.CommitAdd(); Options._refresh() end,
+    Form.CloseGroup(look)
+
+    -- ══ GROUP: CHANNELS ══════════════════════════════════════════════════
+    buildChannels(sec)
+
+    -- ══ GROUP: DISPLAY ═══════════════════════════════════════════════════
+    local disp = Form.Group(sec, "Display")
+    Form.Note(disp, "What a chat line is dressed with. Hover any option for the detail.")
+    Form.Checks(disp, {
+        { label = "Timestamps",  tooltip = "Stamp every line with the time it arrived.",
+          get = moduleGet("stamps.module"), set = moduleSet("stamps.module") },
+        { label = "Class-coloured names",
+          get = moduleGet("names.module"), set = moduleSet("names.module") },
+        { label = "Clickable web addresses",
+          tooltip = "Clicking one opens a box with the address pre-selected (era has no clipboard).",
+          get = moduleGet("urls.module"), set = moduleSet("urls.module") },
+        { label = "Channel-coloured tabs",
+          tooltip = "Ink each tab with the colour of the channel that window is for. A window "
+                 .. "earns a colour only when its routing collapses to exactly one identity.",
+          get = fieldGet("appearance.channelTabs"), set = boolSet("appearance.channelTabs") },
+        { label = "Colour the edit box prefix",
+          get = fieldGet("appearance.editBoxChannelColor"), set = boolSet("appearance.editBoxChannelColor") },
+        { label = "Keep the edit box visible",
+          tooltip = "The input bar rests at its position all the time, showing which channel "
+                 .. "you are about to talk in.",
+          get = fieldGet("windows.persistentEditBox"), set = boolSet("windows.persistentEditBox") },
     })
+    Form.Pair(disp,
+        { caption = "Time format", width = 160, make = function(row)
+            return reg(row:Dropdown({
+                width = 160,
+                choices = {
+                    { value = "HH:MM",    text = "13:05" },
+                    { value = "HH:MM:SS", text = "13:05:42" },
+                    { value = "hh:MM",    text = "1:05 PM" },
+                    { value = "hh:MM:SS", text = "1:05:42 PM" },
+                },
+                get = fieldGet("stamps.format"), set = fieldSet("stamps.format"),
+            }))
+        end },
+        { caption = "Name brackets", width = 120, make = function(row)
+            return reg(row:Dropdown({
+                width = 120,
+                choices = { { value = "square", text = "[Name]" },
+                            { value = "angle",  text = "<Name>" },
+                            { value = "none",   text = "Name" } },
+                get = fieldGet("names.brackets"), set = fieldSet("names.brackets"),
+            }))
+        end })
+    Form.CloseGroup(disp)
 
-    -- ── THE DISPLAY GROUP (the old Timestamps / Names / Links sections) ──
-    sec:AddSeparator()
-    sec:Hint("DISPLAY - what a chat line is dressed with.")
+    -- ══ ADVANCED: the fine print of the display group ════════════════════
+    -- The owner: "there are just way too many options in general". Nothing is
+    -- taken away - the rarely-touched half is folded, in ONE block, behind one
+    -- press.
+    local adv = Form.Advanced(sec, "Advanced display options")
+    Form.Checks(adv, {
+        { label = "Square brackets around the time",
+          get = fieldGet("stamps.brackets"), set = boolSet("stamps.brackets") },
+        { label = "Use server time",
+          tooltip = "Stamp the realm's clock instead of this computer's.",
+          get = fieldGet("stamps.serverTime"), set = boolSet("stamps.serverTime") },
+        { label = "Timestamp divider",
+          tooltip = "A hairline between the timestamp column and the message text.",
+          get = fieldGet("appearance.stampDivider"), set = boolSet("appearance.stampDivider") },
+        { label = "Remember classes between sessions",
+          tooltip = "Keep a realm-scoped cache of who is what class, so a name is coloured the "
+                 .. "moment it appears instead of after the first sighting.",
+          get = fieldGet("names.persist"), set = boolSet("names.persist") },
+        { label = "Show addresses in [brackets]",
+          get = fieldGet("urls.brackets"), set = boolSet("urls.brackets") },
+        { label = "Copy-chat button",
+          tooltip = "Era has no clipboard; the copy window pre-selects the text for Ctrl+C.",
+          get = fieldGet("view.copyButton"), set = boolSet("view.copyButton") },
+        { label = "Keep the channel number in renamed channels",
+          tooltip = "On: \"[2. Trade]\". Off: \"[Trade]\".",
+          get = function() return ns.Config and ns.Config.AliasKeepNumber() end,
+          set = function(v)
+              local C = ns.Config
+              if C and C.SetAliasKeepNumber(v and true or false) then
+                  Options.Dispatch("channels.keepNumber")
+              end
+          end },
+    })
+    Form.Pair(adv,
+        { caption = "Stamp colour", width = 140, make = function(row)
+            return reg(row:Dropdown({
+                width = 140,
+                choices = { { value = "theme", text = "Theme" }, { value = "custom", text = "Custom" } },
+                get = fieldGet("stamps.colorMode"), set = fieldSet("stamps.colorMode"),
+            }))
+        end },
+        { caption = "Custom (RRGGBB)", width = 120, make = function(row)
+            return reg(Form.FixWidth(row:EditBox({
+                width = 120,
+                get = fieldGet("stamps.customColor"),
+                set = fieldSet("stamps.customColor", function(v)
+                    -- Only a real six-digit hex lands; anything else leaves the
+                    -- stored value alone (stamps.lua falls back on its own, but
+                    -- writing junk into the store would make the field lie).
+                    local hex = tostring(v or ""):match("^%s*#?(%x%x%x%x%x%x)%s*$")
+                    return hex or Options.Get("stamps", "customColor")
+                end),
+            }), 120))
+        end })
+    Form.Field(adv, "Game's own stamps", function(row)
+        return reg(row:Dropdown({
+            width = 140,
+            tooltip = "What to do when the game's own timestamp setting is switched on too.",
+            choices = { { value = "defer", text = "Step aside" },
+                        { value = "takeover", text = "Take over" } },
+            get = fieldGet("stamps.native"), set = fieldSet("stamps.native"),
+        }))
+    end)
+    Form.CloseGroup(adv)
 
-    reg(sec:Checkbox({
-        label = "Show timestamps",
-        get = moduleGet("stamps.module"), set = moduleSet("stamps.module"),
-    }))
-    local fmtRow = sec:AddRow({ vAlign = "center" })
-    fmtRow:Label("Time format")
-    reg(fmtRow:Dropdown({
-        width = 160,
-        choices = {
-            { value = "HH:MM",    text = "13:05" },
-            { value = "HH:MM:SS", text = "13:05:42" },
-            { value = "hh:MM",    text = "1:05 PM" },
-            { value = "hh:MM:SS", text = "1:05:42 PM" },
-        },
-        get = fieldGet("stamps.format"), set = fieldSet("stamps.format"),
-    }))
-    reg(sec:Checkbox({
-        label = "Square brackets around the time",
-        get = fieldGet("stamps.brackets"), set = boolSet("stamps.brackets"),
-    }))
-    reg(sec:Checkbox({
-        label = "Use server time",
-        tooltip = "Stamp the realm's clock instead of this computer's.",
-        get = fieldGet("stamps.serverTime"), set = boolSet("stamps.serverTime"),
-    }))
-    reg(sec:Checkbox({
-        label = "Timestamp divider",
-        tooltip = "A hairline between the timestamp column and the message text.",
-        get = fieldGet("appearance.stampDivider"), set = boolSet("appearance.stampDivider"),
-    }))
-    local nativeRow = sec:AddRow({ vAlign = "center" })
-    nativeRow:Label("If the game's own timestamps are on")
-    reg(nativeRow:Dropdown({
-        width = 140,
-        choices = { { value = "defer", text = "Step aside" }, { value = "takeover", text = "Take over" } },
-        get = fieldGet("stamps.native"), set = fieldSet("stamps.native"),
-    }))
-    local colorRow = sec:AddRow({ vAlign = "center" })
-    colorRow:Label("Stamp colour")
-    reg(colorRow:Dropdown({
-        width = 140,
-        choices = { { value = "theme", text = "Theme" }, { value = "custom", text = "Custom" } },
-        get = fieldGet("stamps.colorMode"), set = fieldSet("stamps.colorMode"),
-    }))
-    local hexRow = sec:AddRow({ vAlign = "center" })
-    hexRow:Label("Custom stamp colour (RRGGBB)")
-    reg(hexRow:EditBox({
-        width = 120,
-        get = fieldGet("stamps.customColor"),
-        set = fieldSet("stamps.customColor", function(v)
-            -- Only a real six-digit hex lands; anything else leaves the stored
-            -- value alone (stamps.lua falls back on its own, but writing junk
-            -- into the store would make the field lie about itself).
-            local hex = tostring(v or ""):match("^%s*#?(%x%x%x%x%x%x)%s*$")
-            return hex or Options.Get("stamps", "customColor")
-        end),
-    }))
-
-    reg(sec:Checkbox({
-        label = "Class-colour player names",
-        get = moduleGet("names.module"), set = moduleSet("names.module"),
-    }))
-    local brRow = sec:AddRow({ vAlign = "center" })
-    brRow:Label("Name brackets")
-    reg(brRow:Dropdown({
-        width = 120,
-        choices = { { value = "square", text = "[Name]" },
-                    { value = "angle",  text = "<Name>" },
-                    { value = "none",   text = "Name" } },
-        get = fieldGet("names.brackets"), set = fieldSet("names.brackets"),
-    }))
-    reg(sec:Checkbox({
-        label = "Remember classes between sessions",
-        tooltip = "Keep a realm-scoped cache of who is what class, so a name is coloured the "
-               .. "moment it appears instead of after the first sighting.",
-        get = fieldGet("names.persist"), set = boolSet("names.persist"),
-    }))
-
-    reg(sec:Checkbox({
-        label = "Detect web addresses",
-        tooltip = "Web addresses become clickable; clicking one opens a box with the address "
-               .. "pre-selected (era has no clipboard).",
-        get = moduleGet("urls.module"), set = moduleSet("urls.module"),
-    }))
-    reg(sec:Checkbox({
-        label = "Show addresses in [brackets]",
-        get = fieldGet("urls.brackets"), set = boolSet("urls.brackets"),
-    }))
-
-    reg(sec:Checkbox({
-        label = "Channel-coloured tabs",
-        tooltip = "Ink each tab with the colour of the channel that window is for. A window "
-               .. "earns a colour only when its routing collapses to exactly one identity.",
-        get = fieldGet("appearance.channelTabs"), set = boolSet("appearance.channelTabs"),
-    }))
-    reg(sec:Checkbox({
-        label = "Colour the edit box channel prefix",
-        get = fieldGet("appearance.editBoxChannelColor"), set = boolSet("appearance.editBoxChannelColor"),
-    }))
-    reg(sec:Checkbox({
-        label = "Copy-chat button",
-        tooltip = "Era has no clipboard; the copy window pre-selects the text for Ctrl+C.",
-        get = fieldGet("view.copyButton"), set = boolSet("view.copyButton"),
-    }))
-    reg(sec:Checkbox({
-        label = "Keep the edit box visible",
-        tooltip = "The input bar rests at its position all the time, showing which channel you "
-               .. "are about to talk in.",
-        get = fieldGet("windows.persistentEditBox"), set = boolSet("windows.persistentEditBox"),
-    }))
-    local ebRow = sec:AddRow({ vAlign = "center" })
-    ebRow:Label("Edit box position")
-    reg(ebRow:Dropdown({
-        width = 120,
-        choices = { { value = "BOTTOM", text = "Below" }, { value = "TOP", text = "Above" } },
-        get = fieldGet("windows.editBox"), set = fieldSet("windows.editBox"),
-    }))
-
-    -- ── THE GAME'S OWN WINDOWS (the box-off renderer) ────────────────────
-    -- Kept, and kept HONEST: with the drawn window on these are remembered
-    -- rather than applied, and the status line says so instead of leaving a
-    -- control that looks live and does nothing.
-    sec:AddSeparator()
-    sec:Hint("THE GAME'S OWN CHAT WINDOWS - used when Daseeki is not drawing its own.")
-    reg(sec:Checkbox({
-        label = "Draw Daseeki's own chat window",
-        tooltip = "Daseeki Chat draws the whole window - the tab strip, the message feed and "
-               .. "the input bar - instead of re-dressing the game's. The game's chat windows "
-               .. "stay alive behind it and still receive everything; they are just hidden. "
-               .. "Turning this off gives the game's own chat window straight back.",
-        get = moduleGet("view.module"), set = moduleSet("view.module"),
-    }))
-    statusHint(sec, Options.RendererStatus)
-    reg(sec:Checkbox({
-        label = "One box: tabs, text and input on a single surface",
-        get = fieldGet("appearance.unifiedChassis"), set = boolSet("appearance.unifiedChassis"),
-    }))
-    reg(sec:Checkbox({
-        label = "Icon rail",
-        tooltip = "A slim strip on a window's edge: copy chat, settings, jump to newest.",
-        get = fieldGet("appearance.iconRail"), set = boolSet("appearance.iconRail"),
-    }))
-    reg(sec:Checkbox({
-        label = "Hide the game's chat button column",
-        get = fieldGet("appearance.hideButtonColumn"), set = boolSet("appearance.hideButtonColumn"),
-    }))
-    reg(sec:Checkbox({
-        label = "Copy-chat button on each game window",
-        get = fieldGet("appearance.copyButton"), set = boolSet("appearance.copyButton"),
-    }))
-    reg(sec:Checkbox({
-        label = "ALT-drag moves a window",
-        get = fieldGet("windows.altDragMove"), set = boolSet("windows.altDragMove"),
-    }))
-    reg(sec:Checkbox({
-        label = "Let windows reach the screen edge",
-        get = fieldGet("windows.unclampWindows"), set = boolSet("windows.unclampWindows"),
-    }))
-    reg(sec:Checkbox({
-        label = "Snap to edges when dragging",
-        get = fieldGet("windows.snapToEdges"), set = boolSet("windows.snapToEdges"),
-    }))
-    statusHint(sec, Options.FadingStatus)
-    reg(sec:Checkbox({
-        label = "Fade chat text when idle",
-        get = fieldGet("appearance.fading"), set = boolSet("appearance.fading"),
-    }))
-    local fadeRow = sec:AddRow({ vAlign = "center" })
-    fadeRow:Label("Visible before fading")
-    reg(fadeRow:Dropdown({
-        id = "appearance.fadeTime", width = 140, choices = Options.STEPS.fadeTime,
-        get = stepGet("appearance.fadeTime", Options.STEPS.fadeTime),
-        set = stepSet("appearance.fadeTime", Options.STEPS.fadeTime),
-    }))
-
-    sec:AddSeparator()
-    statusHint(sec, Options.ReconcileStatus)
-    local rRow = sec:AddRow({ vAlign = "center" })
+    -- ══ ADVANCED: the game's own chat windows ════════════════════════════
+    local eng = Form.Advanced(sec, "The game's own chat windows")
     bind("windows.reconcileNow")
-    rRow:Button({
-        text = "Reconcile now", width = 150,
-        onClick = function() Options.ReconcileNow() end,
+    Form._engineStatus = statusHint(eng.flow, Options.RendererStatus)
+    Form._spend(eng, Form.HINT_H * 2, "renderer status")
+    Form.Checks(eng, {
+        { label = "Draw Daseeki's own chat window",
+          tooltip = "Daseeki Chat draws the whole window - the tab strip, the message feed and "
+                 .. "the input bar - instead of re-dressing the game's. Turning this off gives "
+                 .. "the game's own chat window straight back.",
+          get = moduleGet("view.module"), set = moduleSet("view.module") },
+        { label = "One box: tabs, text and input together",
+          get = fieldGet("appearance.unifiedChassis"), set = boolSet("appearance.unifiedChassis") },
+        { label = "Icon rail",
+          tooltip = "A slim strip on a window's edge: copy chat, settings, jump to newest.",
+          get = fieldGet("appearance.iconRail"), set = boolSet("appearance.iconRail") },
+        { label = "Hide the game's chat button column",
+          get = fieldGet("appearance.hideButtonColumn"), set = boolSet("appearance.hideButtonColumn") },
+        { label = "Copy button on each game window",
+          get = fieldGet("appearance.copyButton"), set = boolSet("appearance.copyButton") },
+        { label = "ALT-drag moves a window",
+          get = fieldGet("windows.altDragMove"), set = boolSet("windows.altDragMove") },
+        { label = "Let windows reach the screen edge",
+          get = fieldGet("windows.unclampWindows"), set = boolSet("windows.unclampWindows") },
+        { label = "Snap to edges when dragging",
+          get = fieldGet("windows.snapToEdges"), set = boolSet("windows.snapToEdges") },
+        { label = "Fade chat text when idle",
+          tooltip = "Fading is off while Daseeki draws its own window - the box is always "
+                 .. "there, so the text in it is too. Your setting is remembered, not rewritten.",
+          get = fieldGet("appearance.fading"), set = boolSet("appearance.fading") },
     })
-    sec:Hint("Reconciling re-applies the shared configuration to this character's windows, "
-          .. "tabs, routing and channels. It runs by itself at login and on every zone-in; "
-          .. "this is the same beat, on demand.")
+    Form.Pair(eng,
+        { caption = "Visible before fading", width = 140, make = function(row)
+            return reg(row:Dropdown({
+                id = "appearance.fadeTime", width = 140, choices = Options.STEPS.fadeTime,
+                get = stepGet("appearance.fadeTime", Options.STEPS.fadeTime),
+                set = stepSet("appearance.fadeTime", Options.STEPS.fadeTime),
+            }))
+        end },
+        { caption = "Shared configuration", width = 150, make = function(row)
+            return row:Button({
+                text = "Reconcile now", width = 150,
+                tooltip = "Re-apply the shared configuration to this character's windows, tabs, "
+                       .. "routing and channels. It runs by itself at login and on every zone-in.",
+                onClick = function() Options.ReconcileNow() end,
+            })
+        end })
+    Form._reconcileStatus = statusHint(eng.flow, Options.ReconcileStatus)
+    Form._spend(eng, Form.HINT_H * 2, "reconcile status")
+    Form.CloseGroup(eng)
 end
 
 -- Re-point the pooled channel rows at the current channel list (the section's
 -- refresh, which Core runs on every show).
+--
+-- THE TWO RULES THIS FUNCTION NOW HOLDS, both of them owner UAT findings:
+--   * A ROW PER CHANNEL, AND NOT ONE MORE. The pool is twelve; the rows past
+--     the last real channel are HIDDEN, not left standing with empty fields.
+--     The suite pins shown-rows == channels.
+--   * EVERY ROW SAYS WHICH CHANNEL IT IS, in that channel's own colour — the
+--     name doubles as the live colour preview, so "what am I editing" and
+--     "what does it look like" are one glance.
 function Options.RefreshChannelRows()
     local rows = Options.ChannelRows()
+    Options._shownChanRows = 0
     for i = 1, Options.MAX_CHANNEL_ROWS do
         local ui = Options._chanRows and Options._chanRows[i]
         if ui then
             local r = rows[i]
-            local text = r and Options.ChannelRowLabel(r) or ""
-            if r and r.ordered then text = ":: " .. text end
-            if ui.label then
-                if type(ui.label.SetText) == "function" then ui.label:SetText(text)
-                elseif ui.label._text ~= nil then ui.label._text = text end
-            end
-            -- The swatch wears the colour it sets (in game; the headless flow's
-            -- button has no backdrop to wear).
-            local sw = ui.swatch
-            if sw and type(sw.SetBackdropColor) == "function" then
-                local col = r and r.color
-                if col then pcall(sw.SetBackdropColor, sw, col.r, col.g, col.b, 1) end
+            -- The ROW FRAME is hidden with its contents, not just the widgets
+            -- on it: a row left shown with everything on it hidden is still a
+            -- mouse region and still a stripe of empty space.
+            local items = { ui.row, ui.handle, ui.label, ui.swatch, ui.hexBox, ui.nameBox }
+            Form.ShowRow(items, r ~= nil)
+            if r then
+                Options._shownChanRows = Options._shownChanRows + 1
+                -- The caption, through the ONE re-caption path (a Core Label is
+                -- a frame: writing it with :SetText is what left this blank).
+                local text = Options.ChannelRowLabel(r)
+                if not r.num then text = text .. "  (not joined)" end
+                Form.SetCaption(ui.label, text)
+                -- The name IS the preview: the channel's own colour, the muted
+                -- ink when it has none, and the muted ink for a channel this
+                -- character is not in (a quiet, inert row rather than a lie).
+                local col = r.color
+                if not r.num then
+                    Form.TintCaption(ui.label, nil)
+                elseif col then
+                    Form.TintCaption(ui.label, col.r, col.g, col.b)
+                else
+                    Form.TintCaption(ui.label, nil)
+                end
+                -- The handle only exists on a row a drag can actually move.
+                Form.SetCaption(ui.handle, r.ordered and "::" or "")
+                -- The swatch wears the colour it sets (in game; the headless
+                -- flow's button has no backdrop to wear).
+                local sw = ui.swatch
+                if sw and type(sw.SetBackdropColor) == "function" and col then
+                    pcall(sw.SetBackdropColor, sw, col.r, col.g, col.b, 1)
+                end
+                Form.GreyBox(ui.nameBox, r.alias == "")
             end
             if ui.hexBox and type(ui.hexBox.Refresh) == "function" then ui.hexBox.Refresh() end
             if ui.nameBox and type(ui.nameBox.Refresh) == "function" then ui.nameBox.Refresh() end
         end
+    end
+    -- The group is only as tall as the rows it is really showing.
+    local g = Options._chanGroup
+    if g then
+        g.units = (g._baseUnits or g.units)
+        g._baseUnits = g._baseUnits or g.units
+        g.units = g._baseUnits
+            - (Options.MAX_CHANNEL_ROWS - Options._shownChanRows) * (Form.ROW_H + Form.ROW_GAP)
+        g.height = Form.BoxHeight(g.units, g.title ~= nil)
+        Form.ApplyGroup(g)
     end
     return #rows
 end
@@ -1741,35 +2229,36 @@ end
 
 local function buildHistory(flow)
     local sec = flow:AddSection("Chat History")
-    sec:Hint("Keep each window's recent lines across a logout or reload, restored when you "
-          .. "come back. The lines themselves stay on this character; these settings are "
-          .. "shared like the rest.")
-
-    reg(sec:Checkbox({
+    local g = Form.Group(sec, "Retention")
+    Form.Note(g, "Keep each window's recent lines across a logout or reload. The lines stay on "
+        .. "this character; these settings are shared like the rest.")
+    reg(Form.Check(g, {
         label = "Keep chat across sessions",
         get = moduleGet("history.module"), set = moduleSet("history.module"),
     }))
-    local capRow = sec:AddRow({ vAlign = "center" })
-    capRow:Label("Lines kept per tab")
-    reg(capRow:Dropdown({
-        id = "history.cap", width = 140, choices = Options.STEPS.historyCap,
-        get = stepGet("history.cap", Options.STEPS.historyCap),
-        set = stepSet("history.cap", Options.STEPS.historyCap),
-    }))
-    local ageRow = sec:AddRow({ vAlign = "center" })
-    ageRow:Label("Do not restore lines older than")
-    reg(ageRow:Dropdown({
-        id = "history.maxAgeHours", width = 140, choices = Options.STEPS.historyAge,
-        get = stepGet("history.maxAgeHours", Options.STEPS.historyAge),
-        set = stepSet("history.maxAgeHours", Options.STEPS.historyAge),
-    }))
-    reg(sec:Checkbox({
+    Form.Pair(g,
+        { caption = "Lines kept per tab", width = 140, make = function(row)
+            return reg(row:Dropdown({
+                id = "history.cap", width = 140, choices = Options.STEPS.historyCap,
+                get = stepGet("history.cap", Options.STEPS.historyCap),
+                set = stepSet("history.cap", Options.STEPS.historyCap),
+            }))
+        end },
+        { caption = "Drop lines older than", width = 140, make = function(row)
+            return reg(row:Dropdown({
+                id = "history.maxAgeHours", width = 140, choices = Options.STEPS.historyAge,
+                get = stepGet("history.maxAgeHours", Options.STEPS.historyAge),
+                set = stepSet("history.maxAgeHours", Options.STEPS.historyAge),
+            }))
+        end })
+    reg(Form.Check(g, {
         label = "Restore behind a session divider",
         tooltip = "Restored lines sit above a \"-- session from ... --\" rule, so old chat can "
                .. "never be misread as something that was just said. Off restores them bare "
                .. "and gives you the extra row of scrollback.",
         get = fieldGet("history.divider"), set = boolSet("history.divider"),
     }))
+    Form.CloseGroup(g)
 end
 
 ----------------------------------------------------------------------
@@ -1779,6 +2268,10 @@ end
 function Options.Build(flow)
     Options._ResetRefreshers()
     Options._statusLines = {}
+    Options.Form.groups = {}
+    -- The pane a fold has to ask for a re-layout (Core's flow carries it; the
+    -- headless recording flow does not, and nothing here assumes it does).
+    Options._pane = type(flow) == "table" and flow.pane or nil
     buildGeneral(flow)
     if ns.OptionsTabs and ns.OptionsTabs.Build then ns.OptionsTabs.Build(flow) end
     buildHistory(flow)
@@ -1871,7 +2364,18 @@ ns.RegisterDebugCommand("options", "settings pane: registration, bindings, alias
     local bad = Options.CheckBindings()
     ns:Print(("  %d binding(s), %d problem(s)"):format(#Options.BINDINGS, #bad))
     for _, b in ipairs(bad) do ns:Print("    " .. b) end
-    ns:Print("  " .. Options.ChannelStatus())
+    -- THE STATUS LINES LIVE HERE NOW. The owner's UAT: "there are just way too
+    -- many options in general" — and most of the pane's word count was these,
+    -- narrating one control at a time ("0 tab(s) carry a colour of their own").
+    -- They are real, useful answers; they are just not what a settings page is
+    -- for. The pane keeps the two that explain a control that would otherwise
+    -- look inert (the renderer and the reconciler); the rest report here.
+    for _, fn in ipairs({ Options.ChannelStatus, Options.LockStatus,
+                          Options.TabPlacementStatus, Options.FadingStatus,
+                          Options.BadgeFilterStatus }) do
+        local ok, line = pcall(fn)
+        if ok and type(line) == "string" then ns:Print("  " .. line) end
+    end
     for _, u in ipairs(Options.UNBOUND) do
         if not u.bound then ns:Print("  no control: " .. u.field) end
     end
@@ -2820,11 +3324,340 @@ local function testOrderConverges(fails)
     Sim.ResetCalls()
 end
 
+-- ════════════════════════════════════════════════════════════════════════
+-- THE RED CONTROL FOR "THERE ARE NO LABELS ON THE DROP DOWNS" (owner, UAT
+-- 2026-08-12), and for its three siblings: the channel rows with no channel
+-- name, the Tabs sub-tab buttons rendering as four empty boxes, and the
+-- per-tab channel checkboxes with nothing beside them.
+--
+-- The claim this suite makes is not "the builder passed a label somewhere". It
+-- is: EVERY CONTROL ON THE PAGE CARRIES A CAPTION THE KIT ACTUALLY DRAWS. The
+-- corestub arranges the pane by Core's own row arithmetic, so a caption Core
+-- would cull is culled here, and a SetText Core would throw away is thrown
+-- away here. Against the build the owner UAT'd, every leg below is RED.
+-- ════════════════════════════════════════════════════════════════════════
+local function testCaptions(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local UI = _G.DaseekiUI
+    if not (UI and UI.__PaneAudit) then return end
+
+    local wasOpts = Options.active
+    ns.SetModuleEnabled("options", true)
+    local def = UI.__RegisteredAddon("chat")
+    local pane = def and def.sections and def.sections[1] and def.sections[1]._pane
+    if not pane then pane = UI.__BuildPane("chat", "settings") end
+    if type(pane) ~= "table" then
+        fails[#fails + 1] = "the pane did not build; captions cannot be audited"
+        return
+    end
+
+    -- The page is laid out at BOTH ends of the hub's real width range: 876 is
+    -- the narrowest window the hub can be dragged to, 880 is every larger one.
+    for _, width in ipairs({ UI.MIN_CONTENT_W, UI.MAX_CONTENT_W }) do
+        UI.__ArrangePane(pane, width)
+        local problems = UI.__PaneAudit(pane)
+        ck(#problems == 0, ("RED CONTROL — every control on the page carries a caption the "
+            .. "kit DRAWS, at %d units (%d problem(s): %s)")
+            :format(width, #problems, table.concat(problems, " | ")))
+    end
+
+    -- THE THREE ROOT CAUSES, each pinned by name so a regression says which
+    -- one came back rather than "a label is missing somewhere".
+    --
+    -- 1. A Core Label frame carries no uiWidth: anything that hands one to a
+    --    row without sizing it is a zero-width frame the ScrollChild culls.
+    local sized, unsized = 0, {}
+    for _, w in ipairs(pane.controls) do
+        if w._kind == "label" and w._shown and w:Caption() then
+            if (w.uiWidth or 0) >= 1 then sized = sized + 1
+            else unsized[#unsized + 1] = w:Caption() end
+        end
+    end
+    ck(sized > 0, "the page really uses inline label cells (got " .. sized .. ")")
+    ck(#unsized == 0, "RED CONTROL — every label cell carries its OWN width, so none is "
+        .. "culled by the row arranger (" .. table.concat(unsized, ",") .. ")")
+
+    -- 2. A Label is a FRAME. Nothing may relabel one through :SetText.
+    for _, w in ipairs(pane.controls) do
+        if w._kind == "label" then
+            ck(type(w.SetText) ~= "function",
+                "a label is a FRAME in the sim too — it has no SetText to be fooled by")
+            break
+        end
+    end
+
+    -- 3. Button:SetText writes to a fontstring Core never installed. A relabel
+    --    that goes through it is a relabel that never happened.
+    local btn
+    for _, w in ipairs(pane.controls) do if w._kind == "button" then btn = w break end end
+    if btn then
+        local before = btn:Caption()
+        btn:SetText("THIS TEXT IS NEVER DRAWN")
+        ck(btn:Caption() == before,
+            "Button:SetText changes NOTHING a player can read (Core installs no fontstring) "
+            .. "— got " .. tostring(btn:Caption()))
+    end
+
+    -- ── THE CHANNEL MANAGER: a row per channel, and not one more ────────
+    -- "the channel color section doesnt show you what channel your editing"
+    -- and twelve rows for five channels. Both are structural now: the row
+    -- count IS the channel count, and every shown row carries its channel's
+    -- name in that channel's own ink.
+    ns:SafeCall(Options.RefreshChannelRows)
+    UI.__ArrangePane(pane, UI.MIN_CONTENT_W)
+    local channels = Options.ChannelRows()
+    ck(Options._shownChanRows == #channels,
+        ("RED CONTROL — the channel manager draws exactly one row per channel: %d row(s) "
+        .. "for %d channel(s), no ghosts"):format(tonumber(Options._shownChanRows) or -1, #channels))
+    local nameless, ghosts = {}, 0
+    for i = 1, Options.MAX_CHANNEL_ROWS do
+        local ui = Options._chanRows[i]
+        local r = channels[i]
+        if ui and ui.label then
+            if r then
+                local cap = ui.label:Caption()
+                if not cap or not cap:lower():find(r.name:lower(), 1, true) then
+                    nameless[#nameless + 1] = tostring(r.name) .. "->" .. tostring(cap)
+                end
+            elseif ui.label._shown then
+                ghosts = ghosts + 1
+            end
+        end
+    end
+    ck(#nameless == 0, "RED CONTROL — every channel row SAYS which channel it is ("
+        .. table.concat(nameless, ",") .. ")")
+    ck(ghosts == 0, "RED CONTROL — no pooled row is left standing without a channel behind it "
+        .. "(" .. ghosts .. " ghost(s))")
+
+    -- The name doubles as the colour preview.
+    do
+        local C = ns.Config
+        local first = channels[1]
+        if C and first then
+            local was = C.ChannelColor(first.name)
+            Options.SetChannelColorHex(first.name, "ff8000")
+            ns:SafeCall(Options.RefreshChannelRows)
+            local ui1 = Options._chanRows[1]
+            local fs = ui1 and ui1.label and ui1.label._label
+            local r0, g0
+            if fs and type(fs.GetTextColor) == "function" then r0, g0 = fs:GetTextColor() end
+            ck(r0 and math.abs(r0 - 1) < 0.01 and math.abs(g0 - 128 / 255) < 0.01,
+                "RED CONTROL — the channel's NAME is inked in the channel's own colour, so the "
+                .. "row previews what it is setting (got " .. tostring(r0) .. "," .. tostring(g0) .. ")")
+            if was then Options.SetChannelColor(first.name, was.r, was.g, was.b)
+            else Options.SetChannelColorHex(first.name, "") end
+            ns:SafeCall(Options.RefreshChannelRows)
+        end
+    end
+
+    -- ── THE ORPHAN RENAME FIELD IS GONE, and its absence is pinned ───────
+    -- "the channel rename piece is terrible": a naked "Rename a channel you are
+    -- not in right now:" field under the rows. The rename lives on the row now.
+    local orphan
+    for _, w in ipairs(pane.controls) do
+        if w._kind == "hint" and type(w._text) == "string"
+           and w._text:find("not in right now", 1, true) then orphan = w._text end
+    end
+    ck(orphan == nil, "RED CONTROL — the orphan rename field is GONE, not left beside its "
+        .. "replacement (found: " .. tostring(orphan) .. ")")
+    ck(type(Options.RenameBoxText) == "function" and type(Options.SetAliasFromRow) == "function",
+        "…and the rename lives on the channel's own row instead")
+    -- The greyed placeholder is never stored as an alias.
+    do
+        local C = ns.Config
+        local r = channels[1]
+        if C and r then
+            local was = C.GetAlias(r.name)
+            Options.SetAliasFromRow(r.name, r.name)
+            ck(C.GetAlias(r.name) == nil,
+                "RED CONTROL — typing the channel's own name back is the REMOVE verb, so the "
+                .. "greyed placeholder can never become a stored alias")
+            Options.SetAliasFromRow(r.name, "Shorter")
+            ck(C.GetAlias(r.name) == "Shorter", "…and a real rename still lands")
+            C.SetAlias(r.name, was or "")
+        end
+    end
+
+    -- ── THE SUB-TAB NAV: names, and no empty boxes ──────────────────────
+    local T = ns.OptionsTabs
+    if T and T._nav then
+        ns:SafeCall(T.Refresh)
+        local ids = T.PageIds()
+        ck(#(T._captionFailures or {}) == 0,
+            "RED CONTROL — every nav caption was really WRITTEN through the drawn FontString ("
+            .. table.concat(T._captionFailures or {}, ",") .. ")")
+        ck(T._shownNav == #ids,
+            ("RED CONTROL — the Tabs nav shows one button per chat tab (%d of %d), never an "
+            .. "empty box"):format(tonumber(T._shownNav) or -1, #ids))
+        local blank = {}
+        for i = 1, #ids do
+            local btn = T._nav[i]
+            local cap = btn and btn:Caption()
+            if not cap then blank[#blank + 1] = tostring(i) end
+        end
+        ck(#blank == 0, "RED CONTROL — no sub-tab button renders blank (" ..
+            table.concat(blank, ",") .. ") — the owner's four empty boxes")
+        ck(T._shownChanBoxes == #channels,
+            "RED CONTROL — the per-tab channel list shows one row per channel too ("
+            .. tostring(T._shownChanBoxes) .. " of " .. #channels .. ")")
+    end
+
+    -- ── THE FORM LANGUAGE ITSELF ────────────────────────────────────────
+    ck(#pane.cards >= 8, "the page is built from bordered group boxes (got "
+        .. #pane.cards .. ")")
+    ck(#pane.checklists >= 5, "…with two-column checkbox grids inside them (got "
+        .. #pane.checklists .. ")")
+    local folds, closed = 0, 0
+    for _, g in ipairs(Form.groups) do
+        if g.advanced then
+            folds = folds + 1
+            if not g.open then closed = closed + 1 end
+        end
+    end
+    ck(folds >= 3, "the rarely-touched options are folded (got " .. folds .. " fold(s))")
+    ck(folds == closed, "…and every fold starts CLOSED (the point of folding them)")
+    -- A fold really opens and closes, and its caption says which it is.
+    local fold
+    for _, g in ipairs(Form.groups) do if g.advanced then fold = g break end end
+    if fold then
+        local shut = fold.toggle and fold.toggle:Caption()
+        ck(Form.ToggleAdvanced(fold) == true, "a fold opens")
+        ck(fold.card == nil or fold.card.uiHeight > 0, "…giving its block a real height")
+        ck(fold.toggle and fold.toggle:Caption() ~= shut, "…and the button says so")
+        ck(Form.ToggleAdvanced(fold) == false, "…and closes again")
+        ck(fold.card == nil or fold.card.uiHeight == 0, "…collapsing the whole group in one block")
+    end
+
+    -- EVERY GROUP BOX IS TALL ENOUGH FOR WHAT IS IN IT. MakeEditorCard's inner
+    -- pane carries no scrollbar, so content taller than the card is content
+    -- nobody can reach — the same invisible-control class, one level up.
+    local short = {}
+    for _, g in ipairs(Form.groups) do
+        if g.card and g.open then
+            local want = Form.BoxHeight(g.units, g.title ~= nil)
+            if (g.card.uiHeight or 0) < want then
+                short[#short + 1] = tostring(g.title or g.name) .. " " ..
+                    tostring(g.card.uiHeight) .. "<" .. tostring(want)
+            end
+        end
+    end
+    ck(#short == 0, "RED CONTROL — every group box is at least as tall as its own content "
+        .. "(" .. table.concat(short, " | ") .. ")")
+
+    if not wasOpts then ns.SetModuleEnabled("options", false) end
+end
+
+-- THE LAYOUT ARITHMETIC, PURE. Everything that decides a column, a row plan or
+-- a box height is a function of numbers, so the claim "nothing overlaps and
+-- nothing overflows at the narrowest window the hub can be dragged to" is
+-- arithmetic rather than a look at a screenshot.
+local function testFormMath(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+
+    ck(Form.MIN_CONTENT_W == 876 and Form.MAX_CONTENT_W == 880,
+        "the hub's real content width range is what the planner plans against")
+    ck(Form.GroupInner(880) == 860, "a group box's inner width is the page minus its padding")
+
+    -- Two-up: the decision, and its edges.
+    local inner = Form.GroupInner(Form.MIN_CONTENT_W)
+    ck(Form.FitsTwoUp(100, 100, inner) == true, "two small cells share a row")
+    ck(Form.FitsTwoUp(inner, 10, inner) == false, "…and two that do not fit, do not")
+    ck(Form.FitsTwoUp(400, 400, 823) == false,
+        "the gap between the columns counts against the fit (400+24+400 > 823)")
+    ck(Form.FitsTwoUp(400, 400, 824) == true, "…and exactly enough is a fit")
+    ck(Form.FitsTwoUp(nil, 100, inner) == false, "an unanswerable width never fits (never a guess)")
+
+    -- THE SECOND COLUMN STARTS AT THE SAME X ON EVERY ROW. This is the one that
+    -- turns "two things beside each other" into "two columns": whatever the
+    -- first column's control is, the second caption absorbs the difference.
+    do
+        local starts = {}
+        for _, cw in ipairs({ 200, 180, 160, 140, 120, 80 }) do
+            local lw = Form.SecondLabelW(cw, nil, nil)
+            -- Where the row arranger will actually place the second caption:
+            -- after the first cell and one item gap.
+            starts[#starts + 1] = Form.CellWidth(cw) + Form.ITEM_GAP
+                + (lw - Form.LABEL_W)
+        end
+        local same = true
+        for i = 2, #starts do if math.abs(starts[i] - starts[1]) > 1e-6 then same = false end end
+        ck(same, "every second column starts at the same x (" .. table.concat(starts, ",") .. ")")
+        ck(math.abs(starts[1] - (Form.COL1_W + Form.COL_GAP)) < 1e-6,
+            "…and that x is the first column's track plus the column gap")
+        ck(Form.SecondLabelW(5000) >= Form.LABEL_W,
+            "a control wider than the whole track never produces a NEGATIVE caption width")
+        ck(Form.FitsTwoUp(Form.COL1_W, Form.CellWidth(200), inner) == true,
+            "the widest pair the pane offers really does fit at the narrowest hub width")
+    end
+
+    -- The plan: nothing dropped, nothing repeated, nothing overlapping and
+    -- nothing past the edge — at BOTH ends of the hub's width range.
+    local widths = { 300, 300, 700, 200, 200, 200 }
+    for _, avail in ipairs({ Form.GroupInner(Form.MIN_CONTENT_W),
+                             Form.GroupInner(Form.MAX_CONTENT_W), 460, 320 }) do
+        local rows = Form.PlanRows(widths, avail)
+        local seen, count = {}, 0
+        for _, r in ipairs(rows) do
+            local ws = {}
+            for _, idx in ipairs(r) do
+                ck(not seen[idx], "cell " .. idx .. " is placed exactly once at " .. avail)
+                seen[idx] = true
+                count = count + 1
+                ws[#ws + 1] = widths[idx]
+            end
+            local offs, total = Form.RowOffsets(ws, avail)
+            -- A single cell wider than the page is the degrade case: the plan
+            -- gives it a row of its own rather than dropping it, and Core's own
+            -- clipping pane contains it. A PAIRED row must always fit.
+            ck(total <= avail or #r == 1,
+                ("a planned row of two never overflows (%d of %d)"):format(total, avail))
+            for i = 2, #offs do
+                ck(offs[i] >= offs[i - 1] + ws[i - 1],
+                    "…and two cells on one row never overlap")
+            end
+        end
+        ck(count == #widths, "every cell is placed at " .. avail .. " (" .. count .. ")")
+    end
+    -- A cell wider than the page still gets a row of its own rather than
+    -- vanishing (the plan degrades, it never drops).
+    local wide = Form.PlanRows({ 5000 }, 100)
+    ck(#wide == 1 and #wide[1] == 1, "a cell too wide for the page still gets its own row")
+
+    -- Heights.
+    ck(Form.BoxHeight(0, false) == Form.CARD_PAD * 2 + Form.CARD_SLACK,
+        "an empty untitled box is padding and slack")
+    ck(Form.BoxHeight(100, true) == Form.BoxHeight(100, false) + Form.CARD_TITLE_H,
+        "a title costs the title band")
+    ck(Form.BoxHeight(100, true) > 100, "a box is always taller than its content")
+    ck(Form.ChecklistHeight(7, 2) == 4 * Form.CHECK_H + Form.ROW_GAP,
+        "seven items in two columns is four rows")
+    ck(Form.ChecklistHeight(0, 2) == Form.ROW_GAP, "…and none is none")
+    ck(Form.ChecklistColumns(Form.GroupInner(Form.MIN_CONTENT_W)) == 2,
+        "a group box is always wide enough for Core's two-column checklist")
+    ck(Form.ChecklistColumns(200) == 1, "…and a narrow one collapses to one, as the kit does")
+    ck(Form.CHECKLIST_COLLAPSE_W == 460,
+        "the collapse width is Core's own (AddChecklist COLLAPSE_W) — one number, not two")
+
+    -- The label cell is what makes a caption survive Core's row arranger.
+    ck(Form.CellWidth(120) == Form.LABEL_W + Form.ITEM_GAP + 120,
+        "a cell is its caption column plus its control")
+    local fake = { _label = { SetText = function() end } }
+    ck(Form.SizeLabel(fake, 90).uiWidth == 90, "SizeLabel gives a label a width of its own")
+    ck(Form.SetCaption({ }, "x") == false,
+        "SetCaption REFUSES a widget with no drawn caption instead of pretending")
+    ck(Form.SetCaption(nil, "x") == false, "…and refuses nothing at all")
+end
+
 function Options.RunSelfTests(verbose)
     local suites = {
         { name = "bindings (every control names a real field)", fn = testBindings },
         { name = "store access",            fn = testStoreAccess },
+        -- The registration suite owns the phase-0 inertness assertions (nothing
+        -- registered while disabled), so it must run before anything that turns
+        -- the module on. Captions run straight after it, on the pane it built.
+        { name = "form layout (pure: columns, plans, box heights)", fn = testFormMath },
         { name = "registration + the pane", fn = testRegistrationAndPane },
+        { name = "captions (every control is legible)", fn = testCaptions },
         { name = "live apply (a control reaches PIXELS, same beat)", fn = testLiveApply },
         { name = "channels: order, colour, rename", fn = testChannelRows },
         { name = "channel order converges (drag -> the numbering engine)", fn = testOrderConverges },
