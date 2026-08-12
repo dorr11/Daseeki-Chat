@@ -1181,6 +1181,94 @@ function Form.FixWidth(w, width)
     return w
 end
 
+-- ── THE COMMIT CONTRACT (owner defect, 2026-08-12, round 2) ─────────────────
+--
+-- THE DEFECT: "the TRADE nickname still does not work" — with the case-folding
+-- fix from round 1 LIVE on his client, `trade` was STILL absent from his saved
+-- aliases at rev 42. Round 1 pinned Options.SetAliasFromRow by CALLING it, so
+-- it proved the setter and never the way a player reaches it.
+--
+-- THE REAL MECHANISM: Core's UI.MakeEditBox (daseekiui.lua) wires exactly two
+-- scripts — OnEnterPressed (commit) and OnEscapePressed (revert). There is NO
+-- OnEditFocusLost. So a player who types a nickname and then CLICKS AWAY —
+-- onto the next row, the colour box, the scroll bar, anywhere — loses every
+-- keystroke silently: the box is repainted from `get` on the next refresh and
+-- the config was never touched. Only a literal Enter keypress ever saved.
+--
+-- WHY THE COLOURS LOOKED LIKE A COUNTEREXAMPLE: his `colors` table is
+-- populated, so the hex box "obviously worked". It did not — colours reach the
+-- config by two OTHER paths that never touch an edit box: the row's Colour
+-- button (Options.OpenColorPicker -> the client's ColorPickerFrame, which
+-- writes on its own OK), and the reconciler's capture-back of channel colours
+-- the player set in the client's own UI. His stored values are the client's
+-- own defaults (ffc0c0, ffbfbf), which is capture-back's fingerprint, not a
+-- hand-typed hex. Both edit boxes were equally broken; only the alias had no
+-- second path to hide behind, which is exactly why the alias was the symptom.
+--
+-- THE FIX, at the contract: an edit box in this pane COMMITS on Enter AND on
+-- focus loss, and REVERTS on Escape — the behaviour every player already
+-- expects from every other field in the game. Enter commits exactly ONCE (its
+-- own ClearFocus fires focus-loss, which the guard swallows) and Escape commits
+-- NEVER. Applied through Form.CommitBox so no site can build a box and forget.
+--
+-- Core's factory is the upstream home for this; wiring it here keeps the fix
+-- inside the addon that shipped the defect, and re-installing the two scripts
+-- Core already set is a byte-for-byte superset of Core's own behaviour.
+function Form.WireCommit(w, opts)
+    local box = type(w) == "table" and (w.editBox or w) or nil
+    opts = opts or {}
+    if not (box and type(box.SetScript) == "function"
+            and type(box.GetText) == "function") then return w end
+    local state = {}
+    local function clearFocus(self)
+        if type(self.ClearFocus) == "function" then pcall(self.ClearFocus, self) end
+    end
+    local function commit(self)
+        if type(opts.set) ~= "function" then return end
+        local text = self:GetText()
+        ns:SafeCall(function() opts.set(text) end)
+    end
+    -- Enter: commit, then give the focus back. `busy` spans the ClearFocus so
+    -- the focus-loss handler it triggers does not write a second time.
+    box:SetScript("OnEnterPressed", function(self)
+        if state.busy then return end
+        state.busy = true
+        commit(self)
+        clearFocus(self)
+        state.busy = false
+    end)
+    -- Focus loss: the path the owner actually took. This is the whole fix.
+    box:SetScript("OnEditFocusLost", function(self)
+        if state.busy then return end
+        state.busy = true
+        commit(self)
+        state.busy = false
+    end)
+    -- Escape: put back what the config says and write NOTHING.
+    box:SetScript("OnEscapePressed", function(self)
+        if state.busy then return end
+        state.busy = true
+        if type(self.SetText) == "function" then
+            local v
+            if type(opts.get) == "function" then
+                local ok, got = pcall(opts.get)
+                if ok then v = got end
+            end
+            pcall(self.SetText, self, v or "")
+        end
+        clearFocus(self)
+        state.busy = false
+    end)
+    w._dchatCommitWired = true
+    return w
+end
+
+-- Build an edit box that already honours the commit contract. Every edit box in
+-- this pane is built through here.
+function Form.CommitBox(row, opts)
+    return Form.WireCommit(row:EditBox(opts), opts)
+end
+
 -- Grey an edit box's own text (the "this is the game's name, not your name"
 -- state on a rename field that has never been filled in).
 function Form.GreyBox(w, on)
@@ -1861,7 +1949,7 @@ local function buildChannels(sec)
                 if r then Options.OpenColorPicker(r.name) end
             end,
         })
-        local hexBox = Form.FixWidth(row:EditBox({
+        local hexBox = Form.FixWidth(Form.CommitBox(row, {
             width = 90,
             get = function()
                 local r = Options.ChannelRows()[i]
@@ -1874,7 +1962,7 @@ local function buildChannels(sec)
             end,
         }), 90)
         reg(hexBox)
-        local nameBox = Form.FixWidth(row:EditBox({
+        local nameBox = Form.FixWidth(Form.CommitBox(row, {
             width = 150,
             get = function() return Options.RenameBoxText(i) end,
             set = function(v)
@@ -2098,7 +2186,7 @@ local function buildGeneral(flow)
             }))
         end },
         { caption = "Custom (RRGGBB)", width = 120, make = function(row)
-            return reg(Form.FixWidth(row:EditBox({
+            return reg(Form.FixWidth(Form.CommitBox(row, {
                 width = 120,
                 get = fieldGet("stamps.customColor"),
                 set = fieldSet("stamps.customColor", function(v)
@@ -3634,6 +3722,95 @@ local function testCaptions(fails)
             ck(C.GetAlias(r.name) == nil,
                 "…while the placeholder itself, trimmed, is still the REMOVE verb")
             C.SetAlias(r.name, was or "")
+        end
+    end
+
+    -- ── THE WIDGET'S OWN CONTRACT (owner defect round 2, 2026-08-12) ────
+    -- Round 1 fixed SetAliasFromRow and pinned it BY CALLING IT. The pin went
+    -- green, the build shipped, and the owner's `trade` alias was still absent
+    -- at rev 42 — because nothing on his client ever called it. Core's edit box
+    -- commits on Enter and on NOTHING ELSE, so typing "TRADE" and clicking away
+    -- threw the keystrokes on the floor. THIS pin drives the widget the way a
+    -- player does — focus, type, leave — and never touches the setter directly.
+    do
+        local C = ns.Config
+        local r = channels[1]
+        local ui = Options._chanRows[1]
+        local box = ui and ui.nameBox and ui.nameBox.editBox
+        ck(box ~= nil, "the sim models the rename field as a real EDIT BOX with focus and "
+            .. "scripts (without one, no suite can see a lost edit)")
+        if C and r and box then
+            local was = C.GetAlias(r.name)
+            local SHOUT = tostring(r.name):upper()
+
+            -- THE OWNER'S EXACT GESTURE: click in, type the nickname, click away.
+            C.SetAlias(r.name, "")
+            ns:SafeCall(Options.RefreshChannelRows)
+            box:PlayerTypes(SHOUT)
+            box:ClickAway()
+            ck(C.GetAlias(r.name) == SHOUT,
+                "RED CONTROL — typing a nickname and CLICKING AWAY saves it. This is the "
+                .. "owner's gesture: Core's edit box commits on Enter and had no "
+                .. "OnEditFocusLost, so every keystroke was silently discarded and the "
+                .. "config never moved (wanted " .. SHOUT .. ", got "
+                .. tostring(C.GetAlias(r.name)) .. ")")
+
+            -- ENTER still commits — and exactly ONCE, even though its own
+            -- ClearFocus fires the focus-loss handler underneath it.
+            C.SetAlias(r.name, "")
+            ns:SafeCall(Options.RefreshChannelRows)
+            local writes = 0
+            local realSet = Options.SetAlias
+            Options.SetAlias = function(...) writes = writes + 1 return realSet(...) end
+            box:PlayerTypes("Enterly")
+            box:PressEnter()
+            Options.SetAlias = realSet
+            ck(C.GetAlias(r.name) == "Enterly", "Enter still commits, as it always did")
+            ck(writes == 1, "…exactly ONCE — Enter's own ClearFocus must not write a second "
+                .. "time through the focus-loss handler (got " .. writes .. " write(s))")
+            ck(box:HasFocus() == false, "…and Enter still gives the focus back")
+
+            -- ESCAPE reverts and writes NOTHING, even though it drops focus too.
+            C.SetAlias(r.name, "Kept")
+            ns:SafeCall(Options.RefreshChannelRows)
+            box:PlayerTypes("Discarded")
+            box:PressEscape()
+            ck(C.GetAlias(r.name) == "Kept",
+                "RED CONTROL — Escape ABANDONS the edit: it drops focus, and the focus-loss "
+                .. "commit must not turn a cancel into a save (got "
+                .. tostring(C.GetAlias(r.name)) .. ")")
+            ck(box:GetText() == "Kept", "…and the field is repainted from the config")
+
+            -- The greyed placeholder still cannot become an alias by accident:
+            -- clicking in and straight back out writes nothing new.
+            C.SetAlias(r.name, "")
+            ns:SafeCall(Options.RefreshChannelRows)
+            box:SetFocus()
+            box:ClickAway()
+            ck(C.GetAlias(r.name) == nil,
+                "RED CONTROL — clicking into an un-renamed field and straight out again "
+                .. "leaves the channel un-renamed (the placeholder is not a rename)")
+
+            -- The COLOUR box next door shares the contract — it was equally
+            -- broken and only looked healthy because the Colour button and the
+            -- reconciler's capture-back write colours without an edit box.
+            local hex = ui.hexBox and ui.hexBox.editBox
+            ck(hex ~= nil, "the hex field is an edit box in the sim too")
+            if hex then
+                local wasCol = C.ChannelColor(r.name)
+                hex:PlayerTypes("ff8000")
+                hex:ClickAway()
+                local got = C.ChannelColor(r.name)
+                ck(got and math.abs(got.r - 1) < 0.01 and math.abs(got.g - 128 / 255) < 0.01,
+                    "RED CONTROL — the hex field saves on click-away too (it never did; the "
+                    .. "populated colours in the owner's config came from the Colour button "
+                    .. "and capture-back, not from this box)")
+                if wasCol then Options.SetChannelColor(r.name, wasCol.r, wasCol.g, wasCol.b)
+                else Options.SetChannelColorHex(r.name, "") end
+            end
+
+            C.SetAlias(r.name, was or "")
+            ns:SafeCall(Options.RefreshChannelRows)
         end
     end
 

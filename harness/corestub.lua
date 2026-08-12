@@ -528,6 +528,74 @@ local function recWidget(kind, opts, pane, section, row)
     -- is on w._label, which is where Core puts it and where an honest caller
     -- has to write.
 
+    --   KINDNESS 4 — "set() is how an edit box saves." The stub used to expose
+    --     an edit box as nothing but its `_opts` table, so every suite drove a
+    --     field by CALLING `_opts.set(value)` directly. That tests the setter
+    --     and never the WIDGET: it silently assumes something invokes `set`
+    --     when the player finishes typing. Core's UI.MakeEditBox wires exactly
+    --     TWO scripts — OnEnterPressed (commit) and OnEscapePressed (revert) —
+    --     and NO OnEditFocusLost, so a player who types and then clicks away
+    --     loses the lot and `set` is never called. That is the owner's "the
+    --     TRADE nickname still does not save", and it survived a whole green
+    --     suite because the sim had no focus and no keys to lose it with.
+    --     => modeled: a rec editbox carries a real `editBox` with text, FOCUS
+    --     and a script table, and it is born with CORE'S OWN two handlers and
+    --     no third one. The hazard is present in the stub, so a suite that
+    --     drives the widget the way a player does can see it.
+    if kind == "editbox" then
+        local box = { _text = "", _focused = false, _scripts = {} }
+        function box:SetScript(name, fn) self._scripts[name] = fn end
+        function box:GetScript(name) return self._scripts[name] end
+        function box:HasScript() return true end
+        function box:SetText(t) self._text = tostring(t or "") end
+        function box:GetText() return self._text end
+        function box:SetTextColor(r, g, b, a) self._textColor = { r, g, b, a } end
+        function box:SetAutoFocus() end
+        function box:HasFocus() return self._focused and true or false end
+        function box:SetFocus() self._focused = true end
+        -- Losing focus FIRES OnEditFocusLost — but only if the box actually had
+        -- focus, exactly like the client.
+        function box:ClearFocus()
+            if not self._focused then return end
+            self._focused = false
+            local fn = self._scripts.OnEditFocusLost
+            if type(fn) == "function" then fn(self) end
+        end
+
+        -- CORE'S OWN WIRING, VERBATIM (daseekiui.lua UI.MakeEditBox). Enter
+        -- commits and drops focus; Escape repaints from `get` and drops focus;
+        -- NOTHING listens for focus loss. A consumer that wants the third
+        -- handler has to install it, and that install is what the suite pins.
+        box:SetScript("OnEnterPressed", function(self)
+            if type(opts.set) == "function" then opts.set(self:GetText()) end
+            self:ClearFocus()
+        end)
+        box:SetScript("OnEscapePressed", function(self)
+            self:SetText(type(opts.get) == "function" and opts.get() or "")
+            self:ClearFocus()
+        end)
+
+        -- ── HOW A SUITE DRIVES ONE, as a player does ────────────────────────
+        -- Click in, type, and then leave by one of the three real exits.
+        function box:PlayerTypes(text)
+            self:SetFocus()
+            self:SetText(text)
+            return self
+        end
+        local function fire(self, name)
+            local fn = self._scripts[name]
+            if type(fn) == "function" then fn(self) end
+            return self
+        end
+        function box:PressEnter()  return fire(self, "OnEnterPressed") end
+        function box:PressEscape() return fire(self, "OnEscapePressed") end
+        -- The exit the owner took: click somewhere else. No key is pressed;
+        -- the box simply loses focus.
+        function box:ClickAway() self:ClearFocus() return self end
+
+        w.editBox = box
+    end
+
     -- What a player can actually READ on this widget right now.
     function w:Caption()
         local t = self._label and self._label:GetText() or nil
@@ -546,6 +614,11 @@ local function recWidget(kind, opts, pane, section, row)
             local ok, v = pcall(get)
             w._value = ok and v or nil
         end
+        -- Core's own frame.Refresh REPAINTS THE BOX from `get` (daseekiui.lua:
+        -- `frame.Refresh = function() box:SetText(opts.get and (opts.get() or "")) end`).
+        -- Modeling it is what makes a lost edit visible: the field goes back to
+        -- saying what the config says, which is exactly what the owner saw.
+        if w.editBox then w.editBox:SetText(w._value or "") end
         w._refreshes = (w._refreshes or 0) + 1
         return w._value
     end

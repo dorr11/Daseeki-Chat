@@ -8,6 +8,37 @@ character — including a brand-new one — reconciles to automatically at login
 
 This entry accumulates until 1.0.0 ships.
 
+### Channel nicknames, saving edits, and the resize corners
+
+- **City channels answer to their nickname now.** Naming General "ZONE" worked
+  everywhere except the place you read it — the chat line still said
+  "5. General - Stormwind City". The game calls a city channel by its name with
+  the zone glued on, and only the plain-named channels (LookingForGroup, your
+  own channels) ever matched what you had typed. Nicknames are now looked up
+  against the channel itself, zone or no zone, in the one place the chat line,
+  the tab, the typing bar and the settings row all ask — so naming Trade
+  "TRADE" shows "[TRADE]" on every one of them.
+- **A rename saves when you click away.** Typing a nickname and then clicking
+  anywhere else threw the whole edit away without a word: every text field on
+  the settings page only saved if you pressed Enter. They now save the moment
+  you leave the field, exactly like the rest of the game, and Escape still
+  abandons an edit you did not mean to make. This is why "TRADE" would not
+  stick no matter how many times you typed it, and it applies to every text
+  field on the page — nicknames, colour codes and tab names alike.
+- **Item links show their tooltip on click, like standard chat - not on
+  hover.** Daseeki's own chat feeds carry no hover tooltip and never did; the
+  combat log tab, which is the game's own frame borrowed into Daseeki's window,
+  now matches the rest of the box instead of popping tooltips as you sweep past
+  a link. It gets its own behaviour back untouched the moment it goes home.
+- **Dragging a corner ends when you let go.** The resize grips listened for a
+  mouse-release *on the grip itself* — but a corner drag is exactly the gesture
+  that walks the pointer off it, so the release often landed on nothing and the
+  corner carried on following the mouse afterwards. The grips now use the same
+  drag wiring the rest of the window has always used, so the box stops where
+  you drop it. The size limits are also handed to the game for the duration of
+  the drag, so a corner stops at the minimum instead of shrinking past it and
+  springing back when you release.
+
 ### The settings menu, made readable
 
 The settings page worked and looked terrible. Everything below is what you asked

@@ -495,7 +495,7 @@ function Tabs.Build(flow)
     bind("tabs.color")
     Form.Pair(page,
         { caption = "Tab name", width = 180, make = function(row)
-            return reg(Form.FixWidth(row:EditBox({
+            return reg(Form.FixWidth(Form.CommitBox(row, {
                 width = 180,
                 get = function()
                     local id = Tabs.Selected()
