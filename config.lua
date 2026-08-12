@@ -74,7 +74,11 @@ local CFG_DEFAULTS = {
     join    = {},     -- array of { number, name } pairs, sorted by number
     aliases = {},     -- [channel name, lowercased] = display alias (see below)
     aliasKeepNumber = false,   -- "[2. Trade]" instead of "[Trade]"
-    skin    = { tabPlacement = "top" },  -- LAYOUT that rides the mesh (see below)
+    -- LAYOUT that rides the mesh (see below). `locked` joined it 2026-08-11
+    -- (the owner's "i need a way to lock / unlock the positioning"): where the
+    -- box IS rides the mesh already, so whether it can be MOVED belongs beside
+    -- it — lock on one character and every character's box is a rock.
+    skin    = { tabPlacement = "top", locked = false },
 }
 
 function Config.Get()
@@ -856,6 +860,69 @@ end
 -- its store untouched and un-rendered. Nothing about the wire changed shape.
 ----------------------------------------------------------------------
 
+----------------------------------------------------------------------
+-- ============ THE CONFIG SURFACE AUDIT (2026-08-11) ============
+--
+-- WHY IT EXISTS (owner, 2026-08-11: "seems theres a lot of misses here the
+-- config and build is messy. please review it and clean it up"). Every field
+-- this addon stores is checked on FOUR legs, and a field that fails all four is
+-- dead config and gets deleted rather than documented:
+--   READ    — some shipping module reads it;
+--   LIVE    — a write reaches PIXELS without a /reload, through a named
+--             apply seam (options.lua's Options.APPLY_SEAMS; the binding
+--             names which one, and the bind-check refuses a binding that
+--             names none);
+--   SYNC    — it rides the mesh (named in Candidates + Snapshot +
+--             AdoptEffective — the aliases lesson) or is deliberately
+--             account-local WITH the reason recorded;
+--   CONTROL — it is bound in Options.BINDINGS, or listed in Options.UNBOUND
+--             with its reason. Options.CheckCoverage() is the gate: a stored
+--             field that is neither fails the suite.
+--
+-- ── db.view.* (ACCOUNT-LOCAL: the LOOK is per-monitor taste — view.lua's
+--    config note is the recorded reason) ────────────────────────────────────
+--   fontSize     READ view.MessageFontSize | LIVE view.look   | CONTROL slider
+--   lineHeight   READ view.MessageSpacing  | LIVE view.look   | CONTROL slider
+--   tabTextSize  READ view.TabTextSize     | LIVE view.layout | CONTROL slider
+--   copyButton   READ view.EnsureCopyButton| LIVE view.furniture | CONTROL box
+--
+-- ── db.skin.* (ACCOUNT-LOCAL: skin-over's own look + the gesture gates) ────
+--   unifiedChassis, channelTabs, stampDivider, editBoxChannelColor, iconRail,
+--   hideButtonColumn, copyButton, fading, fadeTime
+--        READ skin.lua | LIVE skin.restyle / skin.tabs / skin.dividers
+--        | CONTROL Appearance. NOTE: with the DRAWN window on, the skin-over
+--        renderer is retired (Skin.ViewOwnsPixels), so several of these speak
+--        only to the box-off path. The pane says so in a status line rather
+--        than offering a control that silently does nothing.
+--   persistentEditBox, editBox   READ skin + view.LayoutEditBox
+--        | LIVE skin.editbox | CONTROL Windows
+--   altDragMove, snapToEdges     READ at gesture time (Skin.MoveAllowed /
+--        Skin.SnapEnabled) | LIVE next-gesture (no standing surface — the
+--        reason is recorded on the binding) | CONTROL Windows
+--   unclampWindows               READ skin.LoosenClamp | LIVE skin.restyle
+--        | CONTROL Windows
+--   messageFontSize, lineHeight  READ skin-over typography (box-off only)
+--        | CONTROL Options.UNBOUND, with the reason
+--
+-- ── config.skin.* (SYNCED — named in all three whitelist sites) ────────────
+--   tabPlacement  READ view/skin/badges | LIVE view.layout | CONTROL Tabs
+--   locked        READ view.DragAllowed + view resize + Skin.MoveAllowed
+--                 | LIVE lock.apply | CONTROL Windows + /dchat lock|unlock
+--
+-- ── config.windows[id].* (SYNCED inside `windows`) ─────────────────────────
+--   name, fontSize, r, g, b, alpha, shown, docked, uninteractable, groups,
+--   channels      READ+APPLIED by reconcile.lua at login and on demand
+--                 | CONTROL the reconciler owns them (Options.UNBOUND does not
+--                 list them: they are not settings, they are the projection)
+--   locked        THE CLIENT's own per-window flag captured from
+--                 GetChatWindowInfo — NOT this addon's lock. Named here so the
+--                 two can never be confused: ours is config.skin.locked.
+--   pos, dim      the client's raw pair, kept for diffing
+--   npos, ndim    the NORMALIZED pair the reconciler actually replays
+--                 | LIVE written by every move/resize commit
+--   tabColor      READ view.TabInk | LIVE skin.tabs | CONTROL Tabs row
+----------------------------------------------------------------------
+
 Config.TAB_PLACEMENTS = { "top", "left", "right" }
 
 function Config.IsTabPlacement(v)
@@ -885,6 +952,48 @@ function Config.SetTabPlacement(where)
     if not c then return false end
     if type(c.skin) ~= "table" then c.skin = {} end
     c.skin.tabPlacement = where
+    Config.Bump()
+    return true
+end
+
+----------------------------------------------------------------------
+-- THE LOCK (owner, 2026-08-11: "i need a way to lock / unlock the positioning
+-- and also when unlocked i should be able to click and drag a corner to
+-- re-size it").
+--
+-- It lives in the SYNCED skin section beside tabPlacement, for the reason the
+-- whitelist note above gives: a lock that were account-local would have to be
+-- re-set on every character, and the box's POSITION already rides the mesh —
+-- an addon that syncs where the box is and not whether it can be moved is
+-- telling half a story.
+--
+-- DEFAULT: UNLOCKED. The box has been unconditionally movable since it was
+-- drawn, and a build that silently locked it would take a capability away from
+-- a session that never asked. The affordance (four visible corner grips) is
+-- what changes, not the posture.
+----------------------------------------------------------------------
+
+-- The EFFECTIVE lock: the cross-account winner first, the local store second,
+-- UNLOCKED when nobody has said (never a hopeful `true` — a lock nobody chose
+-- reads to the player as a broken window).
+function Config.Locked()
+    local eff = Config.EffectiveCfg()
+    local s = (type(eff) == "table" and type(eff.skin) == "table") and eff.skin or nil
+    if s and type(s.locked) == "boolean" then return s.locked end
+    local c = Config.Get()
+    s = (c and type(c.skin) == "table") and c.skin or nil
+    if s and type(s.locked) == "boolean" then return s.locked end
+    return false
+end
+
+function Config.SetLocked(on)
+    on = on and true or false
+    if Config.Locked() == on then return false end             -- no sync storm
+    Config.AdoptEffective()
+    local c = Config.Get()
+    if not c then return false end
+    if type(c.skin) ~= "table" then c.skin = {} end
+    c.skin.locked = on
     Config.Bump()
     return true
 end

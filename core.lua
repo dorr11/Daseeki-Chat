@@ -362,6 +362,28 @@ function ns.GetCommand(name)
     return extraCommands[tostring(name):lower()]
 end
 
+-- HELP NOTES: one line of STATE a module wants printed with the command list,
+-- because "what are the commands" and "which way is this switch pointing right
+-- now" are the same question when the switch is a lock. Registered functions
+-- answer a string (or nil for "nothing to say"), and are called inside the
+-- print, never cached — the state is read at the moment it is shown.
+local helpNotes = {}
+
+function ns.RegisterHelpNote(fn)
+    if type(fn) ~= "function" then return false end
+    helpNotes[#helpNotes + 1] = fn
+    return true
+end
+
+function ns.HelpNotes()
+    local out = {}
+    for _, fn in ipairs(helpNotes) do
+        local ok, line = pcall(fn)
+        if ok and type(line) == "string" and line ~= "" then out[#out + 1] = line end
+    end
+    return out
+end
+
 local function dispatch(msg)
     local cmd, rest = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
     cmd = (cmd or ""):lower()
@@ -377,6 +399,7 @@ local function dispatch(msg)
         for _, name in ipairs(debugOrder) do
             ns:Print("    /dchat debug " .. name .. " - " .. (debugCommands[name].help or ""))
         end
+        for _, line in ipairs(ns.HelpNotes()) do ns:Print(line) end
     elseif cmd == "status" then
         for _, name in ipairs(ns.ModuleOrder) do
             local m = ns.Modules[name]

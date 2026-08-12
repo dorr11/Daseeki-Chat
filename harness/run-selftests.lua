@@ -1256,6 +1256,272 @@ ns:RegisterSelfTest("view-integration", function(verbose)
 end)
 
 ----------------------------------------------------------------------
+-- Harness-registered suite: VIEW-MATRIX — the placement matrix, driven the way
+-- the PLAYER drives it.
+--
+-- WHY IT EXISTS (owner, 2026-08-11: "setting the tabs to left breaks the
+-- window", with a screenshot of one tab still on the top strip while three more
+-- were drawn down the left OVER the message text). Every individual fact in
+-- that screenshot had a passing test:
+--   * the view suite's phase 14 checked all three placements — but it called
+--     View.Layout() by hand, so it exercised the layout and never the APPLY
+--     PATH the settings pane actually uses;
+--   * phase 13 measured a tab run — but only a TOP one, at one size, with the
+--     tab count the default world happens to have.
+-- The misses kept coming from untested COMBINATIONS, so this suite is a matrix
+-- rather than a list of cases: {top, left, right} x {badges on, off} x {1..5
+-- tabs} x {floor, default, large}, and every transition between placements is
+-- driven in both directions with the invariants re-checked after each one.
+--
+-- The invariants, all measured through the sim's anchor resolver:
+--   1. every tab lies FULLY inside the strip/rail surface;
+--   2. no two tabs overlap;
+--   3. no tab is left on the surface the placement is NOT using (the mixed
+--      state — checked as "outside the strip's rect", which is what that
+--      failure looks like geometrically);
+--   4. the feed is disjoint from the strip/rail and from the entry bar;
+--   5. the entry bar is disjoint from the strip/rail and the feed;
+--   6. every one of them is inside the chassis;
+--   7. no corner grip covers message text, a tab's LABEL, or the edit box.
+----------------------------------------------------------------------
+
+ns:RegisterSelfTest("view-matrix", function(verbose)
+    local fails = {}
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Sim = _G.__DaseekiChatSim
+    local ok, err = pcall(function()
+        local V, C, O = ns.View, ns.Config, ns.Options
+        local rect = Sim.ResolveRect
+        local savedPlace = C.TabPlacement()
+        local savedView, savedBadges = ns.ModuleEnabled("view"), ns.ModuleEnabled("badges")
+        local savedWindows = {}
+        for id = 3, 7 do
+            local w = Sim.windows[id]
+            if w then savedWindows[id] = { w.name, w.shown, w.docked } end
+        end
+        ns.SetModuleEnabled("badges", true)
+        ns.SetModuleEnabled("view", true)
+        HTIMER.flush()
+
+        local function inside(a, b, slack)          -- is rect a inside rect b?
+            local al, ab, aw, ah = rect(a)
+            local bl, bb, bw, bh = rect(b)
+            if al == nil or bl == nil then return nil end
+            slack = slack or 1e-6
+            return al >= bl - slack and al + aw <= bl + bw + slack
+               and ab >= bb - slack and ab + ah <= bb + bh + slack
+        end
+
+        -- Every geometric invariant, for the world as it stands right now.
+        -- Returns a list of human-readable violations (empty = the cell holds).
+        local function violations(tag)
+            local out = {}
+            local function bad(m) out[#out + 1] = tag .. " " .. m end
+            local cl, cb, cw, chh = rect(V.chassis)
+            local sl, sb, sw, sh   = rect(V.strip)
+            local el, eb, ew, eh   = rect(V.entry)
+            local fl, fb, fw, fh   = rect(V.frames[V.ActiveId()])
+            if cl == nil then bad("the chassis does not resolve") return out end
+            if sl == nil then bad("the strip does not resolve") return out end
+            if el == nil then bad("the entry does not resolve") return out end
+            if fl == nil then bad("the feed does not resolve") return out end
+            if fw <= 0 or fh <= 0 then bad("the feed has no real rect") end
+            if inside(V.strip, V.chassis) == false then bad("the strip escapes the chassis") end
+            if inside(V.entry, V.chassis) == false then bad("the entry escapes the chassis") end
+            if inside(V.frames[V.ActiveId()], V.chassis) == false then
+                bad("the feed escapes the chassis")
+            end
+            if Sim.RectsOverlap(V.frames[V.ActiveId()], V.strip) then
+                bad("THE FEED OVERLAPS THE TAB SURFACE (text under the tabs)")
+            end
+            if Sim.RectsOverlap(V.frames[V.ActiveId()], V.entry) then
+                bad("the feed overlaps the entry bar")
+            end
+            if Sim.RectsOverlap(V.entry, V.strip) then bad("the entry overlaps the tab surface") end
+            for i, id in ipairs(V.ids) do
+                local btn = V.tabs[id] and V.tabs[id].button
+                if not btn then bad("tab " .. id .. " has no button")
+                else
+                    local tl, tb, tw, th = rect(btn)
+                    if tl == nil then bad("tab " .. id .. " does not resolve")
+                    else
+                        if inside(btn, V.strip) == false then
+                            bad("TAB " .. id .. " IS NOT ON THE TAB SURFACE (the mixed state)")
+                        end
+                        if inside(btn, V.chassis) == false then
+                            bad("tab " .. id .. " escapes the chassis")
+                        end
+                        if Sim.RectsOverlap(btn, V.frames[V.ActiveId()]) then
+                            bad("tab " .. id .. " is drawn over the message feed")
+                        end
+                        for j = i + 1, #V.ids do
+                            local other = V.tabs[V.ids[j]] and V.tabs[V.ids[j]].button
+                            if other and Sim.RectsOverlap(btn, other) then
+                                bad("tabs " .. id .. " and " .. V.ids[j] .. " OVERLAP")
+                            end
+                        end
+                    end
+                    -- The pip rides the tab, inside it, wherever the tab is.
+                    local B = ns.Badges
+                    local bw2 = B and B.widgets and B.widgets[V.ClientFrame(id)]
+                    if bw2 and bw2.holder and bw2.holder._shown and inside(bw2.holder, btn) == false then
+                        bad("the unread pip on tab " .. id .. " is NOT inside its tab")
+                    end
+                    -- …and no grip covers a tab's label or the message text.
+                    for _, corner in ipairs(V.GRIP_CORNERS) do
+                        local g = V.grips[corner]
+                        if g and g._shown then
+                            if Sim.RectsOverlap(g, V.frames[V.ActiveId()]) then
+                                bad("the " .. corner .. " grip covers message text")
+                            end
+                            local label = V.tabs[id] and V.tabs[id].label
+                            if label and tostring(label:GetText() or "") ~= ""
+                               and Sim.RectsOverlap(g, label) then
+                                bad("the " .. corner .. " grip covers tab " .. id .. "'s label")
+                            end
+                        end
+                    end
+                end
+            end
+            -- THE EDIT BOX is asked about its TEXT rect, not its frame: the
+            -- entry bar spans the box's full width by design, so its frame and
+            -- the two bottom grips share the corners necessarily. What must
+            -- never happen is a grip over the TYPING AREA — and the mockup's
+            -- 12-unit entry padding is exactly what keeps them apart (the grip
+            -- ends where the text begins, which is why the padding is not free
+            -- to shrink).
+            local heldEB = V._ebHome and V._ebHome.eb
+            if heldEB then
+                local ebl, ebb, ebw, ebh = rect(heldEB)
+                local il, ir, it, ib = heldEB:GetTextInsets()
+                if ebl ~= nil and il ~= nil then
+                    local tl, tb = ebl + il, ebb + (ib or 0)
+                    local tw, th = ebw - il - (ir or 0), ebh - (ib or 0) - (it or 0)
+                    for _, corner in ipairs(V.GRIP_CORNERS) do
+                        local g = V.grips[corner]
+                        local gl, gb, gw, gh = rect(g)
+                        if g and g._shown and gl ~= nil
+                           and not (gl + gw <= tl or tl + tw <= gl)
+                           and not (gb + gh <= tb or tb + th <= gb) then
+                            bad("the " .. corner .. " grip covers the edit box's typing area")
+                        end
+                    end
+                end
+            end
+            return out
+        end
+
+        -- Open windows until the view owns `n` of them (2 is the combat log and
+        -- is never ours, so the ids are not contiguous — that is the point).
+        local nextName = { "Focus", "DMs", "Loot", "Trade", "Raid" }
+        local function windowsTo(n)
+            local guard = 0
+            while #V.OwnedIds() < n and guard < 8 do
+                guard = guard + 1
+                _G.FCF_OpenNewWindow(nextName[guard] or ("W" .. guard))
+            end
+            V.Refresh()
+            HTIMER.flush()
+            return #V.ids
+        end
+
+        local cells, worst = 0, {}
+        local COUNTS = { 1, 2, 3, 5 }
+        local SIZES  = { "floor", "default", "large" }
+        -- Every ORDERED transition between the three placements, walked as one
+        -- path: top->left->top->right->left->right->top.
+        local WALK = { "top", "left", "top", "right", "left", "right", "top" }
+
+        for _, want in ipairs(COUNTS) do
+            local got = windowsTo(want)
+            for _, badgesOn in ipairs({ true, false }) do
+                ns.SetModuleEnabled("badges", badgesOn)
+                if badgesOn then
+                    -- Real unread counts, so the pips are really in the layout.
+                    for _, id in ipairs(V.ids) do
+                        if id ~= V.ActiveId() then
+                            V.ClientFrame(id):AddMessage("unread " .. id, 1, 1, 1)
+                        end
+                    end
+                    HTIMER.advance(0)
+                end
+                for _, size in ipairs(SIZES) do
+                    for _, place in ipairs(WALK) do
+                        -- THE REAL APPLY PATH: the settings pane's own seam, not
+                        -- a hand-called View.Layout(). This is the whole point of
+                        -- the suite — the defect lived between the two.
+                        O.SetTabPlacement(place)
+                        if size == "floor" then
+                            V.ResizeAnchored(1, 1, "BOTTOMRIGHT")
+                        elseif size == "large" then
+                            V.ResizeAnchored(900, 500, "BOTTOMRIGHT")
+                        else
+                            V.Layout()
+                        end
+                        cells = cells + 1
+                        local tag = ("[%d tab(s), badges %s, %s, %s]"):format(
+                            #V.ids, badgesOn and "on" or "off", size, place)
+                        for _, v in ipairs(violations(tag)) do
+                            if #worst < 12 then worst[#worst + 1] = v end
+                        end
+                        -- …AND THE CHEAP BEATS. This is the shape the owner's
+                        -- mixed strip/rail state actually had: the placement
+                        -- answer changed WITHOUT this character running an
+                        -- apply (a peer account's newer config wins at read
+                        -- time — receive never adopts, so no local write and no
+                        -- seam), and then some ordinary beat re-ran the TAB RUN
+                        -- alone. A run laid out against a stale surface is the
+                        -- defect, so the run has to place the surface itself.
+                        V._colorHandler()
+                        V.SelectTab(V.ids[#V.ids], "matrix")
+                        V.LayoutTabs()
+                        for _, v in ipairs(violations(tag .. " [cheap beat]")) do
+                            if #worst < 12 then worst[#worst + 1] = v end
+                        end
+                    end
+                end
+            end
+        end
+        -- THE PEER-CHANGE LEG, explicitly: the synced answer moves with no
+        -- local write at all (Config.SetTabPlacement here stands in for a peer
+        -- payload winning at read time), and the ONLY thing that runs
+        -- afterwards is a cheap beat. Every placement, in both directions.
+        for _, place in ipairs({ "left", "top", "right", "top", "left", "right" }) do
+            C.SetTabPlacement(place)
+            V.LayoutTabs()                       -- the cheap beat, alone
+            cells = cells + 1
+            for _, v in ipairs(violations("[peer change -> " .. place .. ", cheap beat only]")) do
+                if #worst < 12 then worst[#worst + 1] = v end
+            end
+        end
+
+        ck(cells >= 150, "the matrix really ran (" .. cells .. " cells)")
+        ck(#worst == 0, "RED CONTROL — every placement cell holds its geometry ("
+            .. #worst .. " violation(s): " .. table.concat(worst, " ; ") .. ")")
+
+        -- Put the world back exactly as it was found.
+        ns.SetModuleEnabled("badges", savedBadges)
+        C.SetTabPlacement(savedPlace)
+        for id = 3, 7 do
+            local s = savedWindows[id]
+            local w = Sim.windows[id]
+            if s and w then
+                w.name, w.shown, w.docked = s[1], s[2], s[3]
+                _G.FloatingChatFrame_Update(id)
+            end
+        end
+        V.Refresh()
+        ns.SetModuleEnabled("view", savedView)
+        HTIMER.flush()
+        Sim.ResetCalls()
+    end)
+    if not ok then fails[#fails + 1] = "error: " .. tostring(err) end
+    for _, f in ipairs(fails) do ns:Print("  FAIL view-matrix :: " .. f) end
+    if #fails == 0 and verbose then ns:Print("  PASS view-matrix") end
+    return #fails == 0
+end)
+
+----------------------------------------------------------------------
 -- Expected-suite roster (the softer silent-green catch: a file that loads but
 -- never registers reads as ALL PASS to a runner that only iterates what
 -- registered).
@@ -1275,6 +1541,9 @@ local EXPECTED_SUITES = { "core", "skin", "placeholders",
     "integration",
     -- D2 revision: the merged world WITH THE OWNED VIEW UP (the engine hidden)
     "view-integration",
+    -- 2026-08-11: the placement matrix, driven through the settings pane's own
+    -- apply path (the untested-combination class the owner kept finding)
+    "view-matrix",
 }
 
 realprint("=== expected-suite roster (" .. #EXPECTED_SUITES .. " suites) ===")

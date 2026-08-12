@@ -2186,9 +2186,48 @@ function Skin.ReClampAll()
     return n
 end
 
+----------------------------------------------------------------------
+-- THE LOCK (owner, 2026-08-11). ONE state for the whole addon, and it lives in
+-- the SYNCED config (Config.Locked) beside the position it governs — view.lua
+-- reads the same answer for the drawn box's drag/resize/grips. LOCKED vetoes
+-- every move gesture here too, ALT included: "the box is a rock" cannot have
+-- an exception, or the first ALT-drag makes a liar of the setting.
+--
+-- Skin.moveMode (the old SESSION-scoped plain-drag unlock) survives as exactly
+-- what it always was for the box-off path, and the verbs below keep it in step
+-- with the lock so there is one thing to think about rather than two.
+----------------------------------------------------------------------
+
+function Skin.Locked()
+    local C = ns.Config
+    if C and type(C.Locked) == "function" then
+        local ok, v = pcall(C.Locked)
+        if ok then return v and true or false end
+    end
+    return false
+end
+
+-- The ONE write path for the lock: the synced config, the session mirror, and
+-- the drawn box's grips, in that order. The slash verbs and the settings pane
+-- both come through here, so the two can never disagree.
+function Skin.SetLocked(on)
+    on = on and true or false
+    local C = ns.Config
+    local changed = false
+    if C and type(C.SetLocked) == "function" then
+        local ok, res = pcall(C.SetLocked, on)
+        changed = (ok and res) and true or false
+    end
+    Skin.moveMode = not on
+    local V = ns.View
+    if V and type(V.ApplyLock) == "function" then pcall(V.ApplyLock) end
+    return changed
+end
+
 -- Is a drag gesture a MOVE gesture right now?
 function Skin.MoveAllowed()
     if not Skin.active or not cfg().altDragMove then return false end
+    if Skin.Locked() then return false end
     if Skin.moveMode then return true end
     local alt = _G.IsAltKeyDown
     if type(alt) ~= "function" then return false end
@@ -4176,22 +4215,33 @@ end
 ns.RegisterModule("skin", Skin)
 
 ----------------------------------------------------------------------
--- The discoverable fallback for "how do I move this window": a lock pair.
--- SESSION-SCOPED on purpose — an unlocked state that survived a login would
--- turn every stray drag into a moved window, and the whole point of the ALT
--- gesture is that it needs no mode at all.
+-- THE LOCK VERBS. Now a PERSISTED, SYNCED pair rather than the old
+-- session-scoped plain-drag toggle: the owner asked for "a way to lock /
+-- unlock the positioning", and a lock that forgot itself at logout would not
+-- be that. The state rides the mesh with the position it governs.
 ----------------------------------------------------------------------
 
-ns.RegisterCommand("unlock", "let a plain drag move the chat windows (this session)", function()
-    Skin.moveMode = true
-    ns:Print("chat windows UNLOCKED for this session: drag anywhere on a window to move it.")
-    ns:Print("  (ALT-drag always works, locked or not. /dchat lock when you are done.)")
+ns.RegisterCommand("unlock", "unlock the chat box: drag to move, corner grips to resize", function()
+    Skin.SetLocked(false)
+    ns:Print("chat UNLOCKED. Drag the tab strip (or ALT-drag anywhere) to move it; drag any "
+          .. "of the four corner grips to resize it.")
+    ns:Print("  (this rides your shared chat configuration, so every character is unlocked too.)")
 end)
 
-ns.RegisterCommand("lock", "stop plain drags from moving the chat windows", function()
-    Skin.moveMode = false
-    ns:Print("chat windows locked. ALT-drag still moves them.")
+ns.RegisterCommand("lock", "lock the chat box: no dragging, no resizing", function()
+    Skin.SetLocked(true)
+    ns:Print("chat LOCKED. The box will not move or resize, and the corner grips are gone. "
+          .. "/dchat unlock when you want to move it.")
 end)
+
+-- …and the state itself is on the command list, so "am I locked right now" is
+-- answered by the same thing that lists the verbs.
+if type(ns.RegisterHelpNote) == "function" then
+    ns.RegisterHelpNote(function()
+        return "  chat is currently " .. (Skin.Locked() and "LOCKED" or "UNLOCKED")
+            .. " (/dchat lock, /dchat unlock)"
+    end)
+end
 
 ns.RegisterDebugCommand("skin", "skin state: styled windows, config, tab inks", function()
     ns:Print(("skin: %s, %d window(s) styled"):format(
@@ -4961,20 +5011,47 @@ local function testMoveAndEditBox(fails, verbose)
     ns.SetModuleEnabled("reconcile", false)
     cfg.windows, cfg.rev, cfg.at = savedWindows, savedRev, savedAt
 
-    -- ── Phase M6: /dchat unlock and /dchat lock, the discoverable fallback ───
+    -- ── Phase M6: /dchat unlock and /dchat lock ─────────────────────────────
+    -- AMENDED 2026-08-11: the pair is no longer a session-scoped plain-drag
+    -- toggle. It is THE LOCK — persisted, synced, and a veto over every move
+    -- gesture including ALT, because "the box is a rock" cannot have one.
+    local lockedBefore = Skin.Locked()
     Sim.altDown = false
     fireDrag(cf3, "OnDragStart")
-    ck(Skin._moving == nil, "M6: locked and unmodified, a drag still does nothing")
+    ck(Skin._moving == nil, "M6: with no modifier and no unlock, a plain drag does nothing")
     ns.SlashDispatch("unlock")
     ck(Skin.moveMode == true, "M6: /dchat unlock turns plain drags into moves")
+    ck(Skin.Locked() == false, "M6: …and clears the persisted lock")
+    ck(C.Locked() == false, "M6: …in the SYNCED config, where every character reads it")
     fireDrag(cf3, "OnDragStart")
     ck(Skin._moving ~= nil, "M6: …and now a plain drag moves the window")
     fireDrag(cf3, "OnDragStop")
     ns.SlashDispatch("lock")
     ck(Skin.moveMode == false, "M6: /dchat lock puts it back")
+    ck(Skin.Locked() == true and C.Locked() == true, "M6: …and the lock is written and synced")
     fireDrag(cf3, "OnDragStart")
     ck(Skin._moving == nil, "M6: …and a plain drag is inert again")
+    -- RED CONTROL: the veto covers ALT too. Before the lock, ALT-drag was the
+    -- gesture that always worked; a lock that let it through would be a label,
+    -- not a lock.
+    Sim.altDown = true
+    fireDrag(cf3, "OnDragStart")
+    ck(Skin._moving == nil, "M6: RED CONTROL — LOCKED refuses an ALT-drag as well")
+    ck(Skin.MoveAllowed() == false, "M6: …because the one gate says so")
+    ns.SlashDispatch("unlock")
+    fireDrag(cf3, "OnDragStart")
+    ck(Skin._moving ~= nil, "M6: …and unlocking gives ALT-drag straight back")
+    fireDrag(cf3, "OnDragStop")
+    -- …and the help line answers "which way is it pointing right now".
+    local notes = ns.HelpNotes()
+    local sawLock = false
+    for _, line in ipairs(notes) do if line:find("UNLOCKED", 1, true) then sawLock = true end end
+    ck(sawLock, "M6: /dchat's command list says which state the lock is in")
     Sim.altDown = savedAlt
+    -- Leave the world as this suite found it: every suite after this one drags
+    -- something, and a lock left on would fail all of them (it did, once).
+    Skin.SetLocked(lockedBefore)
+    Skin.moveMode = false
 
     -- ── Phase E1: THE PERSISTENT EDIT BOX, against a client that hides it ────
     local eb = editBoxOf(cf1)
