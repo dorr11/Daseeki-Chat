@@ -45,6 +45,47 @@ for after the first proper look at it.
   boxes — Player Messages, Combat, PvP, Creature Messages, Other — each with two
   columns of checkboxes inside, in our colours.
 
+### The typing bar is ours now, and the channel name is a button
+
+The one strip of the chat window still wearing Blizzard's art was the strip you
+type into. The edit box's stock border — and the second set of art the game
+swaps in whenever the box has focus — is now gone, so the typing row is the same
+flat panel as the rest of the window. The text, the cursor and the highlight are
+painted in the Daseeki palette, and the padding around what you type is the
+window's own. Turn Daseeki Chat off and every piece of that art comes back
+exactly as it was.
+
+The typing row is now two parts, the way you drew it: the **channel name** sits
+in its own panel on the left, a shade lighter than the field, with a hairline
+between them; the **field** you type into is everything to the right of it.
+
+**Click the channel name and you get a channel picker.** It lists every target
+you can actually speak to right now, in each one's own colour:
+
+- Say and Yell, always.
+- Party only when you are in a group, Raid only when you are in a raid.
+- Guild only when you are in a guild — and Officer only when your rank allows
+  it, not merely because you are guilded.
+- Whisper, naming the last person you whispered, and only when there is one.
+- **Every channel you have joined**, in channel-number order, each showing its
+  number and its name — or the name you renamed it to, in that channel's colour.
+
+Click a row and the box is pointed at that target through the game's own
+machinery, so everything that follows a channel change follows this one: the
+label, its colour, your rename, and the game's stickiness. Typing `/2` still
+works and the label follows that too — it is reading the game's own answer, not
+keeping a second copy of it. Tab-completion, arrow-key history and every slash
+command are untouched.
+
+The picker is the same menu the tab right-click menu uses — one menu, two
+places, so they close the same way and can never drift apart. Nothing in any of
+this writes to your settings; which channel you are typing in is your character's
+business, not a synced preference.
+
+- **The channel name no longer disappears when you press Escape.** The game
+  hides that label on every deactivate; it now comes back in the same instant,
+  so the panel is never left blank.
+
 ### Right-click a tab
 
 Right-clicking any tab in the chat window opens a small menu in the Daseeki look

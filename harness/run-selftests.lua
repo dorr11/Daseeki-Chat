@@ -791,6 +791,47 @@ do
         .. "and the addon's own frame did not move")
     ck(Sim.Frame(1):GetAlpha() ~= 1 or true, "(the client's own windows are the client's business)")
 
+    -- 11. THE EDIT BOX FIGHTS BACK (ui/entry-bar). Two unkindnesses that an
+    --     addon re-dressing the entry row must survive, proven by the RIG
+    --     rather than only by the addon's own suite:
+    --       a) ChatEdit_UpdateHeader does not stop at the prefix text — it
+    --          re-computes the box's TEXT INSETS from the header's width, so a
+    --          padding set once is erased on the next sticky change.
+    --       b) The client SHOWS the focus texture set on every activate, so a
+    --          strip that HID that art is undone on every click into chat while
+    --          one that dropped its ALPHA is not.
+    local geb = _G.ChatFrame1EditBox
+    geb:SetTextInsets(12, 12, 3, 3)
+    geb:SetAttribute("chatType", "SAY")
+    _G.ChatEdit_UpdateHeader(geb)
+    local gi = { geb:GetTextInsets() }
+    ck(gi[1] ~= 12, "ChatEdit_UpdateHeader REWRITES the box's text insets from the header "
+        .. "width (got " .. table.concat(gi, "/") .. ")")
+    ck(type(geb.focusLeft) == "table" and _G.ChatFrame1EditBoxLeft ~= nil,
+        "the stock dress is modeled in BOTH client shapes (parentKey field and $parent global)")
+    geb.focusLeft:Hide()
+    geb.focusLeft:SetAlpha(0)
+    _G.ChatEdit_ActivateChat(geb)
+    ck(geb.focusLeft._shown == true,
+        "the client SHOWS its focus art again on activate (a Hide-based strip is undone)")
+    ck(geb.focusLeft:GetAlpha() == 0,
+        "…and never writes its alpha (which is why an alpha-based strip holds)")
+    geb.focusLeft:SetAlpha(1)
+    _G.ChatEdit_DeactivateChat(geb)
+
+    -- 12. …and the membership predicates the client answers chat-target
+    --     availability with START AT NO. A rig that logged the player into a
+    --     party and a guild by default would let a selector inherit rows it
+    --     never proved (the register's group-smart-send facts).
+    ck(_G.IsInGroup() == false and _G.IsInRaid() == false and _G.IsInGuild() == false,
+        "a fresh character is solo and unguilded until a test says otherwise")
+    ck(_G.ChatEdit_GetLastToldTarget() == nil,
+        "…and has whispered nobody, so 'reply to last' has to be earned")
+    Sim.SetGroupState{ inRaid = true }
+    ck(_G.IsInGroup() == true and _G.UnitInRaid("player") == 0,
+        "UnitInRaid answers an INDEX (and the player's own slot is 0 — the truthy-zero trap)")
+    Sim.SetGroupState{ inParty = false, inRaid = false, inGuild = false }
+
     -- Restore the world for the suites: fresh session, logged in, in world.
     probe:UnregisterEvent("CHAT_MSG_SAY")
     probe:UnregisterEvent("CHAT_MSG_CHANNEL_NOTICE")
