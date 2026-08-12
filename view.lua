@@ -5871,4 +5871,505 @@ ns:RegisterSelfTest("view", function(verbose)
     return #fails == 0
 end)
 
+----------------------------------------------------------------------
+-- ============ THE ATTACH SURFACE (2026-08-12) ============
+--
+-- WHAT IT IS: one published table describing THE CHASSIS AS A PLACE TO HANG
+-- SOMETHING — the frame itself, its live geometry, and a subscription that
+-- pushes a new answer whenever that geometry changes. Nothing more.
+--
+-- WHAT IT IS NOT: it is not an API for any particular consumer. This file does
+-- not know, and must never learn, what attaches to the box. The surface names a
+-- rectangle and its edges; deciding that a column of gear-set icons belongs on
+-- the right of it is entirely the consumer's business, in the consumer's repo.
+-- That asymmetry is the whole design: Daseeki-Chat gains a published shape and
+-- ZERO behaviour, and a consumer that never arrives costs exactly nothing.
+--
+-- WHY IT IS ADDITIVE, AND ONLY ADDITIVE. Not one existing line of this file
+-- changes. The announce rides the layout beats that already run — Reflow (the
+-- live-size beat every resize goes through), LayoutTabs (the cheap beat a
+-- placement change can arrive on alone), ApplyPosition / CommitPosition (the
+-- move beats) and the two lifecycle ends — by WRAPPING them here, at the
+-- bottom of the file, rather than by editing them where they live. A wrapper is
+-- a field assignment on a table every caller already looks the function up on,
+-- so the beats are complete without the beats being touched.
+--
+-- WHY THERE IS NO POLLING, AND NO TIMER (Class 2, answered rather than bet on):
+--   * The surface table is published AT FILE LOAD, so it exists for every addon
+--     in the session from the moment Daseeki-Chat's files execute — strictly
+--     before any login event, whatever the load order is.
+--   * Availability is a PUSH, both ways. Subscribe delivers the CURRENT answer
+--     to the new subscriber immediately (which may honestly be "nothing is
+--     there yet"), and OnEnable announces the moment there IS something. So the
+--     coin-flip between two addons' PLAYER_LOGIN handlers cannot be lost: the
+--     early subscriber is told later, the late subscriber is told at once, and
+--     both converge on the same geometry with no one asking twice.
+--   * Every later change is announced from a beat the view already runs. There
+--     is no state that has to be re-read on a schedule, so nothing schedules.
+--
+-- CLASS 9 POSTURE. Announce hands control to FOREIGN code in-call, exactly like
+-- Core's show sequence: a subscriber may do anything, including something that
+-- lands us back in a layout beat. The latch is armed BEFORE the first
+-- subscriber call and released when the dispatch returns, each subscriber is
+-- pcall-protected (one throwing consumer never blocks its siblings, and the
+-- error is ROUTED, never swallowed), and a depth fuse refuses past the known
+-- nesting with a counted refusal instead of recursing. The dedup key is written
+-- only after a dispatch that actually happened, so a refusal heals on the next
+-- beat rather than being remembered as delivered.
+--
+-- THE INERT PIN. With zero subscribers, Announce returns on its first line: no
+-- geometry is read, no counter moves, nothing is allocated. A Daseeki-Chat with
+-- no consumer in the session behaves identically to one built without this
+-- section — which is the property the harness asserts, not merely hopes.
+----------------------------------------------------------------------
+
+do
+    local Attach = {}
+    View.Attach = Attach
+
+    -- The contract's own version. A consumer type-checks this before it
+    -- believes anything else in the table (an older/newer Chat must degrade,
+    -- never error).
+    Attach.API_VERSION = 1
+
+    -- Known-legitimate nesting: a subscriber's own re-layout can legitimately
+    -- come back around once or twice. Past this the chain refuses.
+    Attach.FUSE = 4
+
+    Attach.announces = 0   -- dispatches that actually went out
+    Attach.refusals  = 0   -- fuse refusals (an unforeseen composition)
+    Attach.delivered = 0   -- individual subscriber calls made
+    Attach._depth    = 0
+    Attach._subs     = {}
+    Attach._lastKey  = nil
+
+    -- Is there a rectangle to hang anything on RIGHT NOW? An inactive module,
+    -- an absent chassis and a chassis with no resolvable size are all the same
+    -- answer — no — and none of them is an error.
+    function Attach.Available()
+        if not View.active then return false end
+        if type(View.chassis) ~= "table" then return false end
+        local w = widgetNum(View.chassis, "GetWidth")
+        local h = widgetNum(View.chassis, "GetHeight")
+        -- Class 5: an unresolvable size reads nil, and nil is not zero — but a
+        -- zero-sized chassis is not a place to hang anything either.
+        return (w or 0) > 0 and (h or 0) > 0
+    end
+
+    -- The frame itself, or nil. Handing back the frame is what lets a consumer
+    -- SetPoint against it, so its column follows a DRAG for free — a move needs
+    -- no announce to keep an anchored child in place, which is why the announce
+    -- can be about SIZE without the position ever going stale.
+    function Attach.Surface()
+        if not Attach.Available() then return nil end
+        return View.chassis
+    end
+
+    -- The live geometry, as plain data. Read from the LIVE frame, never from a
+    -- stored size — mid-resize those two disagree and the live one is the one
+    -- the player is looking at.
+    function Attach.Geometry()
+        if not Attach.Available() then return nil end
+        local f = View.chassis
+        local w = widgetNum(f, "GetWidth")
+        local h = widgetNum(f, "GetHeight")
+        local l = widgetNum(f, "GetLeft")
+        local b = widgetNum(f, "GetBottom")
+        local strata
+        if type(f.GetFrameStrata) == "function" then
+            local sok, s = pcall(f.GetFrameStrata, f)
+            if sok then strata = s end
+        end
+        return {
+            version   = Attach.API_VERSION,
+            frame     = f,
+            width     = w,
+            height    = h,
+            left      = l,
+            bottom    = b,
+            right     = (l and w) and (l + w) or nil,
+            top       = (b and h) and (b + h) or nil,
+            scale     = widgetNum(f, "GetEffectiveScale"),
+            strata    = strata,
+            -- The chassis border's own thickness, so a consumer anchoring
+            -- OUTSIDE the box does not have to guess where outside starts.
+            edge      = View.Metrics().chassisEdge,
+            -- Where our tabs are. A consumer never needs it to avoid them (the
+            -- rail is INSIDE the border and anything hung outside clears it by
+            -- construction), but a placement change is a geometry change and
+            -- the answer belongs in the payload that announces it.
+            placement = View.TabPlacement(),
+            locked    = View.Locked(),
+        }
+    end
+
+    -- Everything that can change about the answer, in one comparable string.
+    local function keyOf(geom)
+        if not geom then return "unavailable" end
+        return table.concat({
+            tostring(geom.width), tostring(geom.height),
+            tostring(geom.left), tostring(geom.bottom),
+            tostring(geom.scale), tostring(geom.placement),
+        }, "|")
+    end
+
+    -- THE LATCH, armed before the first foreign call and released when the
+    -- dispatch returns. Save/restore arithmetic (never clear-to-zero) so a
+    -- legitimate nested dispatch cannot strand the depth, and every subscriber
+    -- call is individually pcall-protected so an error cannot wedge it.
+    local function dispatch(subs, geom, why)
+        if Attach._depth >= Attach.FUSE then
+            Attach.refusals = Attach.refusals + 1
+            return false
+        end
+        Attach._depth = Attach._depth + 1
+        for i = 1, #subs do
+            Attach.delivered = Attach.delivered + 1
+            local ok, err = pcall(subs[i], geom, why)
+            if not ok then ns.RouteError(err) end
+        end
+        Attach._depth = Attach._depth - 1
+        if Attach._depth < 0 then Attach._depth = 0 end
+        return true
+    end
+
+    -- Register a listener. It is called with (geometry|nil, why) — immediately
+    -- once at registration, and again on every change. Idempotent: registering
+    -- the same function twice leaves one subscription.
+    function Attach.Subscribe(fn)
+        if type(fn) ~= "function" then return nil end
+        for i = 1, #Attach._subs do
+            if Attach._subs[i] == fn then return fn end
+        end
+        Attach._subs[#Attach._subs + 1] = fn
+        -- The remembered answer belongs to a different subscriber set; forget
+        -- it so the next real beat reaches everyone.
+        Attach._lastKey = nil
+        dispatch({ fn }, Attach.Geometry(), "subscribe")
+        return fn
+    end
+
+    function Attach.Unsubscribe(fn)
+        for i = #Attach._subs, 1, -1 do
+            if Attach._subs[i] == fn then table.remove(Attach._subs, i) end
+        end
+        Attach._lastKey = nil
+        return true
+    end
+
+    function Attach.SubscriberCount() return #Attach._subs end
+
+    -- The announce. Returns true when a dispatch actually went out.
+    function Attach.Announce(why)
+        -- THE INERT PIN, and it is the FIRST line on purpose: with nobody
+        -- listening this function reads nothing, allocates nothing and records
+        -- nothing. The layout beats stay exactly as expensive as they were.
+        if #Attach._subs == 0 then return false end
+        local geom = Attach.Geometry()
+        local key  = keyOf(geom)
+        if key == Attach._lastKey then return false end
+        local snap = {}
+        for i = 1, #Attach._subs do snap[i] = Attach._subs[i] end
+        if not dispatch(snap, geom, why or "geometry") then return false end
+        -- Written only after a dispatch that HAPPENED, so a refused announce
+        -- heals on the next beat instead of being remembered as delivered.
+        Attach._lastKey = key
+        Attach.announces = Attach.announces + 1
+        return true
+    end
+
+    ------------------------------------------------------------------
+    -- THE BEATS, wrapped rather than edited. Each wrapper runs the original
+    -- first and announces after, so a subscriber never sees a half-laid box.
+    ------------------------------------------------------------------
+
+    local baseReflow = View.Reflow
+    function View.Reflow(...)
+        local r = baseReflow(...)
+        Attach.Announce("reflow")
+        return r
+    end
+
+    -- The cheap beat: a placement can change with no local write at all (a peer
+    -- account's newer config winning at read time), and then only the tab run
+    -- re-lays. The placement is part of the announced answer, so this beat has
+    -- to be able to carry it.
+    local baseLayoutTabs = View.LayoutTabs
+    function View.LayoutTabs(...)
+        local r = baseLayoutTabs(...)
+        Attach.Announce("tabs")
+        return r
+    end
+
+    local baseApplyPosition = View.ApplyPosition
+    function View.ApplyPosition(...)
+        local r = baseApplyPosition(...)
+        Attach.Announce("position")
+        return r
+    end
+
+    local baseCommitPosition = View.CommitPosition
+    function View.CommitPosition(...)
+        local r = baseCommitPosition(...)
+        Attach.Announce("move")
+        return r
+    end
+
+    local baseOnEnable = View.OnEnable
+    function View.OnEnable(...)
+        local r = baseOnEnable(...)
+        Attach.Announce("enable")
+        return r
+    end
+
+    local baseOnDisable = View.OnDisable
+    function View.OnDisable(...)
+        local r = baseOnDisable(...)
+        -- Availability is a push in BOTH directions: a consumer is told the
+        -- surface went away, on the same channel it was told it arrived.
+        Attach.Announce("disable")
+        return r
+    end
+
+    ------------------------------------------------------------------
+    -- THE PUBLICATION. A plain global, the way Daseeki-Nexus publishes
+    -- Daseeki.Sync: a consumer type-guards every step and degrades in silence
+    -- when the table (or a function on it) is not there.
+    ------------------------------------------------------------------
+    _G.DaseekiChatAttach = Attach
+
+    ------------------------------------------------------------------
+    -- Debug surface.
+    ------------------------------------------------------------------
+    ns.RegisterDebugCommand("attach", "the published attach surface for other addons", function()
+        ns:Print(("attach: api v%d, %s, %d subscriber(s)"):format(
+            Attach.API_VERSION, Attach.Available() and "available" or "UNAVAILABLE",
+            Attach.SubscriberCount()))
+        local g = Attach.Geometry()
+        if g then
+            ns:Print(("  chassis %.0fx%.0f at (%.0f, %.0f), edge %d, tabs %s%s"):format(
+                g.width or 0, g.height or 0, g.left or 0, g.bottom or 0,
+                g.edge or 0, tostring(g.placement), g.locked and ", locked" or ""))
+        else
+            ns:Print("  no geometry — the view is not painting (module off, or no chassis yet)")
+        end
+        ns:Print(("  %d announce(s), %d delivery(ies), %d fuse refusal(s)"):format(
+            Attach.announces, Attach.delivered, Attach.refusals))
+    end)
+
+    ------------------------------------------------------------------
+    -- Self-tests (suite "attach").
+    ------------------------------------------------------------------
+
+    local function attachPure(fails)
+        local function ck(c, m) if not c then fails[#fails + 1] = m end end
+
+        ck(_G.DaseekiChatAttach == Attach, "the surface is published on a plain global")
+        ck(Attach.API_VERSION == 1, "the contract carries its own version")
+        for _, fn in ipairs({ "Available", "Surface", "Geometry", "Subscribe",
+                              "Unsubscribe", "Announce", "SubscriberCount" }) do
+            ck(type(Attach[fn]) == "function", "the surface publishes " .. fn)
+        end
+
+        -- A non-function subscription is refused rather than stored.
+        local before = Attach.SubscriberCount()
+        ck(Attach.Subscribe("not a function") == nil, "a non-function subscription is refused")
+        ck(Attach.SubscriberCount() == before, "…and never lands in the subscriber list")
+    end
+
+    local function attachLive(fails, verbose)
+        local Sim = _G.__DaseekiChatSim
+        if not Sim then
+            if verbose then ns:Print("  (attach live legs skipped: no chat simulator)") end
+            return
+        end
+        local function ck(c, m) if not c then fails[#fails + 1] = m end end
+        local HT = _G.__DaseekiChatHarnessTimer
+        local function flush() if HT then HT.flush() end end
+
+        local savedView = ns.ModuleEnabled("view")
+        ns.SetModuleEnabled("view", false)
+        flush()
+
+        -- ── THE INERT PIN, first: nobody is listening. ────────────────────
+        local a0, d0, r0 = Attach.announces, Attach.delivered, Attach.refusals
+        ck(Attach.SubscriberCount() == 0, "inert: the session has no subscriber")
+        ck(Attach.Announce("probe") == false, "inert: an announce with no consumer does nothing")
+        ck(Attach.announces == a0 and Attach.delivered == d0 and Attach.refusals == r0,
+            "inert: …and moves not one counter")
+
+        -- ── DISABLED VIEW: the surface exists and reports UNAVAILABLE. ────
+        ck(Attach.Available() == false, "a disabled view reports the surface unavailable")
+        ck(Attach.Surface() == nil, "…hands back no frame")
+        ck(Attach.Geometry() == nil, "…and no geometry (unknown is never a made-up rect)")
+
+        -- ── SUBSCRIBE FIRST, ENABLE SECOND (the Class 2 ordering that loses
+        --    the coin flip): the consumer is told "nothing" now and told the
+        --    real answer the moment there is one. No polling in between.
+        local seen = {}
+        local sub = function(geom, why) seen[#seen + 1] = { geom = geom, why = why } end
+        Attach.Subscribe(sub)
+        ck(#seen == 1 and seen[1].why == "subscribe" and seen[1].geom == nil,
+            "subscribing before the view is up delivers the honest 'nothing yet'")
+        ck(Attach.SubscriberCount() == 1, "one subscriber is registered")
+        Attach.Subscribe(sub)
+        ck(Attach.SubscriberCount() == 1, "re-subscribing the same function is idempotent")
+
+        ns.SetModuleEnabled("view", true)
+        flush()
+        ck(Attach.Available() == true, "an enabled view reports the surface available")
+        local last = seen[#seen]
+        ck(last and last.geom ~= nil, "…and the early subscriber was PUSHED the arrival")
+        local g = Attach.Geometry()
+        ck(g ~= nil and g.frame == View.chassis, "the geometry names the chassis frame itself")
+        if g then
+            ck(g.width == View.chassis:GetWidth() and g.height == View.chassis:GetHeight(),
+                "the geometry is the LIVE chassis size")
+            ck(g.edge == View.Metrics().chassisEdge, "the border thickness rides along")
+            ck(g.placement == View.TabPlacement(), "…and so does the tab placement")
+            ck(g.version == Attach.API_VERSION, "every payload is version-stamped")
+        end
+
+        -- ── SUBSCRIBING LATE (the other side of the coin flip): the current
+        --    answer arrives at registration, with no beat needed at all.
+        local lateGeom, lateCalls = nil, 0
+        local lateSub = function(geom) lateCalls = lateCalls + 1; lateGeom = geom end
+        Attach.Subscribe(lateSub)
+        ck(lateCalls == 1 and lateGeom ~= nil,
+            "a consumer that arrives AFTER the view is up is answered at registration")
+        Attach.Unsubscribe(lateSub)
+
+        -- ── RESIZE announces a new height. ────────────────────────────────
+        local before = #seen
+        View.ResizeAnchored(520, 340, "BOTTOMRIGHT")
+        flush()
+        ck(#seen > before, "a resize announces")
+        local rg = seen[#seen].geom
+        ck(rg and math.abs((rg.height or 0) - View.chassis:GetHeight()) < 0.01,
+            "…carrying the height the chassis is actually wearing")
+        local h1 = rg and rg.height
+        View.ResizeAnchored(520, 460, "BOTTOMRIGHT")
+        flush()
+        local rg2 = seen[#seen].geom
+        ck(rg2 and h1 and math.abs((rg2.height or 0) - h1) > 1,
+            "a second resize announces a DIFFERENT height (the consumer can re-fit)")
+
+        -- ── DEDUP: an unchanged beat announces nothing. ───────────────────
+        View.Layout()
+        flush()
+        local steady = #seen
+        View.Layout()
+        View.Reflow()
+        View.LayoutTabs()
+        flush()
+        ck(#seen == steady, "beats that change nothing announce nothing (no storm on re-layout)")
+
+        -- ── PLACEMENT: a change reaches the surface, including on the CHEAP
+        --    beat (a peer's config winning at read time, then LayoutTabs alone)
+        local C = ns.Config
+        local savedPlace = View.TabPlacement()
+        local beforePlace = #seen
+        if C and C.SetTabPlacement then
+            C.SetTabPlacement(savedPlace == "right" and "left" or "right")
+            View.LayoutTabs()
+            flush()
+            ck(#seen > beforePlace, "a placement change announces on the cheap beat alone")
+            ck(seen[#seen].geom and seen[#seen].geom.placement == View.TabPlacement(),
+                "…and the payload names the placement now in force")
+            C.SetTabPlacement(savedPlace)
+            View.Layout()
+            flush()
+        end
+
+        -- ── MOVE: the commit beat announces the new corner. ───────────────
+        local beforeMove = #seen
+        View.chassis:ClearAllPoints()
+        View.chassis:SetPoint("BOTTOMLEFT", _G.UIParent, "BOTTOMLEFT", 240, 180)
+        View.CommitPosition()
+        flush()
+        ck(#seen > beforeMove, "a committed move announces")
+        local mg = seen[#seen].geom
+        ck(mg and math.abs((mg.left or 0) - 240) < 0.01 and math.abs((mg.bottom or 0) - 180) < 0.01,
+            "…carrying the corner the box was dropped on")
+
+        -- ── CLASS 9: a subscriber that re-enters is FUSED, never unbounded.
+        local refBefore = Attach.refusals
+        local depth = 0
+        local recursive
+        recursive = function()
+            depth = depth + 1
+            if depth > 64 then return end        -- test-side backstop; the fuse must win first
+            Attach._lastKey = nil                -- force the dedup to let it through
+            Attach.Announce("recursive")
+        end
+        -- Subscribe ALSO delivers once (and that delivery already re-enters and
+        -- already gets fused, which is itself the point), so the round counter
+        -- is zeroed afterwards and the fuse is measured on ONE announce.
+        Attach.Subscribe(recursive)
+        ck(Attach.refusals > refBefore, "the registration delivery already hits the fuse")
+        ck(Attach._depth == 0, "…and unwinds the latch completely before returning")
+        refBefore, depth = Attach.refusals, 0
+        Attach._lastKey = nil
+        Attach.Announce("fuse-probe")
+        ck(Attach.refusals > refBefore, "a re-entering subscriber hits the depth fuse")
+        ck(depth == Attach.FUSE,
+            "…and the chain stops AT the fuse (" .. depth .. " round(s)), never at a stack overflow")
+        ck(Attach._depth == 0, "the latch is released whatever happened underneath it")
+        Attach.Unsubscribe(recursive)
+
+        -- ── A THROWING subscriber is isolated and its error ROUTED. ───────
+        local captured = {}
+        local prevGEH = _G.geterrorhandler
+        _G.geterrorhandler = function() return function(e) captured[#captured + 1] = e end end
+        local sibling = 0
+        local thrower = function() error("boom-in-attach-subscriber") end
+        local goodOne = function() sibling = sibling + 1 end
+        Attach.Subscribe(thrower)
+        Attach.Subscribe(goodOne)
+        Attach._lastKey = nil
+        Attach.Announce("isolation")
+        _G.geterrorhandler = prevGEH
+        ck(sibling >= 1, "a throwing subscriber never blocks its siblings")
+        local sawBoom = false
+        for _, e in ipairs(captured) do
+            if tostring(e):find("boom%-in%-attach%-subscriber") then sawBoom = true end
+        end
+        ck(sawBoom, "…and the error is ROUTED to geterrorhandler, never swallowed")
+        Attach.Unsubscribe(thrower)
+        Attach.Unsubscribe(goodOne)
+
+        -- ── DISABLE: availability is pushed away as well as pushed in. ────
+        local beforeOff = #seen
+        ns.SetModuleEnabled("view", false)
+        flush()
+        ck(#seen > beforeOff, "disabling the view announces")
+        ck(seen[#seen].geom == nil, "…with NO geometry — the surface is honestly gone")
+        ck(Attach.Available() == false, "…and reports unavailable to anyone who asks")
+
+        -- ── UNSUBSCRIBE returns the session to inert. ─────────────────────
+        Attach.Unsubscribe(sub)
+        ck(Attach.SubscriberCount() == 0, "unsubscribing empties the list")
+        local aN, dN = Attach.announces, Attach.delivered
+        ns.SetModuleEnabled("view", true); flush()
+        ns.SetModuleEnabled("view", false); flush()
+        ck(Attach.announces == aN and Attach.delivered == dN,
+            "with the last consumer gone the beats are silent again (inert once more)")
+
+        -- Put the world back exactly as it was found.
+        ns.SetModuleEnabled("view", savedView)
+        flush()
+    end
+
+    ns:RegisterSelfTest("attach", function(verbose)
+        local fails = {}
+        local ok, err = pcall(attachPure, fails)
+        if not ok then fails[#fails + 1] = "pure: " .. tostring(err) end
+        local ok2, err2 = pcall(attachLive, fails, verbose)
+        if not ok2 then fails[#fails + 1] = "live: " .. tostring(err2) end
+        for _, f in ipairs(fails) do ns:Print("  FAIL attach :: " .. f) end
+        if #fails == 0 and verbose then ns:Print("  PASS attach") end
+        return #fails == 0
+    end)
+end
+
 return View
