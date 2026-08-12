@@ -990,25 +990,57 @@ View.MENU_PAD     = 3
 
 local function suiteHub() return _G.DaseekiSuite end
 
--- Open the Daseeki window on Chat's page — the same hub call /dchat options
--- makes, so there is one way in.
-function View.OpenSettings(sectionId)
+-- Does the hub actually carry Chat's page right now? Asked OF THE HUB, because
+-- the hub is the only thing that knows. Our own Options.registered flag is the
+-- last resort, for a Core that predates these accessors.
+function View.SettingsPageRegistered()
     local hub = suiteHub()
     if type(hub) ~= "table" then return false end
+    if type(hub.GetAddonSection) == "function" then
+        local ok, sec = pcall(hub.GetAddonSection, hub, "chat")
+        if ok then return sec ~= nil end
+    end
+    if type(hub.sections) == "table" then return hub.sections.chat ~= nil end
+    local O = ns.Options
+    return (O and O.registered) and true or false
+end
+
+-- Open the Daseeki window on Chat's page — the ONE hub-opening seam, which
+-- /dchat options uses too, so there is one way in.
+--
+-- THE CONTRACT, READ OFF CORE (Daseeki-Core @919e544, hub.lua + core.lua) —
+-- and the live defect of 2026-08-12 ("right clicking the tab and clicking
+-- 'Open Settings' doesnt seem to work"): Core:ShowAddon SELECTS a page and
+-- never shows the window. EnsureHub CREATES the window HIDDEN; only Core:Open
+-- calls window:Show(). This function used to prefer ShowAddon and return true
+-- the moment it did not raise — so on any session where the player had not
+-- already opened the Daseeki window by hand, the menu entry selected a page
+-- inside a window nobody could see and reported success. Open(id, sectionId)
+-- does BOTH halves in the order Core defines, so that is the only call here.
+function View.OpenSettings(sectionId)
+    local hub = suiteHub()
+    if type(hub) ~= "table" or type(hub.Open) ~= "function" then
+        ns:Print("the Daseeki settings window is not available (Daseeki-Core missing?).")
+        return false
+    end
     -- Deliberately NOT Options.Register() here. Registration is the options
     -- MODULE's own lifecycle act, and a menu that registered the page as a side
     -- effect would put a settings page in the hub for a player who had turned
     -- the settings module off — which is the inertness contract every module in
     -- this addon signs. The menu asks the hub to show a page; whether that page
     -- exists is the module's answer, not the menu's.
-    if type(hub.ShowAddon) == "function" then
-        local ok = pcall(hub.ShowAddon, hub, "chat", sectionId or "settings")
-        if ok then return true end
+    --
+    -- So when the answer is "there is no Chat page", this REFUSES and says why
+    -- in one line. It does not open the hub on somebody else's page: the player
+    -- asked for Chat's settings, and a 1200x680 window showing the theme picker
+    -- is not that answer. (Owner decision, 2026-08-12; it is also the line
+    -- /dchat options has always printed for the same state.)
+    if not View.SettingsPageRegistered() then
+        ns:Print("the settings page is turned off, so the Daseeki window has no Chat page "
+              .. "- /dchat enable options turns it back on.")
+        return false
     end
-    if type(hub.Open) == "function" then
-        return pcall(hub.Open, hub, "chat") and true or false
-    end
-    return false
+    return pcall(hub.Open, hub, "chat", sectionId or "settings") and true or false
 end
 
 -- THE MENU, AS DATA. Every entry carries what it says, whether it can be used,
@@ -4162,9 +4194,20 @@ local function testLive(fails, verbose)
         ns.Skin.SetLocked(wasLock and true or false)
 
         -- Running an entry closes the menu; so does asking it to close.
+        -- (Prints are captured: with the options module never enabled this
+        -- session there is no Chat page in the hub, and Open settings answers
+        -- with a chat line — pinned for real in phase 19b below.)
+        local function quietly(fn)
+            local said, realPrint = {}, ns.Print
+            ns.Print = function(_, ...) said[#said + 1] = table.concat({ ... }, " ") end
+            local ok, res = pcall(fn)
+            ns.Print = realPrint
+            return said, ok and res or nil
+        end
         if btn then btn:Click("RightButton") end
         ck(View.MenuOpen() == true, "phase 19: …the menu opens again")
-        ck(View.RunTabMenuItem(id, "settings") ~= nil, "phase 19: an entry runs")
+        local _, ranSettings = quietly(function() return View.RunTabMenuItem(id, "settings") end)
+        ck(ranSettings ~= nil, "phase 19: an entry runs")
         ck(View.MenuOpen() == false, "phase 19: …and running one closes the menu")
         if btn then btn:Click("RightButton") end
         local closer = View.menu and View.menu._closer
@@ -4182,6 +4225,46 @@ local function testLive(fails, verbose)
         end
         ck(View.RunTabMenuItem(id, "nosuchkey") == nil,
             "phase 19: …and an entry that does not exist answers nothing, never a guess")
+
+        -- ── Phase 19b: OPEN SETTINGS WITH NO CHAT PAGE IN THE HUB. ───────
+        -- The design intent, kept: a MENU must never register a page for a
+        -- player who turned the settings module off. What the menu owes that
+        -- player instead is an ANSWER — this suite runs before the options
+        -- suite, so the module has never been enabled and the hub really has
+        -- no Chat page, which is the exact state the owner can reach with
+        -- /dchat disable options + /reload.
+        -- The other half of the live defect (the hub OPENS and lands on Chat's
+        -- page when the page IS there) is pinned in the options suite, which is
+        -- where the real registration lifecycle has run.
+        local HUB = _G.DaseekiUI
+        if HUB and HUB.__HubShown then
+            local savedDef = nil
+            if View.SettingsPageRegistered() then savedDef = HUB.__RemoveAddon("chat") end
+            HUB.__HubClose()
+            -- The synced config plus its revision stamp: a write of any kind
+            -- moves one of them.
+            local function fingerprint()
+                local c = C.Get() or {}
+                local out = { "rev=" .. tostring(c.rev), "at=" .. tostring(c.at) }
+                local snap = C.Snapshot()
+                if snap then serialize(snap.cfg, out) end
+                return table.concat(out, ",")
+            end
+            local cfgBefore = fingerprint()
+            local said, ran = quietly(function() return View.RunTabMenuItem(id, "settings") end)
+            ck(ran == true, "phase 19b: the Open settings entry still RUNS with no page in the hub")
+            ck(View.SettingsPageRegistered() == false,
+                "phase 19b: RED CONTROL — …and the MENU registered nothing (a menu never puts a "
+                .. "settings page in the hub for a player who turned the module off)")
+            ck(HUB.__HubShown() == false,
+                "phase 19b: …nor does it open the hub onto somebody else's page")
+            ck(#said == 1 and said[1]:find("enable options", 1, true) ~= nil,
+                "phase 19b: RED CONTROL — the player is told why, in ONE line naming the fix ("
+                .. table.concat(said, " | ") .. ")")
+            ck(fingerprint() == cfgBefore,
+                "phase 19b: …and opening settings writes NOTHING to the config, ever")
+            if savedDef then _G.DaseekiSuite:RegisterAddon(savedDef) end
+        end
         View.SelectTab(id, "phase19-restore")
     end
 

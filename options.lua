@@ -2352,8 +2352,20 @@ ns.RegisterCommand("options", "open the Daseeki settings window on Chat's page",
         ns:Print("the options module is disabled - /dchat enable options turns it back on.")
         return
     end
+    -- Registration IS this module's own lifecycle act, so the command may do it
+    -- (the tab menu may not — see View.OpenSettings).
     Options.Register()
-    hub:Open("chat")
+    -- …and then the SAME seam the tab menu runs. This used to be a second
+    -- `hub:Open("chat")` of its own, which is how the menu's copy of the call
+    -- was free to drift into Core:ShowAddon (a page SELECT that never shows the
+    -- window) without anything here noticing. One caller, one contract:
+    -- Core:Open(id, sectionId) opens the window AND lands on the section.
+    local V = ns.View
+    if V and type(V.OpenSettings) == "function" then
+        V.OpenSettings("settings")
+        return
+    end
+    hub:Open("chat", "settings")
 end)
 
 ns.RegisterDebugCommand("options", "settings pane: registration, bindings, aliases", function()
@@ -3046,6 +3058,114 @@ local function testLiveApply(fails)
     Sim.ResetCalls()
 end
 
+-- OPEN SETTINGS: ONE SEAM TO THE HUB, AND IT REALLY OPENS THE WINDOW.
+--
+-- THE LIVE DEFECT (owner UAT, 2026-08-12): "right clicking the tab and
+-- clicking 'Open Settings' doesnt seem to work". View.OpenSettings preferred
+-- Core:ShowAddon and returned success the moment the call did not raise — but
+-- Core:ShowAddon SELECTS a page and never shows the window (EnsureHub builds
+-- it HIDDEN; only Core:Open calls window:Show()). So the entry selected a page
+-- inside a window nobody could see. It was green here only because the Core
+-- stub modeled Open and ShowAddon as two identical recorders; the stub now
+-- models Core's real asymmetry, which is what makes this suite able to fail.
+--
+-- Both entry points are driven — the tab menu and /dchat options — because the
+-- reason there is one seam is so there is one contract to get right.
+local function testOpenSettingsSeam(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local UI = _G.DaseekiUI
+    local V, C = ns.View, ns.Config
+    if not (UI and UI.__HubShown and V and V.OpenSettings) then return end
+
+    local wasView, wasSkin, wasOpts = ns.ModuleEnabled("view"), ns.ModuleEnabled("skin"), Options.active
+    ns.SetModuleEnabled("options", true)
+    ns.SetModuleEnabled("skin", true)
+    ns.SetModuleEnabled("view", true)
+    local HT = _G.__DaseekiChatHarnessTimer
+    if HT then HT.flush() end
+
+    ck(V.SettingsPageRegistered() == true,
+        "the ENABLED module really put Chat's page in the hub (the module's own act)")
+
+    -- A config fingerprint: opening a window is a display act and must leave
+    -- the synced store untouched, revision stamp included.
+    local function serialize(t, out)
+        out = out or {}
+        local keys = {}
+        for k in pairs(t) do keys[#keys + 1] = tostring(k) end
+        table.sort(keys)                       -- Class 8: a stable rendering
+        for _, k in ipairs(keys) do
+            local v = t[k] ~= nil and t[k] or t[tonumber(k)]
+            if type(v) == "table" then out[#out + 1] = k .. "{"; serialize(v, out); out[#out + 1] = "}"
+            else out[#out + 1] = k .. "=" .. tostring(v) end
+        end
+        return out
+    end
+    local function fingerprint()
+        local c = C.Get() or {}
+        local out = { "rev=" .. tostring(c.rev), "at=" .. tostring(c.at) }
+        local snap = C.Snapshot()
+        if snap then serialize(snap.cfg, out) end
+        return table.concat(out, ",")
+    end
+
+    -- ── LEG ONE: THE TAB CONTEXT MENU, driven exactly as a right-click drives
+    -- it (View.RunTabMenuItem is the function the menu row's OnClick calls).
+    local id = V.ids and V.ids[1]
+    ck(id ~= nil, "the drawn view has a tab whose menu can be run")
+    UI.__HubClose()
+    ck(UI.__HubShown() == false, "the hub starts CLOSED, the way a session starts")
+    local cfgBefore = fingerprint()
+    if id then
+        ck(V.RunTabMenuItem(id, "settings") == true, "the menu's Open settings entry runs")
+        ck(UI.__HubShown() == true,
+            "RED CONTROL — the Daseeki WINDOW is really open afterwards (the owner's defect: "
+            .. "the old code selected a page inside a hidden window and called it success)")
+        local a, s = UI.__HubPage()
+        ck(a == "chat" and s == "settings",
+            "RED CONTROL — …and it is on CHAT's settings page (got "
+            .. tostring(a) .. "/" .. tostring(s) .. ")")
+        ck(fingerprint() == cfgBefore,
+            "RED CONTROL — opening the settings wrote NOTHING to the config (a display act, "
+            .. "not a config act)")
+    end
+
+    -- ── LEG TWO: /dchat options, through the REAL slash dispatcher.
+    UI.__HubClose()
+    ns.SlashDispatch("options")
+    ck(UI.__HubShown() == true, "RED CONTROL — /dchat options opens the window too")
+    local a2, s2 = UI.__HubPage()
+    ck(a2 == "chat" and s2 == "settings",
+        "…and lands on the same page through the same seam (got "
+        .. tostring(a2) .. "/" .. tostring(s2) .. ")")
+
+    -- ── THE CORE CONTRACT ITSELF, pinned where this addon can see it. If a
+    -- future Core ever makes ShowAddon show the window (or Open stop showing
+    -- it), this fails here instead of in the owner's chat window.
+    local hub = _G.DaseekiSuite
+    UI.__HubClose()
+    hub:ShowAddon("chat", "settings")
+    ck(UI.__HubShown() == false,
+        "the hub contract: Core:ShowAddon SELECTS a page and never shows the window")
+    hub:Open("chat", "settings")
+    ck(UI.__HubShown() == true, "…and Core:Open is the one call that shows it")
+
+    -- A section id the page does not have falls back to its FIRST section
+    -- (Core:GetAddonSection), so a stale section name can never blank the page.
+    UI.__HubClose()
+    ck(V.OpenSettings("nosuchsection") == true, "an unknown section id is still an open")
+    local a3, s3 = UI.__HubPage()
+    ck(UI.__HubShown() == true and a3 == "chat" and s3 == "settings",
+        "…falling back to Chat's first section, exactly as Core does (got "
+        .. tostring(a3) .. "/" .. tostring(s3) .. ")")
+
+    UI.__HubClose()
+    ns.SetModuleEnabled("view", wasView)
+    ns.SetModuleEnabled("skin", wasSkin)
+    if not wasOpts then ns.SetModuleEnabled("options", false) end
+    if HT then HT.flush() end
+end
+
 -- THE CHANNELS SUBSECTION: the rows it offers, the drag that reorders them,
 -- the colour swatch and the rename (which IS the old alias editor, absorbed).
 local function testChannelRows(fails)
@@ -3659,6 +3779,7 @@ function Options.RunSelfTests(verbose)
         { name = "registration + the pane", fn = testRegistrationAndPane },
         { name = "captions (every control is legible)", fn = testCaptions },
         { name = "live apply (a control reaches PIXELS, same beat)", fn = testLiveApply },
+        { name = "open settings: one seam, and the window really opens", fn = testOpenSettingsSeam },
         { name = "channels: order, colour, rename", fn = testChannelRows },
         { name = "channel order converges (drag -> the numbering engine)", fn = testOrderConverges },
         { name = "renames: one seam, three surfaces", fn = testThreeSurfaces },
