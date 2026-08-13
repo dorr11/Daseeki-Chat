@@ -86,6 +86,12 @@ local CFG_DEFAULTS = {
     --   routeAddonLines— do addon-originated lines go to the addon tab?
     -- Both are LAYOUT decisions about the strip, so a player answers them once
     -- and every character gets the answer.
+    --
+    -- `fontFace` (2026-08-12) joined the same section and is DELIBERATELY ABSENT
+    -- from this shape: its default is nil, and nil MEANS SOMETHING here —
+    -- "follow the suite font", live. A `fontFace = ""` default would be a
+    -- stored answer nobody gave (Class 5: "" is truthy), and EnsureDefaults
+    -- would then reinstate it on every login for a player who had cleared it.
     skin    = { tabPlacement = "top", locked = false,
                 combatLogTab = false, routeAddonLines = true },
 }
@@ -985,6 +991,23 @@ end
 --
 -- ── config.skin.* (SYNCED — named in all three whitelist sites) ────────────
 --   tabPlacement  READ view/skin/badges | LIVE view.layout | CONTROL Tabs
+--   fontFace      READ ns.ChatFontFile (every drawn chat surface) | LIVE
+--                 view.look | CONTROL General > Appearance ("Chat font")
+--        SYNC, and WHY — the question this field settles is the one the sizes
+--        beside it answer the other way, so the reasoning is on the record:
+--        fontSize / lineHeight / tabTextSize are ACCOUNT-LOCAL because they are
+--        MONITOR-DEPENDENT (how big 13.5px reads, and how soon a line wraps, is
+--        a fact about the screen in front of this account). A FACE is not:
+--        "I read Fira Sans, not Friz Quadrata" is TASTE, and it is the same
+--        taste on every machine the player logs in from. The founding mandate
+--        for this addon was ONE chat configuration across the mesh, so a face
+--        the player has to re-pick per account would be exactly the re-choosing
+--        this config exists to abolish.
+--        DEFAULT nil = FOLLOW THE SUITE FONT, live (Core's font broadcast
+--        reaches the same view.look beat). It is stored as a face NAME, never a
+--        path: paths differ between machines the moment LibSharedMedia is
+--        involved, and a name that does not resolve HERE is kept rather than
+--        cleared (the surface wears the suite face meanwhile).
 --   locked        READ view.DragAllowed + view resize + Skin.MoveAllowed
 --                 | LIVE lock.apply | CONTROL General + /dchat lock|unlock
 --   combatLogTab  READ view.CombatLogTab (OwnedIds + the hosting)
@@ -1088,6 +1111,54 @@ function Config.SetLocked(on)
     if not c then return false end
     if type(c.skin) ~= "table" then c.skin = {} end
     c.skin.locked = on
+    Config.Bump()
+    return true
+end
+
+----------------------------------------------------------------------
+-- THE CHAT FACE (owner, 2026-08-12: "when i change fonts in Chat it changes
+-- the font for the whole Daseeki Suite and I dont want that. it should just be
+-- for the chat window.")
+--
+-- The stored value is a face NAME out of Daseeki-Core's own font registry, or
+-- nil for "follow the suite font". It rides the SYNCED skin section for the
+-- reason the audit table above records: a face is taste, not a fact about this
+-- monitor, and this addon's founding mandate is one chat config across the
+-- mesh.
+--
+-- nil IS AN ANSWER, so the read follows the tabColor rule rather than the
+-- tabPlacement one: a winning copy that SPEAKS about `skin` and carries no
+-- fontFace means "the player cleared it", and falling through to our own older
+-- store would resurrect a face the mesh has already retired.
+----------------------------------------------------------------------
+
+function Config.FontFace()
+    local function pick(cfg)
+        local s = (type(cfg) == "table" and type(cfg.skin) == "table") and cfg.skin or nil
+        if not s then return nil, false end          -- this copy says NOTHING
+        local v = s.fontFace
+        if type(v) == "string" and v ~= "" then return v, true end
+        return nil, true                             -- it speaks: "no face here"
+    end
+    local v, spoke = pick(Config.EffectiveCfg())
+    if v then return v end
+    if spoke then return nil end
+    v = pick(Config.Get())
+    return v
+end
+
+-- Set (or, with nil/"", CLEAR back to "follow the suite font"). Clearing
+-- REMOVES the key rather than storing "" — an empty string is truthy in Lua
+-- (Class 5) and would read as a face named nothing on every peer.
+function Config.SetFontFace(name)
+    if name ~= nil and type(name) ~= "string" then return false end
+    if name == "" then name = nil end
+    if Config.FontFace() == name then return false end          -- no sync storm
+    Config.AdoptEffective()
+    local c = Config.Get()
+    if not c then return false end
+    if type(c.skin) ~= "table" then c.skin = {} end
+    c.skin.fontFace = name
     Config.Bump()
     return true
 end
@@ -2384,10 +2455,24 @@ local function testReworkSeams(fails)
         "…and the toggle turns it on")
     ck(Config.SetCombatLogTab(true) == false, "an unchanged toggle is a no-op")
 
+    -- ── THE CHAT FACE (2026-08-12) ───────────────────────────────────────────
+    -- Storage rules first; the PIXEL side is the view suite's red control.
+    ck(Config.FontFace() == nil, "the chat face defaults to nil — FOLLOW THE SUITE FONT")
+    ck(Config.SetFontFace("Arial Narrow") == true and Config.FontFace() == "Arial Narrow",
+        "…and a chosen face lands")
+    ck(Config.SetFontFace("Arial Narrow") == false, "an unchanged face is a no-op (no sync storm)")
+    ck(Config.SetFontFace(42) == false, "a non-string face is refused outright")
+    ck(Config.SetFontFace("") == true and Config.FontFace() == nil,
+        "…and clearing it is nil, never \"\" (Class 5: an empty string is TRUTHY)")
+    ck(c.skin.fontFace == nil, "…with the KEY REMOVED, so EnsureDefaults cannot reinstate it")
+    Config.SetFontFace("Arial Narrow")
+
     -- ── THE WHITELIST, all three sites, for all four sections ────────────────
     local snap = Config.Snapshot()
     ck(type(snap) == "table" and type(snap.cfg) == "table", "the wire payload exists")
     if type(snap) == "table" and type(snap.cfg) == "table" then
+        ck(type(snap.cfg.skin) == "table" and snap.cfg.skin.fontFace == "Arial Narrow",
+            "SITE 1 (Snapshot): the CHAT FACE rides the wire (one chat config, one face)")
         ck(type(snap.cfg.join) == "table" and #snap.cfg.join > 0,
             "SITE 1 (Snapshot): the channel ORDER rides the wire")
         ck(type(snap.cfg.colors) == "table" and snap.cfg.colors["trade"] ~= nil,
@@ -2405,6 +2490,8 @@ local function testReworkSeams(fails)
     ck(mine and type(mine.cfg.join) == "table" and type(mine.cfg.colors) == "table"
         and type(mine.cfg.windows) == "table" and type(mine.cfg.skin) == "table",
         "SITE 2 (Candidates): every rework section is in the LWW candidate")
+    ck(mine and type(mine.cfg.skin) == "table" and mine.cfg.skin.fontFace == "Arial Narrow",
+        "SITE 2 (Candidates): …the chat face among them")
 
     local Nx = ns.Nexus
     local savedRemote = Nx and Nx.RemoteCandidates
@@ -2416,13 +2503,28 @@ local function testReworkSeams(fails)
                                windows = { [5] = { name = "PeerTab", shown = true,
                                                    docked = 5, addonSink = true,
                                                    groups = {}, channels = {} } },
-                               skin = { combatLogTab = false, routeAddonLines = false } } } }
+                               skin = { combatLogTab = false, routeAddonLines = false,
+                                        fontFace = "2002" } } } }
         end
         ck(Config.ChannelOrder()[1] == "Peer", "a peer's newer ORDER is the effective one")
         ck(Config.ChannelColor("Peer") ~= nil, "…and its channel colours")
         ck(Config.AddonSinkId() == 5, "…and its addon tab")
         ck(Config.CombatLogTab() == false and Config.RouteAddonLines() == false,
             "…and its strip toggles")
+        ck(Config.FontFace() == "2002",
+            "…and its CHAT FACE, with no local write (read-time resolution)")
+        ck(c.skin.fontFace == "Arial Narrow",
+            "…the local store still holding ours (receive never adopts)")
+        -- nil IS AN ANSWER: a winner that SPEAKS about `skin` and carries no
+        -- face has CLEARED it, and our own older pick must not resurrect.
+        local withFace = Nx.RemoteCandidates
+        Nx.RemoteCandidates = function()
+            return { { at = Config.Now() + 500, rev = 0, owner = "peer",
+                       cfg = { skin = { tabPlacement = "top" } } } }
+        end
+        ck(Config.FontFace() == nil,
+            "a peer that CLEARED the face clears it here too (a spoken nil is not a silence)")
+        Nx.RemoteCandidates = withFace
         ck(c.skin.combatLogTab == true, "…with the local store untouched (receive never adopts)")
         Config.SetCombatLogTab(true)
         ck(c.join[1] and c.join[1][2] == "Peer",
@@ -2432,6 +2534,8 @@ local function testReworkSeams(fails)
             "SITE 3 (AdoptEffective): …and its tab set")
         ck(c.skin.routeAddonLines == false,
             "SITE 3 (AdoptEffective): …and its strip toggles")
+        ck(c.skin.fontFace == "2002",
+            "SITE 3 (AdoptEffective): …and its CHAT FACE (the third whitelist site)")
         Nx.RemoteCandidates = savedRemote
     end
 

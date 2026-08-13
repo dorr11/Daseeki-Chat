@@ -248,6 +248,94 @@ function ns.InitSavedVariables()
 end
 
 ----------------------------------------------------------------------
+-- ============ THE CHAT FACE (2026-08-12) ============
+--
+-- THE OWNER'S DEFECT, verbatim: "when i change fonts in Chat it changes the
+-- font for the whole Daseeki Suite and I dont want that. it should just be for
+-- the chat window."
+--
+-- He was right, and the old build was not an accident — it was a design we had
+-- written down and he has now overruled. The pane's Font control called
+-- UI.SetFont, which IS Daseeki-Core's suite-wide setter: every addon in the
+-- suite re-faces on that call. Suite-wide look lives on CORE's own Appearance
+-- page and nowhere else now; Chat's pane controls CHAT.
+--
+-- THIS IS THE ONE RESOLVER every surface this addon draws asks for its face,
+-- and it lives in core.lua rather than in view.lua deliberately: skin.lua (the
+-- box-off renderer) and badges.lua (the unread pip) load BEFORE view.lua and
+-- draw chat text too, so a resolver that lived in the view would have been
+-- reached backwards by two files or — worse — copied into three.
+--
+-- THE RED LINE, stated once and pinned by the suite: NOTHING in this addon
+-- calls UI.SetFont / UI.SetFontScale / UI.SetTheme, and nothing re-faces
+-- UI.fonts.* (Core's SHARED font objects — re-facing one of those is a
+-- suite-wide change wearing a local disguise). We RESOLVE a path out of Core's
+-- registry and set it on OUR OWN widgets. Core's state is read-only to us.
+----------------------------------------------------------------------
+
+-- The face the SUITE is wearing, through Core's own guarded accessor (which
+-- carries its render probe and its Friz Quadrata fallback). nil = no Core kit
+-- in this session, which every caller treats as "leave the widget alone"
+-- rather than as a face.
+function ns.SuiteFontFile()
+    local UI = _G.DaseekiUI
+    if not (UI and type(UI.FontFile) == "function") then return nil end
+    local ok, path = pcall(UI.FontFile)
+    if ok and type(path) == "string" and path ~= "" then return path end
+    return nil
+end
+
+-- The face NAMES Core offers. READ-ONLY REUSE: this is the same list Core's
+-- own Appearance page builds its picker from (its built-ins plus whatever
+-- LibSharedMedia has registered), so Chat can never offer a face Core does not
+-- have, and Chat never decides which faces exist.
+function ns.FontFaceNames()
+    local UI = _G.DaseekiUI
+    if not (UI and type(UI.FontNames) == "function") then return {} end
+    local ok, list = pcall(UI.FontNames)
+    if ok and type(list) == "table" then return list end
+    return {}
+end
+
+-- One face NAME -> the file path to set. nil means "this session cannot
+-- resolve that name", which is NOT the same as "that name is wrong": the face
+-- may be registered by an addon the player runs on another machine. The stored
+-- name is never rewritten on a failed lookup (Class 4/6: an absent answer may
+-- not delete state) — the surface simply wears the suite face until the day
+-- the face is present again.
+function ns.FontFacePath(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local UI = _G.DaseekiUI
+    if not UI then return nil end
+    -- If the chat face IS the suite face, take Core's guarded answer rather
+    -- than the raw registry path: that route has already proven the file
+    -- renders, and probing it again here would be a second opinion that could
+    -- disagree with the one the rest of the suite is using.
+    if type(UI.GetFont) == "function" then
+        local okc, cur = pcall(UI.GetFont)
+        if okc and cur == name then return ns.SuiteFontFile() end
+    end
+    local reg = UI.fontRegistry
+    local p = (type(reg) == "table") and reg[name] or nil
+    if type(p) == "string" and p ~= "" then return p end
+    return nil
+end
+
+-- THE ANSWER EVERY CHAT SURFACE WEARS. config.skin.fontFace nil (the default)
+-- means FOLLOW THE SUITE — and it follows it LIVE, because every drawn surface
+-- re-asks this function on the look beat and Core's font broadcast dispatches
+-- that beat (view.lua's UI.OnFontChanged registration).
+function ns.ChatFontFile()
+    local C = ns.Config
+    local face = (C and type(C.FontFace) == "function") and C.FontFace() or nil
+    if face then
+        local p = ns.FontFacePath(face)
+        if p then return p end
+    end
+    return ns.SuiteFontFile()
+end
+
+----------------------------------------------------------------------
 -- Module lifecycle — the inertness discipline, made mechanical.
 --
 -- A module registers ONCE with ns.RegisterModule(name, module). The contract:

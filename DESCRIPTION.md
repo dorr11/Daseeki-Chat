@@ -18,7 +18,7 @@ A modern, configurable chat window for WoW Classic Era. Set up your chat once �
 - **Chat history that survives** reloads and relogs — your last session's lines restore behind a quiet divider, correctly aged.
 - **Unread badges per tab**: a quiet counter for lines you haven't seen, accented while a whisper waits, configurable per tab.
 - **The Blizzard side-button column is gone** — fully disabled, no invisible hitboxes, so your chat window can finally sit flush with the screen edge.
-- Follows your Daseeki Core theme and font throughout.
+- Follows your Daseeki Core theme throughout, and its font too unless you give chat a font of its own — a **Chat font** picker that faces the chat window and nothing else.
 
 ## Chat Commands
 - `/dchat` — command list and settings shortcuts
