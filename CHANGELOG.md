@@ -8,6 +8,33 @@ character — including a brand-new one — reconciles to automatically at login
 
 This entry accumulates until 1.0.0 ships.
 
+### Chat's font is Chat's own now
+
+- **Changing the font in Chat changes Chat.** It used to change the whole
+  Daseeki suite — the settings page was handing your pick straight to Core, so
+  picking a chat font re-lettered your bags, your class HUD and everything
+  else. Settings > General > Appearance now has one **Chat font** dropdown that
+  faces the chat window and nothing outside it: the messages, the tabs, the
+  typing bar, the channel name in front of it, the unread counts and the copy
+  button all change together the moment you pick, with your scrollback intact.
+  The faces on offer are the same ones Core knows about, so nothing new to
+  install and nothing chat decides on its own.
+- **"Suite default" is the default, and it keeps following.** Leave the
+  dropdown on Suite default and chat wears whatever font Daseeki > Appearance
+  is set to — and it still moves with it when you change that later, without a
+  reload. Pick a face and chat stops following: the suite can change underneath
+  and your chat window will not move.
+- **Your chat font travels with your chat setup.** It rides the same shared
+  configuration as your tabs, channels and colours, so you pick it once and
+  every character on every account you run gets it. The text *sizes* beside it
+  (message size, line spacing, tab text) stay per-account on purpose — how big
+  text should be is a fact about the monitor in front of you, and a face is
+  not.
+- **The three suite-wide controls are gone from this page.** Font, Text size
+  and Theme changed every Daseeki addon at once, which is not what a page
+  titled "Chat" should do. They live on Core's own Appearance page, where they
+  always did.
+
 ### Wrapped lines
 
 - **A long message no longer carries on from the left border.** When a chat

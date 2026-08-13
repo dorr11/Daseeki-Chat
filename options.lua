@@ -150,12 +150,20 @@ end
 
 Options.APPLY_SEAMS = {
     ["view.look"] = {
-        what = "restyle every drawn message surface in place (buffers kept) and re-run the layout",
+        what = "restyle every drawn message surface in place (buffers kept), re-face the "
+            .. "unread pips and re-run the layout",
         run = function()
             local V = view()
             if V and V.ApplyLook then ns:SafeCall(V.ApplyLook) end
             local S = skin()      -- the box-off renderer, for when the view is down
             if not V and S and S.StyleAll then ns:SafeCall(S.StyleAll) end
+            -- THE PIP IS A CHAT TEXT SURFACE TOO (2026-08-12). It is badges'
+            -- widget, not the view's, so it re-faces through badges' OWN public
+            -- beat — a face change that left the unread counts on the old face
+            -- would be the kind of half-applied look the owner has to squint to
+            -- notice and can never un-notice.
+            local B = ns.Badges
+            if B and B.active and B.ApplyFont then ns:SafeCall(B.ApplyFont) end
         end,
     },
     ["view.layout"] = {
@@ -261,17 +269,10 @@ Options.APPLY_SEAMS = {
         end,
     },
     -- ── THE OPTIONS REWORK's SEAMS (2026-08-11) ─────────────────────────
-    ["core.appearance"] = {
-        what = "Daseeki-Core applies the theme/font to the whole suite; the drawn window "
-            .. "re-lays around the new face and re-inks its tabs",
-        run = function()
-            local V = view()
-            if V and V.ApplyLook then ns:SafeCall(V.ApplyLook) end
-            if V and V.ApplyTabs then ns:SafeCall(V.ApplyTabs) end
-            local S = skin()
-            if S and not V and S.StyleAll then ns:SafeCall(S.StyleAll) end
-        end,
-    },
+    -- `core.appearance` WAS here: the route the three suite-wide controls
+    -- dispatched. It went with them (2026-08-12) rather than being left
+    -- undispatched — the suite's own gate refuses a seam no binding names, and
+    -- an orphan route is how a control quietly re-grows.
     ["config.converge"] = {
         what = "replay the whole configuration onto this character (windows, tabs, routing, "
             .. "channels) and rebuild the drawn tab strip around what landed",
@@ -384,6 +385,12 @@ end
 --             `why` too, so "not in the store" is always a decision on record.
 --   action  — a button: no read, no write, an existing verb.
 --
+-- RETIRED, 2026-08-12: `core` — a Daseeki-Core setting this pane offered rather
+-- than copied. Its three members (Font, Text size, Theme) wrote UI.SetFont /
+-- UI.SetFontScale / UI.SetTheme, i.e. the WHOLE SUITE, and the owner rejected
+-- exactly that. The kind is gone from this list and from the bind-check, so a
+-- binding claiming it now fails as an unknown kind — which the suite pins.
+--
 -- AND, SINCE 2026-08-11, EVERY ENTRY DECLARES ITS `apply` — the named seam
 -- above that its write dispatches. That is the mechanism that answers the
 -- owner's "nothing changes": a control's route to pixels is DATA, checked by
@@ -392,25 +399,29 @@ end
 ----------------------------------------------------------------------
 
 Options.BINDINGS = {
-    -- ── GENERAL: the suite-wide look, through CORE's own seams ──────────
-    -- THE `core` KIND (options rework). Font, text size and theme are
-    -- Daseeki-Core settings for the WHOLE suite — Core's own Appearance page
-    -- owns them and its hub applies them live. Chat does not keep a second
-    -- copy: these controls read and write CORE's accessors, so changing one
-    -- here is changing it everywhere, which is what "one suite" means. The
-    -- kind exists so the bind-check can insist the choice was written down.
-    { id = "core.font", kind = "core", apply = "core.appearance",
-      why = "UI.GetFont/UI.SetFont — Daseeki-Core's own font registry (built-in faces plus "
-         .. "whatever LibSharedMedia has). Storing a chat-local copy would give the player "
-         .. "two fonts that disagree and one of them would win at random." },
-    { id = "core.fontScale", kind = "core", apply = "core.appearance",
-      why = "UI.GetFontScale/UI.SetFontScale — the suite's text scale. Offered here as a "
-         .. "DROPDOWN of steps rather than the slider Core's own page uses (the owner: "
-         .. "\"I dont want sliders, drop downs are fine\")." },
-    { id = "core.theme", kind = "core", apply = "core.appearance",
-      why = "UI.GetThemeName/UI.SetTheme — the suite's colour theme, which the drawn chat "
-         .. "window reads every token from. Core publishes the list; duplicating it here "
-         .. "would be this file deciding which of Core's themes chat is allowed to have." },
+    -- ── GENERAL: CHAT's own look, and ONLY chat's ───────────────────────
+    -- THE RETIRED `core` KIND (2026-08-12). This pane used to carry three
+    -- controls of kind `core` — Font, Text size, Theme — that read and WROTE
+    -- Daseeki-Core's own accessors (UI.SetFont / UI.SetFontScale / UI.SetTheme).
+    -- That was a deliberate design ("one suite, one look") and the owner has
+    -- overruled it: "when i change fonts in Chat it changes the font for the
+    -- whole Daseeki Suite and I dont want that. it should just be for the chat
+    -- window." Suite-wide look lives on Core's own Appearance page, which
+    -- already exists and already applies live; this pane no longer reaches into
+    -- Core at all. The kind, its bind-check leg and the `core.appearance` seam
+    -- were REMOVED rather than left empty — a kind with no members is a shape
+    -- the next control could fall into by accident.
+    --
+    -- What replaces the Font control is one field BELOW, in the synced chat
+    -- config: config.skin.fontFace, which faces the chat window and nothing
+    -- else. nil = follow the suite font, live.
+    { id = "general.fontFace", kind = "config", apply = "view.look",
+      why = "Config.FontFace/Config.SetFontFace — config.skin.fontFace, the SYNCED chat face. "
+         .. "The face NAMES come from Daseeki-Core's own registry (ns.FontFaceNames -> "
+         .. "UI.FontNames, read-only), so chat can never offer a face Core does not have and "
+         .. "never decides which faces exist. The route is view.look because that seam is "
+         .. "ApplyLook -> ApplyFont per drawn surface, which is where every chat surface "
+         .. "re-asks ns.ChatFontFile. NOTHING on this route calls UI.SetFont." },
 
     -- The drawn window's own typography (account-local LOOK: per-monitor taste).
     -- Dropdowns of sensible steps, never sliders.
@@ -733,8 +744,51 @@ Options.STEPS = {
                         if v < 24 then return ("%d hour%s"):format(v, v == 1 and "" or "s") end
                         return ("%d day%s"):format(v / 24, v == 24 and "" or "s")
                   end),
-    coreScale   = steps({ 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3 }, pct),
+    -- `coreScale` (the suite text-scale steps) went with the suite-wide
+    -- controls on 2026-08-12. Nothing in this pane scales the suite any more.
 }
+
+----------------------------------------------------------------------
+-- THE CHAT FONT DROPDOWN's data (2026-08-12).
+--
+-- SUITE DEFAULT IS AN OFFERED VALUE, not the absence of one: a dropdown whose
+-- `get` answers something not in `choices` shows an empty box, so "follow the
+-- suite font" needs a value a player can pick BACK. It is the empty string on
+-- the wire into Config.SetFontFace, which maps "" -> nil (the stored default).
+--
+-- A STORED FACE THIS SESSION CANNOT SEE IS STILL OFFERED, labelled. The face
+-- list is Core's registry, which grows with whatever LibSharedMedia addons are
+-- installed HERE — and the chat config is shared across the mesh, so a face
+-- chosen on the machine with WeakAuras is a perfectly good stored answer on the
+-- machine without it. Dropping it from the list would show the player an empty
+-- control and invite them to overwrite a setting that is not wrong; showing it
+-- as "not installed here" tells the truth and keeps the value.
+----------------------------------------------------------------------
+
+Options.SUITE_FONT_VALUE = ""
+
+function Options.FontFaceChoices()
+    local out = { { value = Options.SUITE_FONT_VALUE, text = "Suite default" } }
+    local seen = {}
+    for _, name in ipairs(ns.FontFaceNames()) do
+        if type(name) == "string" and name ~= "" and not seen[name] then
+            seen[name] = true
+            out[#out + 1] = { value = name, text = name }
+        end
+    end
+    local C = ns.Config
+    local cur = (C and C.FontFace) and C.FontFace() or nil
+    if cur and not seen[cur] then
+        out[#out + 1] = { value = cur, text = cur .. " (not installed here)" }
+    end
+    return out
+end
+
+function Options.FontFaceValue()
+    local C = ns.Config
+    local cur = (C and C.FontFace) and C.FontFace() or nil
+    return cur or Options.SUITE_FONT_VALUE
+end
 
 -- A dropdown's `get` has to answer one of the offered values or the control
 -- shows nothing: snap the stored number to the nearest step.
@@ -1992,54 +2046,37 @@ end
 
 local function buildGeneral(flow)
     local sec = flow:AddSection("General")
-    local UI = _G.DaseekiUI
+    -- NO `local UI` here any more, and that is the point rather than tidying:
+    -- this builder no longer touches the Daseeki-Core kit at all. The one place
+    -- Core is read is Options.FontFaceChoices, and it only READS the name list.
 
     -- ══ GROUP: APPEARANCE ════════════════════════════════════════════════
     -- Two columns, every control captioned on its own row, one hint for the
     -- whole box. This is the layout the rest of the page is built in.
     local look = Form.Group(sec, "Appearance")
-    Form.Note(look, "Font, text size and theme belong to the whole Daseeki suite - changing one "
-        .. "here changes it everywhere.")
+    Form.Note(look, "Everything here is Chat's own. Suite-wide font and theme live under "
+        .. "Core > Appearance.")
 
-    local fontBinding  = bind("core.font")
-    local scaleBinding = bind("core.fontScale")
-    local themeBinding = bind("core.theme")
-
-    Form.Pair(look,
-        { caption = "Font", width = 200, make = function(row)
-            return reg(row:Dropdown({
-                width = 200,
-                choices = (UI and UI.FontNames) and UI.FontNames() or {},
-                get = function() return UI and UI.GetFont and UI.GetFont() or "" end,
-                set = function(v)
-                    if UI and UI.SetFont then UI.SetFont(v) end
-                    Options.Apply(fontBinding.apply)
-                end,
-            }))
-        end },
-        { caption = "Theme", width = 200, make = function(row)
-            return reg(row:Dropdown({
-                width = 200,
-                choices = (UI and UI.GetThemeNames) and UI.GetThemeNames() or {},
-                get = function() return UI and UI.GetThemeName and UI.GetThemeName() or "" end,
-                set = function(v)
-                    if UI and UI.SetTheme then UI.SetTheme(v) end
-                    Options.Apply(themeBinding.apply)
-                end,
-            }))
-        end })
+    -- ── CHAT'S FONT, and nothing else's (owner, 2026-08-12) ─────────────
+    -- The three controls that stood here (Font / Text size / Theme) wrote
+    -- Daseeki-Core's suite-wide setters. They are gone; this one writes the
+    -- SYNCED chat config and reaches pixels through view.look.
+    local faceBinding = bind("general.fontFace")
 
     Form.Pair(look,
-        { caption = "Text size", width = 120, make = function(row)
+        { caption = "Chat font", width = 200, make = function(row)
             return reg(row:Dropdown({
-                width = 120, choices = Options.STEPS.coreScale,
-                get = function()
-                    return Options.NearestStep(Options.STEPS.coreScale,
-                        UI and UI.GetFontScale and UI.GetFontScale() or 1)
-                end,
+                id = "general.fontFace", width = 200,
+                choices = Options.FontFaceChoices(),
+                tooltip = "The face the chat window is drawn in - this window only. "
+                       .. "'Suite default' follows whatever font Daseeki > Appearance is set "
+                       .. "to, and keeps following it when that changes.",
+                get = function() return Options.FontFaceValue() end,
                 set = function(v)
-                    if UI and UI.SetFontScale then UI.SetFontScale(tonumber(v) or 1) end
-                    Options.Apply(scaleBinding.apply)
+                    local C = ns.Config
+                    if C and C.SetFontFace then C.SetFontFace(v) end
+                    Options.Apply(faceBinding.apply)
+                    Options._refresh()
                 end,
             }))
         end },
@@ -2563,13 +2600,6 @@ function Options.CheckBindings(bindings)
             if type(b.why) ~= "string" or b.why == "" then
                 out[#out + 1] = id .. ": config binding without a documented seam"
             end
-        elseif b.kind == "core" then
-            -- A Daseeki-Core setting this pane offers rather than copies. Same
-            -- rule as `config`: there is no branch shape to check, so what is
-            -- checked is that the choice to reach into Core was written down.
-            if type(b.why) ~= "string" or b.why == "" then
-                out[#out + 1] = id .. ": core binding without a documented seam"
-            end
         elseif b.kind == "alias" or b.kind == "action" then
             -- Their own seams (config.lua / an existing verb); nothing to bind.
         else
@@ -2642,10 +2672,19 @@ local function testBindings(fails)
           optional = true, apply = "skin.restyle" },
         { id = "bogus.runtime", kind = "runtime", apply = "skin.restyle" },
         { id = "bogus.config",  kind = "config",  apply = "skin.restyle" },
-        { id = "bogus.core",    kind = "core",    apply = "core.appearance" },
+        -- THE RETIRED KIND, kept as a NEGATIVE: `core` is not a kind any more
+        -- (2026-08-12), so a binding claiming it must fail as an UNKNOWN kind
+        -- exactly like "wat" does. That is the pin that stops the suite-wide
+        -- controls growing back by copy-paste.
+        { id = "bogus.core",    kind = "core",    apply = "skin.restyle" },
         { id = "bogus.kind",   kind = "wat",      apply = "skin.restyle" },
     })
     ck(#caught == 8, "the bind-check catches every bad shape (caught " .. #caught .. " of 8)")
+    local coreCaught = false
+    for _, msg in ipairs(caught) do
+        if msg:match("^bogus%.core: unknown binding kind") then coreCaught = true end
+    end
+    ck(coreCaught, "…and `core` is caught as an UNKNOWN kind, not welcomed as a documented one")
 
     -- ── THE APPLY-ROUTE LEG, and ITS teeth. This is the gate that would have
     -- caught the owner's "the options dont seem to actually do anything": a
@@ -2696,11 +2735,13 @@ local function testBindings(fails)
     -- than the exact count it was when there were three.
     ck((kinds.config or 0) >= 12,
         "the synced controls are bound to config.lua's seams (got " .. tostring(kinds.config) .. ")")
-    -- 3, exactly: font, text size and theme. A FOURTH Core setting appearing
-    -- here without a documented reason is this pane quietly growing a second
-    -- copy of something Core owns, which is the thing the kind exists to stop.
-    ck((kinds.core or 0) == 3,
-        "the three CORE settings are offered, not copied (got " .. tostring(kinds.core) .. ")")
+    -- ZERO, exactly, and the count stays here rather than being deleted with
+    -- the kind: this is the pin that says the three suite-wide controls (Font,
+    -- Text size, Theme) are GONE from Chat's pane and did not come back. The
+    -- owner's ask was that changing chat's font changes CHAT — a pane that
+    -- reaches into Core's setters cannot honour that, whatever it is called.
+    ck((kinds.core or 0) == 0,
+        "NO control reaches into Core's suite-wide setters (got " .. tostring(kinds.core or 0) .. ")")
     ck((kinds.runtime or 0) == 0,
         "no runtime control is left: the session-scoped unlock became the SYNCED lock")
     ck((kinds.action or 0) == 1, "the reconcile verb is bound")
@@ -3189,6 +3230,244 @@ local function testLiveApply(fails)
     end
 
     -- Put the world back.
+    ns.SetModuleEnabled("view", wasView)
+    ns.SetModuleEnabled("badges", wasBadges)
+    ns.SetModuleEnabled("skin", wasSkin)
+    if not wasOpts then ns.SetModuleEnabled("options", false) end
+    if HT then HT.flush() end
+    Sim.ResetCalls()
+end
+
+----------------------------------------------------------------------
+-- THE RED CONTROLS FOR "IT SHOULD JUST BE FOR THE CHAT WINDOW" (2026-08-12).
+--
+-- THE OWNER'S DEFECT: "when i change fonts in Chat it changes the font for the
+-- whole Daseeki Suite and I dont want that. it should just be for the chat
+-- window." The shipped Font control called UI.SetFont — Daseeki-Core's
+-- suite-wide setter — so it was not a leak, it was the design, and every one of
+-- these assertions is RED against the build he reported:
+--
+--   * against MAIN there is no `general.fontFace` control at all, so the first
+--     ck fails outright and the pane pin fails with it;
+--   * against MAIN the Font control's set() moves UI.GetFont(), which is the
+--     suite. The spy below asserts Core's setters are called ZERO times while
+--     the pane is driven, and main's own font control breaks it the moment it
+--     is used;
+--   * the FOLLOW half is red the other way: main has nowhere to store "chat's
+--     own face", so "the suite moved and chat did not" cannot even be asked.
+--
+-- The pixel side is asked the way the owner asks it: pick a face, look at the
+-- box. No timer is flushed between the write and the assertion.
+----------------------------------------------------------------------
+
+local function testChatFace(fails)
+    local function ck(c, m) if not c then fails[#fails + 1] = m end end
+    local Sim = _G.__DaseekiChatSim
+    local UI  = _G.DaseekiUI
+    if not (Sim and UI and UI.__BuildPane) then return end
+    local V, C, B = ns.View, ns.Config, ns.Badges
+
+    local wasView, wasSkin = ns.ModuleEnabled("view"), ns.ModuleEnabled("skin")
+    local wasBadges, wasOpts = ns.ModuleEnabled("badges"), Options.active
+    ns.SetModuleEnabled("options", true)
+    ns.SetModuleEnabled("skin", true)
+    ns.SetModuleEnabled("badges", true)
+    ns.SetModuleEnabled("view", true)
+    local HT = _G.__DaseekiChatHarnessTimer
+    if HT then HT.flush() end
+
+    local def  = UI.__RegisteredAddon("chat")
+    local pane = def and def.sections and def.sections[1] and def.sections[1]._pane
+    if not pane then pane = UI.__BuildPane("chat", "settings") end
+    if type(pane) ~= "table" or not (V and V.active and V.chassis) then
+        fails[#fails + 1] = "the pane or the drawn window is not up; the pixel side cannot be asked"
+        return
+    end
+
+    -- ── THE SPY. Core's three suite-wide setters, wrapped for the whole
+    -- suite: nothing this pane does may reach any of them. This is the pin the
+    -- owner's sentence turns into code.
+    local calls = { SetFont = 0, SetFontScale = 0, SetTheme = 0 }
+    local real  = {}
+    for name in pairs(calls) do
+        real[name] = UI[name]
+        if type(real[name]) == "function" then
+            UI[name] = function(...) calls[name] = calls[name] + 1 return real[name](...) end
+        end
+    end
+    local function restoreSpy()
+        for name, fn in pairs(real) do UI[name] = fn end
+    end
+
+    local wasFace  = C.FontFace()
+    local suiteWas = UI.GetFont()
+    local activeId = V.ActiveId()
+    local smf      = V.frames[activeId]
+
+    -- ── THE REMOVED CONTROLS ────────────────────────────────────────────
+    -- Named by what they DID rather than by their captions: a pin on the word
+    -- "Theme" would pass the day somebody re-adds the control as "Colours".
+    local strays = {}
+    for _, w in ipairs(pane.controls or {}) do
+        local ch = w._opts and w._opts.choices
+        if type(ch) == "table" then
+            for _, c in ipairs(ch) do
+                if type(c) == "table" and UI.GetThemeNames then
+                    for _, tn in ipairs(UI.GetThemeNames()) do
+                        if c.value == tn then strays[#strays + 1] = "theme" end
+                    end
+                end
+            end
+        end
+    end
+    ck(#strays == 0, "the suite THEME control is gone from Chat's pane (found "
+        .. #strays .. " offering Core's theme list)")
+    for _, b in ipairs(Options.BINDINGS) do
+        ck(b.id ~= "core.font" and b.id ~= "core.theme" and b.id ~= "core.fontScale",
+            "the suite-wide binding '" .. tostring(b.id) .. "' is retired from the table")
+    end
+    ck(Options.APPLY_SEAMS["core.appearance"] == nil,
+        "…and so is the seam they dispatched (an orphan route is how one grows back)")
+
+    -- ── THE CONTROL ─────────────────────────────────────────────────────
+    local faceCtl = findById(pane, "general.fontFace")
+    ck(faceCtl ~= nil, "the CHAT font control is on the pane")
+    ck(faceCtl == nil or faceCtl._kind == "dropdown",
+        "…and it is a DROPDOWN, never a slider (got " .. tostring(faceCtl and faceCtl._kind) .. ")")
+    if faceCtl then
+        local choices = faceCtl._opts.choices or {}
+        ck(choices[1] and choices[1].value == Options.SUITE_FONT_VALUE
+            and choices[1].text == "Suite default",
+            "…whose FIRST entry is 'Suite default' (the nil default has to be pickable BACK)")
+        -- The list is Core's registry, read-only — never a list this file keeps.
+        local offered, coreNames = {}, ns.FontFaceNames()
+        for _, c in ipairs(choices) do offered[c.value] = true end
+        local missing = {}
+        for _, n in ipairs(coreNames) do if not offered[n] then missing[#missing + 1] = n end end
+        ck(#coreNames > 0, "Core publishes a face list at all (" .. #coreNames .. " faces)")
+        ck(#missing == 0, "every face CORE offers is offered here ("
+            .. table.concat(missing, ",") .. " were not)")
+    end
+
+    -- ── RED CONTROL 1: the chosen face re-fonts the CHAT window, same beat,
+    -- and leaves Core alone. ──────────────────────────────────────────────
+    if faceCtl then
+        local want     = "Arial Narrow"
+        local wantPath = ns.FontFacePath(want)
+        ck(type(wantPath) == "string" and wantPath ~= "",
+            "the chosen face resolves to a path out of Core's registry")
+        local lines  = smf:GetNumMessages()
+        local indent = smf:GetIndentedWordWrap()
+        local sizeBefore = select(2, smf:GetFont())
+
+        faceCtl._opts.set(want)
+
+        ck(C.FontFace() == want, "FACE: the write lands in the SYNCED chat config")
+        ck(select(1, smf:GetFont()) == wantPath,
+            "FACE: RED CONTROL — the drawn FEED is wearing the chosen face IN THE SAME BEAT")
+        ck(select(2, smf:GetFont()) == sizeBefore,
+            "FACE: …with the message SIZE untouched (a face is not a size)")
+        ck(smf:GetNumMessages() == lines,
+            "FACE: …and the scrollback intact (a restyle, never a rebuild)")
+        ck(smf:GetIndentedWordWrap() == indent,
+            "FACE: …and the hanging-indent flag SURVIVED the face change (last round's pin, "
+            .. "still green: ApplyFont re-asserts it AFTER SetFont)")
+
+        local t = V.tabs[activeId]
+        ck(t and t.label and select(1, t.label:GetFont()) == wantPath,
+            "FACE: RED CONTROL — the TAB LABEL re-faced too")
+        local eb = V._ebHome and V._ebHome.eb
+        ck(eb and select(1, eb:GetFont()) == wantPath,
+            "FACE: RED CONTROL — the ENTRY FIELD re-faced too")
+        local chip = V.entryChip and V.entryChip._label
+        ck(chip and select(1, chip:GetFont()) == wantPath,
+            "FACE: RED CONTROL — the entry CHIP (which IS the client's alias header) re-faced too")
+        if V.copyBtn and V.copyBtn._label then
+            ck(select(1, V.copyBtn._label:GetFont()) == wantPath,
+                "FACE: RED CONTROL — the copy affordance re-faced too (it was faced once, at "
+                .. "creation, and no live change could ever reach it)")
+        end
+        if B and B.active then
+            local pipFace, anyPip = nil, false
+            for _, w in pairs(B.widgets) do
+                if w.fs then anyPip = true; pipFace = select(1, w.fs:GetFont()) end
+            end
+            ck(not anyPip or pipFace == wantPath,
+                "FACE: RED CONTROL — the unread PIP re-faced too (got " .. tostring(pipFace) .. ")")
+        end
+
+        -- THE OWNER'S SENTENCE, as an assertion.
+        ck(UI.GetFont() == suiteWas,
+            "FACE: RED CONTROL — the SUITE font did not move (Core still says '"
+            .. tostring(UI.GetFont()) .. "')")
+        ck(calls.SetFont == 0 and calls.SetFontScale == 0 and calls.SetTheme == 0,
+            "FACE: RED CONTROL — Core's suite-wide setters were called ZERO times (SetFont "
+            .. calls.SetFont .. ", SetFontScale " .. calls.SetFontScale
+            .. ", SetTheme " .. calls.SetTheme .. ")")
+        ck(select(1, UI.fonts.body:GetFont()) == nil
+            or select(1, UI.fonts.body:GetFont()) ~= wantPath,
+            "FACE: …and Core's SHARED font objects were not re-faced behind its back")
+    end
+
+    -- ── RED CONTROL 2: cleared, chat FOLLOWS the suite — and follows it
+    -- LIVE, on Core's own broadcast. ──────────────────────────────────────
+    if faceCtl then
+        faceCtl._opts.set(Options.SUITE_FONT_VALUE)
+        ck(C.FontFace() == nil, "FOLLOW: 'Suite default' clears the stored face to nil")
+        ck(select(1, smf:GetFont()) == UI.FontFile(),
+            "FOLLOW: RED CONTROL — the feed is back on the SUITE face in the same beat")
+
+        -- Now the suite moves underneath us. UI.SetFont is CORE's own accessor
+        -- and the harness is standing in for Core's Appearance page here — this
+        -- is the one legitimate caller, and the spy count above already proved
+        -- the ADDON is not one of them.
+        restoreSpy()
+        local other = (suiteWas == "2002") and "Skurri" or "2002"
+        UI.SetFont(other)
+        ck(UI.GetFont() == other, "FOLLOW: the suite really changed face")
+        ck(select(1, smf:GetFont()) == UI.FontFile(),
+            "FOLLOW: RED CONTROL — the chat feed followed it LIVE, on Core's broadcast, "
+            .. "with no reload and no pane visit")
+        local t = V.tabs[activeId]
+        ck(t and t.label and select(1, t.label:GetFont()) == UI.FontFile(),
+            "FOLLOW: …and so did the tab label")
+
+        -- …and with a chat face CHOSEN, the suite moving changes NOTHING here.
+        C.SetFontFace("Arial Narrow")
+        Options.Apply("view.look")
+        local mine = ns.FontFacePath("Arial Narrow")
+        UI.SetFont(suiteWas)
+        ck(select(1, smf:GetFont()) == mine,
+            "FOLLOW: RED CONTROL — with a chat face chosen, a SUITE font change leaves the "
+            .. "chat window exactly where it was")
+        C.SetFontFace(nil)
+        Options.Apply("view.look")
+    end
+
+    -- ── AN UNRESOLVABLE FACE IS KEPT, NOT CLEARED ───────────────────────
+    -- A face registered by an addon the player has on ANOTHER machine arrives
+    -- over the mesh and cannot resolve here. Class 4/6: an absent answer may not
+    -- delete state — the box wears the suite face and the setting survives.
+    C.SetFontFace("A Face From The Other Machine")
+    Options.Apply("view.look")
+    ck(C.FontFace() == "A Face From The Other Machine",
+        "UNRESOLVABLE: a face this session cannot see is KEPT (it is not wrong, it is absent)")
+    ck(ns.FontFacePath("A Face From The Other Machine") == nil,
+        "UNRESOLVABLE: …and honestly reports that it does not resolve")
+    ck(select(1, smf:GetFont()) == UI.FontFile(),
+        "UNRESOLVABLE: …while the box falls back to the SUITE face rather than to nothing")
+    local offered = false
+    for _, c in ipairs(Options.FontFaceChoices()) do
+        if c.value == "A Face From The Other Machine" then offered = true end
+    end
+    ck(offered, "UNRESOLVABLE: …and the dropdown still OFFERS it, labelled, so the control is "
+        .. "not blank and the player is not invited to overwrite it")
+
+    -- Put the world back.
+    restoreSpy()
+    C.SetFontFace(wasFace)
+    if UI.GetFont() ~= suiteWas then UI.SetFont(suiteWas) end
+    Options.Apply("view.look")
     ns.SetModuleEnabled("view", wasView)
     ns.SetModuleEnabled("badges", wasBadges)
     ns.SetModuleEnabled("skin", wasSkin)
@@ -4029,6 +4308,7 @@ function Options.RunSelfTests(verbose)
         { name = "registration + the pane", fn = testRegistrationAndPane },
         { name = "captions (every control is legible)", fn = testCaptions },
         { name = "live apply (a control reaches PIXELS, same beat)", fn = testLiveApply },
+        { name = "the chat face is CHAT's (Core untouched)", fn = testChatFace },
         { name = "open settings: one seam, and the window really opens", fn = testOpenSettingsSeam },
         { name = "channels: order, colour, rename", fn = testChannelRows },
         { name = "channel order converges (drag -> the numbering engine)", fn = testOrderConverges },

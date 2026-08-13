@@ -313,6 +313,28 @@ function Badges.Relayout()
     for _, w in pairs(Badges.widgets) do Badges.AnchorWidget(w) end
 end
 
+-- ── THE PIP'S FACE (2026-08-12) ──────────────────────────────────────────────
+-- One pip, re-faced from the ONE resolver (ns.ChatFontFile: the chosen chat
+-- face, or the suite's when nobody has chosen). Idempotent and cheap, so it
+-- runs on every ensureWidget pass rather than only at creation — a face set at
+-- creation is a face a live change can never reach, which is exactly the bug
+-- the copy button had.
+function Badges.ApplyFontTo(w)
+    if type(w) ~= "table" or type(w.fs) ~= "table" then return false end
+    if type(w.fs.SetFont) ~= "function" then return false end
+    local face = ns.ChatFontFile()
+    if not face then return false end
+    pcall(w.fs.SetFont, w.fs, face, PIP_TEXT_SIZE, "")
+    return true
+end
+
+-- The module's public re-face beat, dispatched by the `view.look` seam. Its
+-- own beat rather than a reach-in, for the same reason Relayout is.
+function Badges.ApplyFont()
+    for _, w in pairs(Badges.widgets) do Badges.ApplyFontTo(w) end
+    return true
+end
+
 local function ensureWidget(frame)
     local w = Badges.widgets[frame]
     if w then
@@ -328,6 +350,7 @@ local function ensureWidget(frame)
                 pcall(w.holder.SetParent, w.holder, want)
             end
         end
+        Badges.ApplyFontTo(w)
         Badges.AnchorWidget(w)
         return w
     end
@@ -347,17 +370,19 @@ local function ensureWidget(frame)
         chip:Hide()
     end
     local fs = holder:CreateFontString(nil, "OVERLAY")
+    -- The ROLE first (Core's shared small-text object), then the pip's own face
+    -- and size on top. The font OBJECT is never re-faced by us — it is Core's,
+    -- shared by the whole suite, and writing to it would be the suite-wide
+    -- change the owner rejected wearing a local disguise.
     fs:SetFontObject(UI.fonts and UI.fonts.small or nil)
-    -- `.tab .n{font-size:10.5px}` on the suite face (see skin.lua's mapping
-    -- table; tabular figures are a documented client limit).
-    if type(fs.SetFont) == "function" and type(UI.FontFile) == "function" then
-        pcall(fs.SetFont, fs, UI.FontFile(), PIP_TEXT_SIZE, "")
-    end
+    w = { holder = holder, fs = fs, tab = tab, chip = chip }
+    -- `.tab .n{font-size:10.5px}` on CHAT's face (see skin.lua's mapping table;
+    -- tabular figures are a documented client limit).
+    Badges.ApplyFontTo(w)
     if UI.Skin then
         UI.Skin(fs, function() applyInk(frame, Badges.widgets[frame]) end)
     end
     holder:Hide()
-    w = { holder = holder, fs = fs, tab = tab, chip = chip }
     Badges.widgets[frame] = w
     Badges.AnchorWidget(w)
     return w

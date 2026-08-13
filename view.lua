@@ -955,10 +955,9 @@ local function ensureTab(id)
     paint(edgebar, "accent", 1)
     call(edgebar, "Hide")
     local label = call(btn, "CreateFontString", nil, "OVERLAY")
-    local UI = UIKit()
-    if UI and type(UI.FontFile) == "function" and type(label) == "table"
-       and type(label.SetFont) == "function" then
-        pcall(label.SetFont, label, UI.FontFile(), View.TabTextSize(), "")
+    local face = ns.ChatFontFile()
+    if face and type(label) == "table" and type(label.SetFont) == "function" then
+        pcall(label.SetFont, label, face, View.TabTextSize(), "")
     end
     call(label, "SetJustifyH", "CENTER")
     -- A tab label is ONE line, always. The rail path gives the label an
@@ -1272,10 +1271,9 @@ local function menuRow(f, i)
     paint(hover, "accent", 0.25)
     call(hover, "Hide")
     local label = call(btn, "CreateFontString", nil, "OVERLAY")
-    local UI = UIKit()
-    if UI and type(UI.FontFile) == "function" and type(label) == "table"
-       and type(label.SetFont) == "function" then
-        pcall(label.SetFont, label, UI.FontFile(), 12, "")
+    local face = ns.ChatFontFile()
+    if face and type(label) == "table" and type(label.SetFont) == "function" then
+        pcall(label.SetFont, label, face, 12, "")
     end
     call(label, "SetJustifyH", "LEFT")
     call(label, "SetWordWrap", false)
@@ -1460,11 +1458,16 @@ end
 function View.ApplyFont(id)
     local smf = View.frames[id]
     if not smf then return false end
-    local UI = UIKit()
     local _, _, clientSize = windowEligible(id)
     local size = View.MessageFontSize(clientSize)
-    if UI and type(UI.FontFile) == "function" then
-        call(smf, "SetFont", UI.FontFile(), size, "")
+    -- THE FACE IS CHAT'S OWN (2026-08-12). ns.ChatFontFile answers the chosen
+    -- chat face, or the SUITE face when nobody has chosen — and it is re-asked
+    -- HERE, on every look beat, rather than cached anywhere: that is what makes
+    -- "follow the suite font" a LIVE follow (Core's font broadcast dispatches
+    -- this beat) instead of a value frozen at creation.
+    local face = ns.ChatFontFile()
+    if face then
+        call(smf, "SetFont", face, size, "")
     end
     call(smf, "SetSpacing", View.MessageSpacing(size))
     -- THE INDENT, RE-ASSERTED AFTER THE FONT — and deliberately AFTER, not
@@ -2246,9 +2249,12 @@ function View.LayoutEntryChip()
     -- and ink all land before a single width is read.
     local fs = chip._label
     if fs then
-        local UI = UIKit()
-        if UI and type(UI.FontFile) == "function" then
-            call(fs, "SetFont", UI.FontFile(), View.MessageFontSize(nil), "")
+        -- The chip's label IS the client's own edit-box HEADER (the alias
+        -- surface), moved in — so re-facing it here is what re-faces the alias
+        -- header too. One surface, one call.
+        local face = ns.ChatFontFile()
+        if face then
+            call(fs, "SetFont", face, View.MessageFontSize(nil), "")
         end
         call(fs, "SetText", View.ChipLabel() or "")
         local r, g, b = View.ChipInk()
@@ -2320,6 +2326,14 @@ function View.SyncEntryChip()
     -- the FIELD's padding, measured from the seam, so the typing area reads
     -- exactly as it did before the chip existed.
     call(eb, "SetTextInsets", EB_PAD_X, EB_PAD_X, EB_PAD_Y, EB_PAD_Y)
+    -- THE FACE, BESIDE THE INK (2026-08-12). LayoutEditBox faces the field too,
+    -- but THAT is the `skin.editbox` beat — the LOOK beat comes through here
+    -- (Reflow -> SyncEntryChip), so a face set only there left the typing field
+    -- on the old face while the feed, the tabs and the chip had all moved. The
+    -- field is where the player is looking when they type; it does not get to
+    -- be the one surface that lags.
+    local face = ns.ChatFontFile()
+    if face then call(eb, "SetFont", face, View.MessageFontSize(nil), "") end
     -- THE TEXT ON --panel2. The caret is drawn in the text colour on this
     -- client (there is no separate cursor-colour verb), so one call answers
     -- both; the selection gets the accent at a wash that leaves the glyphs
@@ -2464,9 +2478,9 @@ function View.LayoutEditBox()
     -- and running it here means a build that creates its focus set lazily is
     -- caught the first time the box is laid out after the client made it.
     View.StripEditBoxDress(eb)
-    local UI = UIKit()
-    if UI and type(UI.FontFile) == "function" then
-        call(eb, "SetFont", UI.FontFile(), View.MessageFontSize(nil), "")
+    local face = ns.ChatFontFile()
+    if face then
+        call(eb, "SetFont", face, View.MessageFontSize(nil), "")
     end
     -- …and the chip, which owns the field's left edge, its insets and its ink.
     View.SyncEntryChip()
@@ -2927,9 +2941,9 @@ function View.LayoutTabs()
         local t = ensureTab(id)
         if t then
             call(t.label, "SetText", View.TabLabel(id))
-            local UI = UIKit()
-            if UI and type(UI.FontFile) == "function" then
-                call(t.label, "SetFont", UI.FontFile(), View.TabTextSize(), "")
+            local face = ns.ChatFontFile()
+            if face then
+                call(t.label, "SetFont", face, View.TabTextSize(), "")
             end
             local isActive = (id == View.activeId)
             local r, g, b = View.TabInk(id)
@@ -3085,6 +3099,15 @@ function View.EnsureCopyButton()
         return nil
     end
     if View.copyBtn then
+        -- THE FACE, RE-ASSERTED ON EVERY PASS and not only at creation. The
+        -- shipped build faced this label once, in the branch below, so it was
+        -- the ONE view-owned text surface a live face change could not reach —
+        -- an inconsistency nobody would have called a bug and everybody would
+        -- have seen. This branch is the one every later beat takes.
+        local face = ns.ChatFontFile()
+        if face and View.copyBtn._label then
+            call(View.copyBtn._label, "SetFont", face, 10, "")
+        end
         call(View.copyBtn, "ClearAllPoints")
         call(View.copyBtn, "SetPoint", "TOPRIGHT", View.chassis, "TOPRIGHT",
             -(CHASSIS_EDGE + 2), -(CHASSIS_EDGE + 2))
@@ -3102,9 +3125,9 @@ function View.EnsureCopyButton()
     call(btn, "SetSize", 16, 16)
     call(btn, "SetAlpha", 0.35)
     local label = call(btn, "CreateFontString", nil, "OVERLAY")
-    local UI = UIKit()
-    if UI and type(UI.FontFile) == "function" then
-        call(label, "SetFont", UI.FontFile(), 10, "")
+    local face = ns.ChatFontFile()
+    if face then
+        call(label, "SetFont", face, 10, "")
     end
     call(label, "SetPoint", "CENTER", btn, "CENTER", 0, 0)
     call(label, "SetText", "C")     -- ASCII by law
@@ -3114,6 +3137,9 @@ function View.EnsureCopyButton()
     btn:SetScript("OnEnter", function(self) call(self, "SetAlpha", 1) loud() end)
     btn:SetScript("OnLeave", function(self) call(self, "SetAlpha", 0.35) quiet() end)
     btn:SetScript("OnClick", function() View.OpenCopy() end)
+    -- PUBLISHED, so the re-face pass above has something to reach. A label held
+    -- only as an upvalue is a surface no later beat can restyle.
+    btn._label = label
     View.copyBtn = btn
     return View.EnsureCopyButton()
 end
@@ -3947,7 +3973,16 @@ function View.OnEnable()
     local UI = UIKit()
     if UI and not View.reskinHooked then
         View.reskinHooked = true
-        if UI.OnFontChanged then UI.OnFontChanged(function() if View.active then View.Layout() end end) end
+        -- CORE'S FONT BROADCAST -> OUR LOOK BEAT. This is the half that makes
+        -- "follow the suite font" a FOLLOW: with config.skin.fontFace nil,
+        -- every surface re-asks ns.ChatFontFile on this beat and lands on the
+        -- suite's new face without a reload. With a chat face CHOSEN, the same
+        -- beat runs and every surface re-asks and keeps ITS face — the suite
+        -- moving underneath us changes nothing in the box, which is the owner's
+        -- whole ask read from the other direction. ApplyLook, not Layout: the
+        -- look seam is the named route and it re-faces the feed explicitly
+        -- rather than relying on the layout's own re-font pass.
+        if UI.OnFontChanged then UI.OnFontChanged(function() if View.active then View.ApplyLook() end end) end
         if UI.OnThemeChanged then UI.OnThemeChanged(function() if View.active then View.LayoutTabs() end end) end
     end
 end

@@ -12,7 +12,9 @@
 --   UI.Token / UI.Color / UI.FLAT_BACKDROP
 --   UI.Skin / UI.FlatFrame / UI.MakeButton
 --   UI.fonts (header/body/muted/small/accent/danger/ceremonial/microLabel/numeral)
---   UI.FontFile / UI.GetFont / UI.GetFontScale
+--   UI.FontFile / UI.FontFileRaw / UI.GetFont / UI.GetFontScale
+--   UI.fontRegistry / UI.RegisterFont / UI.FontNames  (the face registry Chat
+--     RESOLVES its own chat-only face out of, read-only)
 --   UI.OnThemeChanged / UI.OnFontChanged
 -- Harness-only extras (double-underscored so nothing shippable can mistake
 -- them for API): UI.__SetThemeEpoch(n), UI.__FireThemeChanged(),
@@ -101,9 +103,43 @@ UI.fonts = {
     numeral = fontObject("numeral"),
 }
 
+----------------------------------------------------------------------
+-- THE FONT REGISTRY — modeled on Core's real one (theme.lua), because Chat now
+-- READS it (2026-08-12: the chat-only face resolves a NAME to a PATH out of
+-- UI.fontRegistry). The old stub answered ONE constant path for every question
+-- and a three-name list that did not match the registry — which is a KIND
+-- client: a name-to-path resolver cannot be wrong when every name resolves to
+-- the same file, and a picker cannot offer an unresolvable name when the list
+-- and the registry never meet. Both hazards are real, so both are modeled:
+--   * the names ARE the registry's keys (Core builds its picker the same way);
+--   * every face has its OWN path, so "the box is wearing the face I picked"
+--     is a claim with teeth;
+--   * "Fira Sans Condensed Medium" is Core's SHIPPED default and maps to the
+--     vendored file, exactly as the real registry does.
+-- One registered name deliberately has no counterpart in FontNames' sort order
+-- surprises: the list is sorted case-insensitively, as Core sorts it.
+----------------------------------------------------------------------
+
 local VENDORED_FACE = "Interface\\AddOns\\Daseeki-Core\\fonts\\FiraSansCondensed-Medium.ttf"
-function UI.FontFile() return VENDORED_FACE end
-function UI.FontFileRaw() return VENDORED_FACE end
+local FACE_FALLBACK = "Fonts\\FRIZQT__.TTF"
+
+UI.fontRegistry = {
+    ["Fira Sans Condensed Medium"] = VENDORED_FACE,
+    ["Friz Quadrata"] = FACE_FALLBACK,
+    ["Arial Narrow"]  = "Fonts\\ARIALN.TTF",
+    ["Morpheus"]      = "Fonts\\MORPHEUS.TTF",
+    ["Skurri"]        = "Fonts\\SKURRI.TTF",
+    ["2002"]          = "Fonts\\2002.TTF",
+    ["2002 Bold"]     = "Fonts\\2002B.TTF",
+}
+function UI.RegisterFont(name, path)
+    if type(name) ~= "string" or name == "" then return end
+    if type(path) ~= "string" or path == "" then return end
+    if UI.fontRegistry[name] == nil then UI.fontRegistry[name] = path end
+end
+
+function UI.FontFileRaw() return UI.fontRegistry[UI.GetFont()] or FACE_FALLBACK end
+function UI.FontFile() return UI.FontFileRaw() end
 function UI.IsFaceFallback() return false, nil end
 
 ----------------------------------------------------------------------
@@ -123,7 +159,13 @@ local themeOrder = { "Field Ledger", "Midnight", "Parchment" }
 local themeName  = themeOrder[1]
 
 function UI.GetFont() return fontChoice end
-function UI.FontNames() return { "Fira Sans Condensed Medium", "Friz Quadrata TT", "Arial Narrow" } end
+-- Core's own shape: the registry's keys, sorted case-insensitively.
+function UI.FontNames()
+    local names = {}
+    for name in pairs(UI.fontRegistry) do names[#names + 1] = name end
+    table.sort(names, function(a, b) return a:lower() < b:lower() end)
+    return names
+end
 function UI.SetFont(name)
     if type(name) ~= "string" or name == "" then return end
     fontChoice = name

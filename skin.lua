@@ -720,9 +720,11 @@ function Skin.ExtractCopyText(frame, maxLines)
 end
 
 ----------------------------------------------------------------------
--- Fonts. Face comes from Core's picked face (UI.FontFile — already guarded by
--- Core's render-proof probe); SIZE stays per-window in the client's own store
--- (the survey's ElvUI split: the Blizzard right-click size menu keeps working).
+-- Fonts. Face comes from ns.ChatFontFile — CHAT's own face if the player has
+-- picked one (2026-08-12), and Core's picked face when they have not (which is
+-- already guarded by Core's render-proof probe). SIZE stays per-window in the
+-- client's own store (the survey's ElvUI split: the Blizzard right-click size
+-- menu keeps working).
 ----------------------------------------------------------------------
 
 ----------------------------------------------------------------------
@@ -792,7 +794,12 @@ local function applyFrameFont(frame, id)
     end
     local _, name, fontSize = windowEligible(id)
     local size = Skin.MessageFontSize(fontSize)
-    pcall(frame.SetFont, frame, UI.FontFile(), size, "")
+    -- CHAT'S OWN FACE (2026-08-12), here too: this is the BOX-OFF renderer, and
+    -- a "Chat font" that only reached the drawn window would be a control that
+    -- silently does nothing for a player who turned the box off. ns.ChatFontFile
+    -- answers the suite face when no chat face is chosen, so the default posture
+    -- is byte-for-byte what it was.
+    pcall(frame.SetFont, frame, ns.ChatFontFile() or UI.FontFile(), size, "")
     -- THE ROW RHYTHM. SetSpacing is the ONE typographic lever a
     -- ScrollingMessageFrame offers, and the value is computed from the size in
     -- force (see Skin.MessageSpacing); the original is saved so a disable
@@ -1314,7 +1321,7 @@ local function styleTab(frame, rec)
     -- In the box the tab label is the mockup's own 12.5px on the suite face
     -- (the Core role only carries the face; the SIZE is the mockup contract's).
     if Skin.Unified() and type(text.SetFont) == "function" then
-        pcall(text.SetFont, text, UI.FontFile(), TAB_TEXT_SIZE, "")
+        pcall(text.SetFont, text, ns.ChatFontFile() or UI.FontFile(), TAB_TEXT_SIZE, "")
     end
     -- The client's own tab art comes down in the box (delta 1: it is the filled
     -- block, and the mockup's tab has no fill of its own).
