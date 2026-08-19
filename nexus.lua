@@ -45,6 +45,29 @@ Nexus.NS_KEY     = "chatcfg"
 Nexus.registered = false
 
 ----------------------------------------------------------------------
+-- RELAY TRACE (2026-08-18). The chatcfg stall — cross-account config that
+-- stopped arriving — cost a three-account SavedVariables diff to see, because
+-- neither side of the bridge recorded what it had last done. The defect was in
+-- Nexus's transport (its receive-side seq gate refused every frame its own
+-- priority queue had reordered, which is every backfill answer), but the
+-- diagnosis was slow because OUR half was equally silent: nothing said when we
+-- last published, and nothing said when we last heard from a given account.
+--
+-- These are the Chat-side half of a one-paste verdict (`/dchat debug nexus`):
+--   publishes / lastPublishAt / lastPublishRev   did WE put anything on the wire
+--   remoteBeats / lastRemote[owner]              did anything ARRIVE, and from whom
+-- Run it on both accounts and diff: an owner whose `at` differs between the two
+-- pastes, with no recent beat on the stale side, is a transport stall; the same
+-- `at` on both sides with a drifted UI is a reconciler question instead.
+----------------------------------------------------------------------
+
+Nexus.publishes      = 0     -- MarkDirty calls that reached Daseeki.Sync
+Nexus.lastPublishAt  = nil   -- server time of the last one
+Nexus.lastPublishRev = nil   -- the rev it carried
+Nexus.remoteBeats    = 0     -- onRemote deliveries (live frames + login replay)
+Nexus.lastRemote     = {}    -- [ownerKey] = { at = <server time>, n = <count> }
+
+----------------------------------------------------------------------
 -- PRESENCE PROBE. `G` is injectable for the harness; every step is a type
 -- guard and failure comes with a human reason.
 ----------------------------------------------------------------------
@@ -96,6 +119,15 @@ end
 -- (ApplyInbound put it there before calling us). Pump the beat; the
 -- reconciler decides whether the new winner means drift to correct.
 function Nexus.OnRemote(ownerKey, _data)
+    -- Trace first, so a beat is recorded even if a listener throws.
+    local C = ns.Config
+    local at = (C and C.Now and C.Now()) or 0
+    Nexus.remoteBeats = (Nexus.remoteBeats or 0) + 1
+    if type(ownerKey) == "string" then
+        local rec = Nexus.lastRemote[ownerKey]
+        if rec then rec.at, rec.n = at, (rec.n or 0) + 1
+        else Nexus.lastRemote[ownerKey] = { at = at, n = 1 } end
+    end
     if ns.Fire then ns:Fire("CHATCFG_REMOTE", ownerKey) end
 end
 
@@ -171,6 +203,12 @@ function Nexus.MarkDirty(G)
     local S = Nexus.Sync(G)
     if not S then return false end
     local ok = pcall(S.MarkDirty, Nexus.NS_KEY)
+    if ok then
+        local C = ns.Config
+        Nexus.publishes      = (Nexus.publishes or 0) + 1
+        Nexus.lastPublishAt  = (C and C.Now and C.Now()) or 0
+        Nexus.lastPublishRev = Nexus.Rev()
+    end
     return ok and true or false
 end
 
@@ -210,10 +248,45 @@ ns.RegisterDebugCommand("nexus", "chatcfg bridge: presence, owner, candidates", 
     else
         ns:Print("  publishing: nothing (config never adopted/edited)")
     end
+
+    ------------------------------------------------------------------
+    -- THE RELAY VERDICT. Paste this block from BOTH accounts and diff it: an
+    -- owner whose `at` differs across the two pastes, with no recent beat on the
+    -- stale side, is a TRANSPORT stall (take it to /dsn debug mesh, ns-lastrecv
+    -- and ns-refusals). Identical `at` on both sides with a drifted UI is a
+    -- RECONCILER question instead (/dchat debug reconcile).
+    ------------------------------------------------------------------
+    local nowT = (ns.Config and ns.Config.Now and ns.Config.Now()) or 0
+    local function ago(at)
+        if not at or at <= 0 then return "never" end
+        return ("%ds ago"):format(nowT - at)
+    end
+    ns:Print(("  outbound: %d publish(es), last rev %s at %s (%s)"):format(
+        Nexus.publishes or 0, tostring(Nexus.lastPublishRev or "-"),
+        tostring(Nexus.lastPublishAt or 0), ago(Nexus.lastPublishAt)))
+    ns:Print(("  inbound: %d remote beat(s) across %d owner(s)"):format(
+        Nexus.remoteBeats or 0, (function()
+            local n = 0
+            for _ in pairs(Nexus.lastRemote) do n = n + 1 end
+            return n
+        end)()))
+
     local cands = Nexus.RemoteCandidates()
     ns:Print(("  %d peer candidate(s)"):format(#cands))
     for _, cand in ipairs(cands) do
-        ns:Print(("    %s at %d"):format(tostring(cand.owner), cand.at))
+        local beat = Nexus.lastRemote[cand.owner]
+        ns:Print(("    %s at %d | last beat %s (%d)"):format(
+            tostring(cand.owner), cand.at, ago(beat and beat.at), (beat and beat.n) or 0))
+    end
+    -- An owner we have HEARD FROM but hold no usable candidate for is the loudest
+    -- possible symptom (a payload arrived and was unreadable), so name it.
+    local seen = {}
+    for _, cand in ipairs(cands) do seen[cand.owner] = true end
+    for owner, rec in pairs(Nexus.lastRemote) do
+        if not seen[owner] and owner ~= Nexus.LocalOwner() then
+            ns:Print(("    %s BEAT WITHOUT A CANDIDATE — %d beat(s), last %s"):format(
+                tostring(owner), rec.n or 0, ago(rec.at)))
+        end
     end
 end)
 
@@ -326,8 +399,16 @@ local function testContract(fails)
 
     -- Edits publish through MarkDirty (Config.Bump -> Nexus.MarkDirty).
     local dirtyBefore = stub.markDirtyCalls
+    local pubBefore = Nexus.publishes
     C.Bump()
     ck(stub.markDirtyCalls == dirtyBefore + 1, "an edit queues exactly one mesh publish")
+
+    -- RELAY TRACE: the publish is RECORDED. Without this the Chat half of a
+    -- stall verdict is "we think we sent something", which is what made the
+    -- 2026-08-18 chatcfg stall take a three-account store diff to place.
+    ck(Nexus.publishes == pubBefore + 1, "the publish was not counted")
+    ck((Nexus.lastPublishAt or 0) > 0, "the publish carried no timestamp")
+    ck(Nexus.lastPublishRev == C.Rev(), "the recorded publish rev is not the config's rev")
 
     -- LWW through the real Config path, remote candidates from the stub store.
     c.rev, c.at = 3, 8000
@@ -346,12 +427,28 @@ local function testContract(fails)
     -- RECEIVE NEVER ADOPTS, through the registered onRemote itself.
     local pumped = nil
     local listener = function(ownerKey) pumped = ownerKey end
+    local beatsBefore = Nexus.remoteBeats
     ns:On("CHATCFG_REMOTE", listener)
     spec.onRemote("ACC-B", stub.remote["ACC-B"])
     ns:Off("CHATCFG_REMOTE", listener)
     ck(pumped == "ACC-B", "onRemote pumps the bus beat")
     ck(c.windows[1].name == "Mine" and C.Rev() == 3,
         "onRemote wrote NOTHING into the local config")
+
+    -- RELAY TRACE: the beat is RECORDED per owner. "Did anything arrive from
+    -- that account, and when" is the question a stall is placed by.
+    ck(Nexus.remoteBeats == beatsBefore + 1, "the remote beat was not counted")
+    ck(type(Nexus.lastRemote["ACC-B"]) == "table" and Nexus.lastRemote["ACC-B"].n >= 1,
+        "no per-owner beat row was recorded")
+    ck((Nexus.lastRemote["ACC-B"].at or 0) > 0, "the beat row carried no timestamp")
+    -- A second beat from the same owner updates the row rather than adding one.
+    spec.onRemote("ACC-B", stub.remote["ACC-B"])
+    ck(Nexus.lastRemote["ACC-B"].n == 2, "repeat beats from one owner were not accumulated")
+    -- ...and a malformed ownerKey is traced without creating a junk row.
+    local beatsBeforeBad = Nexus.remoteBeats
+    spec.onRemote(nil, nil)
+    ck(Nexus.remoteBeats == beatsBeforeBad + 1, "a malformed beat was not counted")
+    ck(Nexus.lastRemote[nil] == nil, "a malformed ownerKey created a row")
 
     -- ADOPT-EFFECTIVE-BEFORE-EDIT: the edit path adopts the winner, keeps the
     -- local rev counter, and the following bump publishes winner+edit.
