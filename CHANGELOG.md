@@ -8,6 +8,26 @@ character — including a brand-new one — reconciles to automatically at login
 
 This entry accumulates until 1.0.0 ships.
 
+### Your chat setup travels between accounts again
+
+- **The shared configuration was not crossing between accounts, and now it
+  does.** Chat hands your setup to Daseeki Nexus and Nexus carries it; the
+  carrying was broken, not the handing. Nexus would deliver a copy live if the
+  other account happened to be online and listening at that exact moment, but the
+  catch-up pass that exists for every other moment was being discarded on
+  arrival. So each account kept publishing its own setup perfectly and kept
+  showing a months-old copy of everyone else's. **This is fixed in Daseeki Nexus,
+  and you need that update for this to work** — Chat's side was correct
+  throughout.
+- **`/dchat debug nexus` now shows the traffic, not just the state.** It reports
+  how many times this account has published and when, how many updates have
+  arrived and from which accounts, and — for each peer account — when its config
+  was stamped alongside when we last heard from it. Run it on two accounts and
+  compare: a peer whose stamp differs across the two with nothing recent arriving
+  is a delivery problem, and one with matching stamps but a wrong-looking window
+  is a reconcile problem. It also calls out the strange case explicitly — an
+  account we keep hearing from but hold no usable configuration for.
+
 ### Chat's font is Chat's own now
 
 - **Changing the font in Chat changes Chat.** It used to change the whole
